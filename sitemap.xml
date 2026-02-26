@@ -2,78 +2,78 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://spooky.dev/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/architecture/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/changelog/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/references/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/roadmap/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/api/overview/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/architecture/components/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/architecture/overview/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/configuration/reference/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/configuration/tls/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/deployment/production/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/getting-started/installation/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/getting-started/overview/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/protocols/http3/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/protocols/quic/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/troubleshooting/common-issues/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/tutorials/quickstart/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/user-guide/basics/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
     <url>
          <loc>https://spooky.dev/user-guide/load-balancing/</loc>
-         <lastmod>2026-02-24</lastmod>
+         <lastmod>2026-02-26</lastmod>
     </url>
 </urlset>

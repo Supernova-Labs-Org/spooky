@@ -1,69 +1,79 @@
-/* Typography and spacing (compact layout) */
-.md-typeset h1,
-.md-typeset h2,
-.md-typeset h3 {
+/* Reduce excessive vertical spacing in article content. */
+article .typography h2 {
+  margin-top: 1.5rem;
+  margin-bottom: 0.5rem;
+}
+
+article .typography h3 {
+  margin-top: 1.1rem;
+  margin-bottom: 0.4rem;
+}
+
+article .typography p,
+article .typography ul,
+article .typography ol,
+article .typography pre,
+article .typography table,
+article .typography blockquote {
+  margin-top: 0.6rem;
+}
+
+article .typography li + li {
+  margin-top: 0.2rem;
+}
+
+/* Compact code blocks with shadcn-like styling. */
+article .typography pre {
+  position: relative;
+  margin-top: 0.6rem;
+  padding: 0.75rem 3.5rem 0.75rem 0.9rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background-color: var(--color-code);
+  color: var(--color-code-foreground);
+  font-size: 0.6em;
+  line-height: 1.45;
+  overflow: auto;
+}
+
+article .typography pre code {
+  background: transparent;
+  padding: 0;
+}
+
+article .typography .code-copy-button {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  height: 1.55rem;
+  min-width: 3rem;
+  padding: 0 0.55rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background-color: var(--color-secondary);
+  color: var(--color-secondary-foreground);
+  font-size: 0.72rem;
   font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
 }
 
-.md-typeset h1 {
-  margin: 0 0 0.85rem;
+article .typography .code-copy-button:hover {
+  background-color: var(--color-accent);
+  color: var(--color-accent-foreground);
 }
 
-.md-typeset h2 {
-  margin: 1.2rem 0 0.6rem;
+article .typography .code-copy-button:focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
 }
 
-.md-typeset h3 {
-  margin: 1rem 0 0.5rem;
+article .typography pre.is-copied .code-copy-button {
+  background-color: var(--color-primary);
+  color: var(--color-primary-foreground);
 }
 
-.md-typeset p,
-.md-typeset ul,
-.md-typeset ol,
-.md-typeset dl,
-.md-typeset table:not([class]),
-.md-typeset blockquote {
-  margin: 0 0 0.75rem;
-}
-
-.md-typeset li {
-  margin: 0.15rem 0;
-}
-
-/* Code blocks */
-.md-typeset pre {
-  margin: 0.8rem 0 1rem;
-  overflow-x: auto;
-  max-width: 100%;
-}
-
-.md-typeset pre > code {
-  font-size: 0.85em;
-  line-height: 1.35;
-  white-space: pre;
-}
-
-/* Ensure headings after code blocks never visually overlap */
-.md-typeset pre + h1,
-.md-typeset pre + h2,
-.md-typeset pre + h3,
-.md-typeset pre + h4,
-.md-typeset pre + h5,
-.md-typeset pre + h6 {
-  clear: both;
-}
-
-/* Inline code */
-.md-typeset code {
-  font-size: 0.85em;
-}
-
-/* Table improvements */
-.md-typeset table:not([class]) {
-  font-size: 0.85em;
-}
-
-/* Navigation width */
-.md-sidebar--primary {
-  width: 15rem;
+/* Hide default mkdocs-shadcn footer attribution. */
+footer .text-muted-foreground.w-full.text-center.text-xs.leading-loose.sm\:text-sm {
+  display: none;
 }

@@ -1014,7 +1014,7 @@ impl QUICListener {
     ) {
         let entries = {
             let mut all_entries = Vec::new();
-            for (upstream_name, upstream_pool) in upstream_pools.iter() {
+            for (_upstream_name, upstream_pool) in upstream_pools.iter() {
                 let pool = match upstream_pool.lock() {
                     Ok(pool) => pool,
                     Err(_) => continue,
@@ -1024,7 +1024,6 @@ impl QUICListener {
                         (pool.pool.address(index), pool.pool.health_check(index))
                     {
                         all_entries.push((
-                            upstream_name.clone(),
                             upstream_pool.clone(),
                             index,
                             address.to_string(),
@@ -1044,16 +1043,16 @@ impl QUICListener {
             }
         };
 
-        for (_upstream_name, upstream_pool, index, address, health) in entries {
+        for (upstream_pool, index, address, health) in entries {
             let h2_pool = h2_pool.clone();
             let handle = handle.clone();
             handle.spawn(async move {
                 let interval = Duration::from_millis(health.interval.max(1));
                 let timeout = Duration::from_millis(health.timeout_ms.max(1));
-                let path = if health.path.is_empty() {
-                    "/".to_string()
+                let path: &str = if health.path.is_empty() {
+                    "/"
                 } else {
-                    health.path.clone()
+                    &health.path
                 };
 
                 loop {

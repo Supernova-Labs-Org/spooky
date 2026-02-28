@@ -48,16 +48,16 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
-fn request_hash_key(req: &RequestEnvelope) -> String {
+fn request_hash_key(req: &RequestEnvelope) -> &str {
     if let Some(authority) = &req.authority {
-        return authority.clone();
+        return authority;
     }
 
     if !req.path.is_empty() {
-        return req.path.clone();
+        return &req.path;
     }
 
-    req.method.clone()
+    &req.method
 }
 
 fn find_upstream_for_request<'a>(

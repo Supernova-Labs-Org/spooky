@@ -7,7 +7,7 @@ use std::{
 
 use core::net::SocketAddr;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use log::{debug, error, info};
 use quiche::Config;
@@ -239,7 +239,7 @@ impl QUICListener {
         peer: SocketAddr,
         local_addr: SocketAddr,
         packets: &[u8],
-    ) -> Option<(QuicConnection, Vec<u8>)> {
+    ) -> Option<(QuicConnection, Arc<[u8]>)> {
         let mut buf = packets.to_vec();
         let header = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
@@ -249,7 +249,7 @@ impl QUICListener {
             }
         };
 
-        let dcid_bytes = header.dcid.as_ref().to_vec();
+        let dcid_bytes: Arc<[u8]> = Arc::from(header.dcid.as_ref());
         debug!(
             "Packet DCID (len={}): {:02x?}, type: {:?}, active connections: {}",
             dcid_bytes.len(),
@@ -323,7 +323,7 @@ impl QUICListener {
             "Creating new connection with server SCID: {:02x?}",
             &scid_bytes
         );
-        Some((connection, scid_bytes.to_vec()))
+        Some((connection, Arc::from(&scid_bytes[..])))
     }
 
     pub fn poll(&mut self) {
@@ -355,10 +355,11 @@ impl QUICListener {
             }
         };
 
-        let mut recv_data = self.recv_buf[..len].to_vec();
+        // let mut recv_data = self.recv_buf[..len].to_vec();
+        let mut recv_data = BytesMut::from(&self.recv_buf[..len]);
 
         let header =
-            match quiche::Header::from_slice(&mut recv_data.clone(), quiche::MAX_CONN_ID_LEN) {
+            match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
                 Ok(hdr) => hdr,
                 Err(_) => {
                     error!("Wrong QUIC HEADER");
@@ -385,7 +386,7 @@ impl QUICListener {
         let h2_pool = self.h2_pool.clone();
 
         // First, try to find existing connection by DCID
-        let lookup_key = header.dcid.as_ref().to_vec();
+        let lookup_key: Arc<[u8]> = Arc::from(header.dcid.as_ref());
         debug!(
             "Looking up connection with DCID: {:?}",
             hex::encode(&lookup_key)

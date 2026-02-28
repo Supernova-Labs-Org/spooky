@@ -30,7 +30,7 @@ pub struct QUICListener {
     pub recv_buf: [u8; 65535], // array initialization, let arr [<data type>, <no of elements>] = [<value of all>, <no of elements>]
     pub send_buf: [u8; 65535],
 
-    pub connections: HashMap<Vec<u8>, QuicConnection>, // KEY: SCID(server connection id)
+    pub connections: HashMap<Arc<[u8]>, QuicConnection>
 }
 
 pub struct QuicConnection {

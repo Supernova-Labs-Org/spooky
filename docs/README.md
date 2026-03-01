@@ -41,50 +41,20 @@ Technical documentation for the Spooky HTTP/3 to HTTP/2 reverse proxy and load b
 
 ## Documentation Structure
 
-```
-docs/
-├── README.md                      # This file
-├── architecture.md                # Main architecture document
-├── roadmap.md                     # Project roadmap
-│
-├── getting-started/
-│   ├── overview.md                # Project overview
-│   └── installation.md            # Installation guide
-│
-├── configuration/
-│   ├── reference.md               # Configuration reference
-│   └── tls.md                     # TLS setup
-│
-├── user-guide/
-│   ├── basics.md                  # Basic usage
-│   └── load-balancing.md          # Load balancing guide
-│
-├── architecture/
-│   ├── overview.md                # Architecture overview
-│   └── components.md              # Component details
-│
-├── deployment/
-│   └── production.md              # Production deployment
-│
-├── troubleshooting/
-│   └── common-issues.md           # Troubleshooting guide
-│
-├── development/
-│   └── contributing.md            # Contributing guide
-│
-├── tutorials/
-│   └── quickstart.md              # Quick start tutorial
-│
-├── protocols/
-│   ├── http3.md                   # HTTP/3 protocol
-│   └── quic.md                    # QUIC protocol
-│
-├── api/
-│   └── overview.md                # API documentation
-│
-└── internal/                      # Internal documentation
-    └── spooky.md                  # Internal architecture notes
-```
+- `README.md`: Documentation index (this page)
+- `architecture.md`: Main architecture document
+- `roadmap.md`: Project roadmap
+- `getting-started/`: Overview and installation guides
+- `configuration/`: Configuration reference and TLS setup
+- `user-guide/`: Basic usage and load balancing guide
+- `architecture/`: High-level design and component details
+- `deployment/`: Production deployment guidance
+- `troubleshooting/`: Common issues and fixes
+- `development/`: Development and contribution guidance
+- `tutorials/`: Quickstart walkthroughs
+- `protocols/`: HTTP/3 and QUIC protocol notes
+- `api/`: API and observability overview
+- `internal/`: Internal architecture notes
 
 ## Quick References
 

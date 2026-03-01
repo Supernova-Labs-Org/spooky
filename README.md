@@ -111,36 +111,23 @@ log:
 
 Spooky uses a modular architecture with clear separation of concerns:
 
-```
-┌─────────────┐
-│ HTTP/3      │
-│ Client      │
-└──────┬──────┘
-       │ QUIC/TLS
-       ▼
-┌──────────────────────┐
-│ Spooky Edge          │
-│ ┌──────────────────┐ │
-│ │ QUIC Listener    │ │  - Connection management
-│ │ (quiche)         │ │  - Stream multiplexing
-│ └─────────┬────────┘ │  - Protocol bridging
-│           │          │
-│ ┌─────────▼────────┐ │
-│ │ Router           │ │  - Path/host matching
-│ │                  │ │  - Upstream selection
-│ └─────────┬────────┘ │  - Load balancing
-│           │          │
-│ ┌─────────▼────────┐ │
-│ │ HTTP/2 Pool      │ │  - Connection pooling
-│ │                  │ │  - Request forwarding
-│ └─────────┬────────┘ │  - Health checking
-└───────────┼──────────┘
-            │ HTTP/2
-            ▼
-    ┌───────────────┐
-    │ Backend       │
-    │ Servers       │
-    └───────────────┘
+```mermaid
+flowchart LR
+    client["HTTP/3<br/>Client"] -->|QUIC/TLS| quic
+
+    subgraph edge["Spooky Edge"]
+        direction TB
+        quic["QUIC Listener<br/>(quiche)"] --> router["Router"] --> pool["HTTP/2 Pool"]
+    end
+
+    pool -->|HTTP/2| backend["Backend<br/>Servers"]
+
+    quic -.- quic_note["Connection management<br/>Stream multiplexing<br/>Protocol bridging"]
+    router -.- router_note["Path/host matching<br/>Upstream selection<br/>Load balancing"]
+    pool -.- pool_note["Connection pooling<br/>Request forwarding<br/>Health checking"]
+
+    classDef note fill:#F8FAFC,stroke:#94A3B8,stroke-width:1px,stroke-dasharray: 5 3,color:#334155;
+    class quic_note,router_note,pool_note note;
 ```
 
 ### Components

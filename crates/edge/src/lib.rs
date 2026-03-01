@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::UdpSocket,
     sync::{
         Arc, Mutex,
@@ -30,7 +30,8 @@ pub struct QUICListener {
     pub recv_buf: [u8; 65535], // array initialization, let arr [<data type>, <no of elements>] = [<value of all>, <no of elements>]
     pub send_buf: [u8; 65535],
 
-    pub connections: HashMap<Arc<[u8]>, QuicConnection>
+    pub connections: HashMap<Vec<u8>, QuicConnection>, // KEY: SCID(server connection id)
+    pub cid_routes: HashMap<Vec<u8>, Vec<u8>>,         // KEY: alias SCID, VALUE: primary SCID
 }
 
 pub struct QuicConnection {
@@ -41,6 +42,10 @@ pub struct QuicConnection {
 
     pub peer_address: SocketAddr,
     pub last_activity: Instant,
+    pub primary_scid: Vec<u8>,
+    pub routing_scids: HashSet<Vec<u8>>,
+    pub packets_since_rotation: u64,
+    pub last_scid_rotation: Instant,
 }
 
 pub struct RequestEnvelope {
@@ -59,6 +64,7 @@ pub struct Metrics {
     pub requests_failure: AtomicU64,
     pub backend_timeouts: AtomicU64,
     pub backend_errors: AtomicU64,
+    pub scid_rotations: AtomicU64,
 }
 
 impl Metrics {
@@ -80,5 +86,9 @@ impl Metrics {
 
     pub fn inc_backend_error(&self) {
         self.backend_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_scid_rotation(&self) {
+        self.scid_rotations.fetch_add(1, Ordering::Relaxed);
     }
 }

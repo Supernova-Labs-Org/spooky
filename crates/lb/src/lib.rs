@@ -105,11 +105,7 @@ pub struct UpstreamPool {
 
 impl UpstreamPool {
     pub fn from_upstream(upstream: &spooky_config::config::Upstream) -> Result<Self, String> {
-        let backends = upstream
-            .backends
-            .iter()
-            .map(BackendState::new)
-            .collect();
+        let backends = upstream.backends.iter().map(BackendState::new).collect();
 
         let load_balancer = LoadBalancing::from_config(&upstream.load_balancing.lb_type)?;
 

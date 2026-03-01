@@ -66,6 +66,6 @@ pub fn get_default_log() -> Log {
         file: LogFile {
             enabled: false,
             path: String::from(""),
-        }
+        },
     }
 }

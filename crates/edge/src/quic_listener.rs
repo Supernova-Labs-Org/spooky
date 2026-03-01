@@ -274,12 +274,12 @@ impl QUICListener {
         // This handles cases where client uses longer DCIDs based on server's SCID
         if header.ty == quiche::Type::Short && dcid_bytes.len() > 8 {
             for stored_cid in self.connections.keys() {
-                if dcid_bytes.starts_with(stored_cid) {
+                if dcid_bytes.starts_with(stored_cid.as_ref()) {
                     debug!(
                         "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
                         stored_cid, &dcid_bytes
                     );
-                    let stored_cid_copy = stored_cid.clone();
+                    let stored_cid_copy: Arc<[u8]> = Arc::clone(stored_cid);
                     if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
                         connection.peer_address = peer;
                         return Some((connection, stored_cid_copy));
@@ -462,14 +462,13 @@ impl QUICListener {
         // let mut recv_data = self.recv_buf[..len].to_vec();
         let mut recv_data = BytesMut::from(&self.recv_buf[..len]);
 
-        let header =
-            match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
-                Ok(hdr) => hdr,
-                Err(_) => {
-                    error!("Wrong QUIC HEADER");
-                    return;
-                }
-            };
+        let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
+            Ok(hdr) => hdr,
+            Err(_) => {
+                error!("Wrong QUIC HEADER");
+                return;
+            }
+        };
 
         if header.ty == quiche::Type::VersionNegotiation {
             let len =
@@ -500,7 +499,8 @@ impl QUICListener {
                 conn.peer_address = peer;
                 debug!("Found existing connection for {}", peer);
                 (conn, lookup_key)
-            } else if let Some(primary) = self.cid_routes.get(&lookup_key).cloned() {
+            } else if let Some(primary_vec) = self.cid_routes.get(lookup_key.as_ref()).cloned() {
+                let primary: Arc<[u8]> = Arc::from(primary_vec.as_slice());
                 if let Some(mut conn) = self.connections.remove(&primary) {
                     conn.peer_address = peer;
                     debug!(
@@ -511,7 +511,7 @@ impl QUICListener {
                     (conn, primary)
                 } else {
                     // Stale alias entry.
-                    self.cid_routes.remove(&lookup_key);
+                    self.cid_routes.remove(lookup_key.as_ref());
                     match self.take_or_create_connection(peer, local_addr, &recv_data) {
                         Some(conn) => {
                             debug!("Created new connection for {}", peer);
@@ -551,9 +551,9 @@ impl QUICListener {
                     } else {
                         // This shouldn't happen, but fallback to creating new connection
                         match self.take_or_create_connection(peer, local_addr, &recv_data) {
-                            Some(conn) => {
+                            Some(conn_pair) => {
                                 debug!("Created new connection for {}", peer);
-                                conn
+                                conn_pair
                             }
                             None => {
                                 debug!(
@@ -580,9 +580,9 @@ impl QUICListener {
 
                     // No existing connection found, try to create new one
                     match self.take_or_create_connection(peer, local_addr, &recv_data) {
-                        Some(conn) => {
+                        Some(conn_pair) => {
                             debug!("Created new connection for {}", peer);
-                            conn
+                            conn_pair
                         }
                         None => {
                             debug!(
@@ -646,7 +646,8 @@ impl QUICListener {
         Self::handle_timeout(&socket, &mut send_buf, &mut connection);
 
         if !connection.quic.is_closed() {
-            let new_primary = self.sync_connection_routes(&mut connection);
+            let new_primary_vec = self.sync_connection_routes(&mut connection);
+            let new_primary: Arc<[u8]> = Arc::from(new_primary_vec.as_slice());
             debug!(
                 "Storing connection with key: {:02x?} (previous: {:02x?})",
                 &new_primary, &current_primary
@@ -871,7 +872,7 @@ impl QUICListener {
         let (backend_index, lb_type) = {
             let mut pool = upstream_pool.lock().expect("upstream pool lock");
             let lb_type = pool.lb_name();
-            let backend_index = pool.pick(&key);
+            let backend_index = pool.pick(key);
             (backend_index, lb_type)
         };
         let backend_index = match backend_index {

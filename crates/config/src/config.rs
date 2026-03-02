@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::default::{
     get_default_address, get_default_cooldown_ms, get_default_failure_threshold,
     get_default_health_timeout, get_default_interval, get_default_load_balancing, get_default_log,
-    get_default_log_level, get_default_path, get_default_port, get_default_protocol,
-    get_default_success_threshold, get_default_version, get_default_weight, get_default_log_file_path
+    get_default_log_file_path, get_default_log_level, get_default_path, get_default_port,
+    get_default_protocol, get_default_success_threshold, get_default_version, get_default_weight,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -119,7 +119,7 @@ pub struct Log {
     pub level: String, // "info, warn, error"
 
     #[serde(default)]
-    pub file: LogFile
+    pub file: LogFile,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -127,5 +127,5 @@ pub struct LogFile {
     pub enabled: bool,
 
     #[serde(default = "get_default_log_file_path")]
-    pub path: String
+    pub path: String,
 }

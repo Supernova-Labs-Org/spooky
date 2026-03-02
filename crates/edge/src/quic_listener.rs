@@ -7,7 +7,7 @@ use std::{
 
 use core::net::SocketAddr;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http_body_util::{BodyExt, Full};
 use log::{debug, error, info};
 use quiche::Config;
@@ -48,16 +48,16 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
-fn request_hash_key(req: &RequestEnvelope) -> String {
+fn request_hash_key(req: &RequestEnvelope) -> &str {
     if let Some(authority) = &req.authority {
-        return authority.clone();
+        return authority;
     }
 
     if !req.path.is_empty() {
-        return req.path.clone();
+        return &req.path;
     }
 
-    req.method.clone()
+    &req.method
 }
 
 fn find_upstream_for_request<'a>(
@@ -244,7 +244,7 @@ impl QUICListener {
         peer: SocketAddr,
         local_addr: SocketAddr,
         packets: &[u8],
-    ) -> Option<(QuicConnection, Vec<u8>)> {
+    ) -> Option<(QuicConnection, Arc<[u8]>)> {
         let mut buf = packets.to_vec();
         let header = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
@@ -254,7 +254,7 @@ impl QUICListener {
             }
         };
 
-        let dcid_bytes = header.dcid.as_ref().to_vec();
+        let dcid_bytes: Arc<[u8]> = Arc::from(header.dcid.as_ref());
         debug!(
             "Packet DCID (len={}): {:02x?}, type: {:?}, active connections: {}",
             dcid_bytes.len(),
@@ -274,12 +274,12 @@ impl QUICListener {
         // This handles cases where client uses longer DCIDs based on server's SCID
         if header.ty == quiche::Type::Short && dcid_bytes.len() > 8 {
             for stored_cid in self.connections.keys() {
-                if dcid_bytes.starts_with(stored_cid) {
+                if dcid_bytes.starts_with(stored_cid.as_ref()) {
                     debug!(
                         "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
                         stored_cid, &dcid_bytes
                     );
-                    let stored_cid_copy = stored_cid.clone();
+                    let stored_cid_copy: Arc<[u8]> = Arc::clone(stored_cid);
                     if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
                         connection.peer_address = peer;
                         return Some((connection, stored_cid_copy));
@@ -332,7 +332,7 @@ impl QUICListener {
             "Creating new connection with server SCID: {:02x?}",
             &scid_bytes
         );
-        Some((connection, scid_bytes.to_vec()))
+        Some((connection, Arc::from(&scid_bytes[..])))
     }
 
     fn random_reset_token() -> u128 {
@@ -459,16 +459,16 @@ impl QUICListener {
             }
         };
 
-        let mut recv_data = self.recv_buf[..len].to_vec();
+        // let mut recv_data = self.recv_buf[..len].to_vec();
+        let mut recv_data = BytesMut::from(&self.recv_buf[..len]);
 
-        let header =
-            match quiche::Header::from_slice(&mut recv_data.clone(), quiche::MAX_CONN_ID_LEN) {
-                Ok(hdr) => hdr,
-                Err(_) => {
-                    error!("Wrong QUIC HEADER");
-                    return;
-                }
-            };
+        let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
+            Ok(hdr) => hdr,
+            Err(_) => {
+                error!("Wrong QUIC HEADER");
+                return;
+            }
+        };
 
         if header.ty == quiche::Type::VersionNegotiation {
             let len =
@@ -489,7 +489,7 @@ impl QUICListener {
         let h2_pool = self.h2_pool.clone();
 
         // First, try to find existing connection by DCID
-        let lookup_key = header.dcid.as_ref().to_vec();
+        let lookup_key: Arc<[u8]> = Arc::from(header.dcid.as_ref());
         debug!(
             "Looking up connection with DCID: {:?}",
             hex::encode(&lookup_key)
@@ -499,7 +499,8 @@ impl QUICListener {
                 conn.peer_address = peer;
                 debug!("Found existing connection for {}", peer);
                 (conn, lookup_key)
-            } else if let Some(primary) = self.cid_routes.get(&lookup_key).cloned() {
+            } else if let Some(primary_vec) = self.cid_routes.get(lookup_key.as_ref()).cloned() {
+                let primary: Arc<[u8]> = Arc::from(primary_vec.as_slice());
                 if let Some(mut conn) = self.connections.remove(&primary) {
                     conn.peer_address = peer;
                     debug!(
@@ -510,7 +511,7 @@ impl QUICListener {
                     (conn, primary)
                 } else {
                     // Stale alias entry.
-                    self.cid_routes.remove(&lookup_key);
+                    self.cid_routes.remove(lookup_key.as_ref());
                     match self.take_or_create_connection(peer, local_addr, &recv_data) {
                         Some(conn) => {
                             debug!("Created new connection for {}", peer);
@@ -550,9 +551,9 @@ impl QUICListener {
                     } else {
                         // This shouldn't happen, but fallback to creating new connection
                         match self.take_or_create_connection(peer, local_addr, &recv_data) {
-                            Some(conn) => {
+                            Some(conn_pair) => {
                                 debug!("Created new connection for {}", peer);
-                                conn
+                                conn_pair
                             }
                             None => {
                                 debug!(
@@ -579,9 +580,9 @@ impl QUICListener {
 
                     // No existing connection found, try to create new one
                     match self.take_or_create_connection(peer, local_addr, &recv_data) {
-                        Some(conn) => {
+                        Some(conn_pair) => {
                             debug!("Created new connection for {}", peer);
-                            conn
+                            conn_pair
                         }
                         None => {
                             debug!(
@@ -645,7 +646,8 @@ impl QUICListener {
         Self::handle_timeout(&socket, &mut send_buf, &mut connection);
 
         if !connection.quic.is_closed() {
-            let new_primary = self.sync_connection_routes(&mut connection);
+            let new_primary_vec = self.sync_connection_routes(&mut connection);
+            let new_primary: Arc<[u8]> = Arc::from(new_primary_vec.as_slice());
             debug!(
                 "Storing connection with key: {:02x?} (previous: {:02x?})",
                 &new_primary, &current_primary
@@ -870,7 +872,7 @@ impl QUICListener {
         let (backend_index, lb_type) = {
             let mut pool = upstream_pool.lock().expect("upstream pool lock");
             let lb_type = pool.lb_name();
-            let backend_index = pool.pick(&key);
+            let backend_index = pool.pick(key);
             (backend_index, lb_type)
         };
         let backend_index = match backend_index {
@@ -1157,7 +1159,7 @@ impl QUICListener {
     ) {
         let entries = {
             let mut all_entries = Vec::new();
-            for (upstream_name, upstream_pool) in upstream_pools.iter() {
+            for (_upstream_name, upstream_pool) in upstream_pools.iter() {
                 let pool = match upstream_pool.lock() {
                     Ok(pool) => pool,
                     Err(_) => continue,
@@ -1167,7 +1169,6 @@ impl QUICListener {
                         (pool.pool.address(index), pool.pool.health_check(index))
                     {
                         all_entries.push((
-                            upstream_name.clone(),
                             upstream_pool.clone(),
                             index,
                             address.to_string(),
@@ -1187,16 +1188,16 @@ impl QUICListener {
             }
         };
 
-        for (_upstream_name, upstream_pool, index, address, health) in entries {
+        for (upstream_pool, index, address, health) in entries {
             let h2_pool = h2_pool.clone();
             let handle = handle.clone();
             handle.spawn(async move {
                 let interval = Duration::from_millis(health.interval.max(1));
                 let timeout = Duration::from_millis(health.timeout_ms.max(1));
-                let path = if health.path.is_empty() {
-                    "/".to_string()
+                let path: &str = if health.path.is_empty() {
+                    "/"
                 } else {
-                    health.path.clone()
+                    &health.path
                 };
 
                 loop {

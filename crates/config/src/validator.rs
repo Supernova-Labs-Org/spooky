@@ -54,13 +54,13 @@ pub fn validate(config: &Config) -> bool {
     }
 
     // --- Validate global load balancing type (if present) ---
-    if let Some(ref lb) = config.load_balancing 
+    if let Some(ref lb) = config.load_balancing
         && !VALID_LB_TYPES
             .iter()
             .any(|lb_type| lb_type.eq_ignore_ascii_case(&lb.lb_type))
-        {
-            error!("Invalid global load balancing type: {}", lb.lb_type);
-            return false;
+    {
+        error!("Invalid global load balancing type: {}", lb.lb_type);
+        return false;
     }
 
     // --- Validate listen address ---

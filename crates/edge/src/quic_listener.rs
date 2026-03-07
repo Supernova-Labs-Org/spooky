@@ -13,33 +13,15 @@ use log::{debug, error, info};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
-use spooky_bridge::h3_to_h2::{BridgeError, build_h2_request};
+use spooky_bridge::h3_to_h2::build_h2_request;
 use spooky_lb::{HealthTransition, UpstreamPool};
-use spooky_transport::h2_pool::{H2Pool, PoolError};
+use spooky_transport::h2_pool::H2Pool;
+use spooky_errors::ProxyError;
 use tokio::runtime::Handle;
 
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{Metrics, QUICListener, QuicConnection, RequestEnvelope};
-
-#[derive(Debug)]
-pub enum ProxyError {
-    Bridge(BridgeError),
-    Transport(String),
-    Timeout,
-    Tls(String), // For TLS cred loading failure
-}
-
-impl std::fmt::Display for ProxyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProxyError::Bridge(err) => write!(f, "Bridge error: {}", err),
-            ProxyError::Transport(msg) => write!(f, "Transport error: {}", msg),
-            ProxyError::Timeout => write!(f, "Backend timeout"),
-            ProxyError::Tls(msg) => write!(f, "TLS error: {}", msg),
-        }
-    }
-}
 
 fn is_hop_header(name: &str) -> bool {
     matches!(
@@ -952,8 +934,8 @@ impl QUICListener {
                     b"invalid request\n",
                 )
             }
-            Err(ProxyError::Transport(err)) => {
-                error!("Transport error: {}", err);
+            Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
+                error!("Transport error");
                 let transition = upstream_pool
                     .lock()
                     .ok()
@@ -1038,12 +1020,7 @@ impl QUICListener {
         .map_err(|e| ProxyError::Transport(format!("send: {e}")))?;
 
         let response = match response {
-            Ok(inner) => inner.map_err(|e| match e {
-                PoolError::UnknownBackend(name) => {
-                    ProxyError::Transport(format!("unknown backend: {name}"))
-                }
-                PoolError::Send(err) => ProxyError::Transport(format!("send: {err:?}")),
-            })?,
+            Ok(inner) => inner?,
             Err(_) => return Err(ProxyError::Timeout),
         };
 

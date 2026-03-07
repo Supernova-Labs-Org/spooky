@@ -2,26 +2,7 @@ use bytes::Bytes;
 use http::{HeaderName, HeaderValue, Method, Request, Uri};
 use http_body_util::Full;
 
-#[derive(Debug)]
-pub enum BridgeError {
-    InvalidMethod,
-    InvalidUri,
-    InvalidHeader,
-    Build(http::Error),
-}
-
-impl std::fmt::Display for BridgeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BridgeError::InvalidMethod => write!(f, "invalid method"),
-            BridgeError::InvalidUri => write!(f, "invalid uri"),
-            BridgeError::InvalidHeader => write!(f, "invalid header"),
-            BridgeError::Build(e) => write!(f, "request build error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for BridgeError {}
+pub use spooky_errors::BridgeError;
 
 pub fn build_h2_request(
     backend: &str,

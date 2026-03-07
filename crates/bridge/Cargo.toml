@@ -9,3 +9,4 @@ http.workspace = true
 quiche.workspace = true
 bytes.workspace = true
 http-body-util.workspace = true
+spooky-errors = { path = "../errors" }

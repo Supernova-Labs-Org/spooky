@@ -1,0 +1,11 @@
+[package]
+name = "spooky-errors"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+http = { workspace = true }
+hyper-util = { workspace = true }
+quiche = { workspace = true }

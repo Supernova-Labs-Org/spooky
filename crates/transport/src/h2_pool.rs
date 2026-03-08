@@ -6,25 +6,7 @@ use hyper::body::{Bytes, Incoming};
 use tokio::sync::Semaphore;
 
 use crate::h2_client::H2Client;
-
-#[derive(Debug)]
-pub enum PoolError {
-    UnknownBackend(String),
-    Send(hyper_util::client::legacy::Error),
-}
-
-impl std::fmt::Display for PoolError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PoolError::UnknownBackend(backend) => {
-                write!(f, "unknown backend: {backend}")
-            }
-            PoolError::Send(err) => write!(f, "send failed: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for PoolError {}
+pub use spooky_errors::PoolError;
 
 struct BackendHandle {
     client: H2Client,

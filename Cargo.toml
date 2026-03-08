@@ -7,6 +7,7 @@ members = [
     "crates/bridge",
     "crates/transport",
     "crates/lb",
+    "crates/errors",
 ]
 resolver = "2"
 
@@ -24,6 +25,7 @@ rand = "0.8"
 rustls-pki-types = "1.12.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_yaml = "0.9.34"
+thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
 

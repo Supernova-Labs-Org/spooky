@@ -10,3 +10,4 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 tokio.workspace = true
+spooky-errors = { path = "../errors" }

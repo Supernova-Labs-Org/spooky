@@ -57,6 +57,7 @@ pub struct RequestEnvelope {
     pub start: Instant,
 }
 
+#[derive(Debug)]
 pub enum HealthClassification {
     Success,           // 2xx, 3xx responses
     Failure,           // 5xx responses, Transport/Pool/Timeout errors

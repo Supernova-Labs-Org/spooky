@@ -21,7 +21,7 @@ use tokio::runtime::Handle;
 
 use spooky_config::config::Config as SpookyConfig;
 
-use crate::{Metrics, QUICListener, QuicConnection, RequestEnvelope};
+use crate::{Metrics, QUICListener, QuicConnection, RequestEnvelope, outcome_from_status};
 
 fn is_hop_header(name: &str) -> bool {
     matches!(
@@ -894,10 +894,10 @@ impl QUICListener {
         match Self::forward_request(&backend_addr, h2_pool, req) {
             Ok((status, headers, body)) => {
                 let transition = upstream_pool.lock().ok().and_then(|mut pool| {
-                    if status.is_server_error() {
-                        pool.pool.mark_failure(backend_index)
-                    } else {
-                        pool.pool.mark_success(backend_index)
+                    match outcome_from_status(status) {
+                        crate::HealthClassification::Success => pool.pool.mark_success(backend_index),
+                        crate::HealthClassification::Failure => pool.pool.mark_failure(backend_index),
+                        crate::HealthClassification::Neutral => None
                     }
                 });
                 if let Some(transition) = transition {
@@ -913,13 +913,6 @@ impl QUICListener {
             }
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
-                let transition = upstream_pool
-                    .lock()
-                    .ok()
-                    .and_then(|mut pool| pool.pool.mark_failure(backend_index));
-                if let Some(transition) = transition {
-                    Self::log_health_transition(&backend_addr, transition);
-                }
                 metrics.inc_failure();
                 let latency = start.elapsed().as_millis();
                 info!(

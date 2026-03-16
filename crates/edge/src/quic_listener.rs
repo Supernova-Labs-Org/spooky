@@ -143,6 +143,7 @@ impl QUICListener {
             send_buf: [0; 65535],
             connections: HashMap::new(),
             cid_routes: HashMap::new(),
+            peer_routes: HashMap::new(),
         })
     }
 
@@ -191,6 +192,7 @@ impl QUICListener {
 
         self.connections.clear();
         self.cid_routes.clear();
+        self.peer_routes.clear();
     }
 
     fn take_or_create_connection(
@@ -220,6 +222,7 @@ impl QUICListener {
         // Try exact match first
         if let Some(mut connection) = self.connections.remove(&dcid_bytes) {
             debug!("Found existing connection for DCID: {:02x?}", &dcid_bytes);
+            self.peer_routes.remove(&connection.peer_address);
             connection.peer_address = peer;
             return Some((connection, dcid_bytes));
         }
@@ -235,6 +238,7 @@ impl QUICListener {
                     );
                     let stored_cid_copy: Arc<[u8]> = Arc::clone(stored_cid);
                     if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
+                        self.peer_routes.remove(&connection.peer_address);
                         connection.peer_address = peer;
                         return Some((connection, stored_cid_copy));
                     }
@@ -341,6 +345,7 @@ impl QUICListener {
         for cid in &connection.routing_scids {
             self.cid_routes.remove(cid);
         }
+        self.peer_routes.remove(&connection.peer_address);
     }
 
     fn sync_connection_routes(&mut self, connection: &mut QuicConnection) -> Vec<u8> {
@@ -450,12 +455,14 @@ impl QUICListener {
         );
         let (mut connection, current_primary) =
             if let Some(mut conn) = self.connections.remove(&lookup_key) {
+                self.peer_routes.remove(&conn.peer_address);
                 conn.peer_address = peer;
                 debug!("Found existing connection for {}", peer);
                 (conn, lookup_key)
             } else if let Some(primary_vec) = self.cid_routes.get(lookup_key.as_ref()).cloned() {
                 let primary: Arc<[u8]> = Arc::from(primary_vec.as_slice());
                 if let Some(mut conn) = self.connections.remove(&primary) {
+                    self.peer_routes.remove(&conn.peer_address);
                     conn.peer_address = peer;
                     debug!(
                         "Found existing connection via SCID alias {} -> {}",
@@ -481,58 +488,19 @@ impl QUICListener {
                         }
                     }
                 }
-            } else {
-                // Check if there's an existing connection from the same peer
-                // This handles cases where the client uses different DCIDs for the same connection
-                let mut found_peer_connection = None;
-                for (key, conn) in &self.connections {
-                    if conn.peer_address == peer {
-                        found_peer_connection = Some(key.clone());
-                        break;
-                    }
-                }
-
-                if let Some(peer_key) = found_peer_connection {
+            } else if let Some(primary) = self.peer_routes.get(&peer).cloned() {
+                if let Some(mut conn) = self.connections.remove(&primary) {
+                    self.peer_routes.remove(&conn.peer_address);
+                    conn.peer_address = peer;
                     debug!(
-                        "Found existing connection from same peer {}, trying with key: {:?}",
+                        "Found existing connection via peer map {} -> {}",
                         peer,
-                        hex::encode(&peer_key)
+                        hex::encode(&primary)
                     );
-                    if let Some(mut conn) = self.connections.remove(&peer_key) {
-                        conn.peer_address = peer;
-                        debug!("Using existing peer connection for {}", peer);
-                        (conn, peer_key)
-                    } else {
-                        // This shouldn't happen, but fallback to creating new connection
-                        match self.take_or_create_connection(peer, local_addr, &recv_data) {
-                            Some(conn_pair) => {
-                                debug!("Created new connection for {}", peer);
-                                conn_pair
-                            }
-                            None => {
-                                debug!(
-                                    "Dropping packet for unknown connection from {} (DCID: {:?})",
-                                    peer,
-                                    hex::encode(&lookup_key)
-                                );
-                                return;
-                            }
-                        }
-                    }
+                    (conn, primary)
                 } else {
-                    debug!(
-                        "No existing connection found for DCID or peer, checking all connections..."
-                    );
-                    // Debug: check what connections we have
-                    for (key, conn) in &self.connections {
-                        debug!(
-                            "Existing connection DCID: {:?}, peer: {}",
-                            hex::encode(key),
-                            conn.peer_address
-                        );
-                    }
-
-                    // No existing connection found, try to create new one
+                    // Stale peer map entry.
+                    self.peer_routes.remove(&peer);
                     match self.take_or_create_connection(peer, local_addr, &recv_data) {
                         Some(conn_pair) => {
                             debug!("Created new connection for {}", peer);
@@ -546,6 +514,22 @@ impl QUICListener {
                             );
                             return;
                         }
+                    }
+                }
+            } else {
+                // No existing connection found, try to create new one.
+                match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                    Some(conn_pair) => {
+                        debug!("Created new connection for {}", peer);
+                        conn_pair
+                    }
+                    None => {
+                        debug!(
+                            "Dropping packet for unknown connection from {} (DCID: {:?})",
+                            peer,
+                            hex::encode(&lookup_key)
+                        );
+                        return;
                     }
                 }
             };
@@ -606,6 +590,8 @@ impl QUICListener {
                 "Storing connection with key: {:02x?} (previous: {:02x?})",
                 &new_primary, &current_primary
             );
+            self.peer_routes
+                .insert(connection.peer_address, Arc::clone(&new_primary));
             self.connections.insert(new_primary, connection);
         } else {
             self.remove_connection_routes(&connection);

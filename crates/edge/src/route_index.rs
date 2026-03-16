@@ -142,7 +142,6 @@ fn prefer_route(
     }
 }
 
-#[cfg(test)]
 pub(crate) fn scan_lookup<'a>(
     upstreams: &'a HashMap<String, Upstream>,
     path: &str,

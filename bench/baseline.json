@@ -1,0 +1,368 @@
+{
+  "suite": "spooky-cpu-memory-regression",
+  "generated_unix_secs": 1773680186,
+  "cpu_threshold": 0.4,
+  "mem_threshold": 0.2,
+  "cases": [
+    {
+      "name": "connection_alias_lookup",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 18574915,
+      "latency_ns_per_op": 61.916383333333336,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_alias_lookup",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 13205132,
+      "latency_ns_per_op": 66.02566,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_alias_lookup",
+      "scale": 10000,
+      "iterations": 80000,
+      "duration_ns": 4661544,
+      "latency_ns_per_op": 58.2693,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_exact_lookup",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 9288880,
+      "latency_ns_per_op": 30.962933333333332,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_exact_lookup",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 6069480,
+      "latency_ns_per_op": 30.3474,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_exact_lookup",
+      "scale": 10000,
+      "iterations": 80000,
+      "duration_ns": 2299956,
+      "latency_ns_per_op": 28.74945,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_map_hit",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 15632200,
+      "latency_ns_per_op": 52.10733333333333,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_map_hit",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 11299725,
+      "latency_ns_per_op": 56.498625,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_map_hit",
+      "scale": 10000,
+      "iterations": 80000,
+      "duration_ns": 4103316,
+      "latency_ns_per_op": 51.29145,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_map_miss",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 6489182,
+      "latency_ns_per_op": 21.630606666666665,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_map_miss",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 4433083,
+      "latency_ns_per_op": 22.165415,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_map_miss",
+      "scale": 10000,
+      "iterations": 80000,
+      "duration_ns": 1766355,
+      "latency_ns_per_op": 22.0794375,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_scan_miss",
+      "scale": 100,
+      "iterations": 150000,
+      "duration_ns": 20262870,
+      "latency_ns_per_op": 135.0858,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_scan_miss",
+      "scale": 1000,
+      "iterations": 30000,
+      "duration_ns": 47662942,
+      "latency_ns_per_op": 1588.7647333333334,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_peer_scan_miss",
+      "scale": 10000,
+      "iterations": 3000,
+      "duration_ns": 63456350,
+      "latency_ns_per_op": 21152.116666666665,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_prefix_scan_miss_lookup",
+      "scale": 100,
+      "iterations": 150000,
+      "duration_ns": 74509627,
+      "latency_ns_per_op": 496.73084666666665,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_prefix_scan_miss_lookup",
+      "scale": 1000,
+      "iterations": 30000,
+      "duration_ns": 162400112,
+      "latency_ns_per_op": 5413.337066666667,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "connection_prefix_scan_miss_lookup",
+      "scale": 10000,
+      "iterations": 3000,
+      "duration_ns": 161400236,
+      "latency_ns_per_op": 53800.07866666667,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "lb_consistent_hash_pick",
+      "scale": 100,
+      "iterations": 3000,
+      "duration_ns": 7886683915,
+      "latency_ns_per_op": 2628894.638333333,
+      "alloc_calls": 60357000,
+      "alloc_bytes": 1464744000,
+      "rss_delta_kb": 48
+    },
+    {
+      "name": "lb_consistent_hash_pick",
+      "scale": 1000,
+      "iterations": 500,
+      "duration_ns": 13813735388,
+      "latency_ns_per_op": 27627470.776,
+      "alloc_calls": 100605000,
+      "alloc_bytes": 2445480000,
+      "rss_delta_kb": 380
+    },
+    {
+      "name": "lb_consistent_hash_pick",
+      "scale": 10000,
+      "iterations": 40,
+      "duration_ns": 12338600315,
+      "latency_ns_per_op": 308465007.875,
+      "alloc_calls": 80465840,
+      "alloc_bytes": 1954932480,
+      "rss_delta_kb": 536
+    },
+    {
+      "name": "lb_random_pick",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 239262397,
+      "latency_ns_per_op": 797.5413233333334,
+      "alloc_calls": 1800000,
+      "alloc_bytes": 604800000,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "lb_random_pick",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 630031567,
+      "latency_ns_per_op": 3150.157835,
+      "alloc_calls": 1800000,
+      "alloc_bytes": 3270400000,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "lb_random_pick",
+      "scale": 10000,
+      "iterations": 80000,
+      "duration_ns": 2045873371,
+      "latency_ns_per_op": 25573.4171375,
+      "alloc_calls": 1040000,
+      "alloc_bytes": 20968960000,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "lb_round_robin_pick",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 225765015,
+      "latency_ns_per_op": 752.55005,
+      "alloc_calls": 1800000,
+      "alloc_bytes": 604800000,
+      "rss_delta_kb": 100
+    },
+    {
+      "name": "lb_round_robin_pick",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 479591480,
+      "latency_ns_per_op": 2397.9574,
+      "alloc_calls": 1800000,
+      "alloc_bytes": 3270400000,
+      "rss_delta_kb": 48
+    },
+    {
+      "name": "lb_round_robin_pick",
+      "scale": 10000,
+      "iterations": 80000,
+      "duration_ns": 2032046732,
+      "latency_ns_per_op": 25400.58415,
+      "alloc_calls": 1040000,
+      "alloc_bytes": 20968960000,
+      "rss_delta_kb": 72
+    },
+    {
+      "name": "route_lookup_indexed_hit",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 122955739,
+      "latency_ns_per_op": 409.85246333333333,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 8
+    },
+    {
+      "name": "route_lookup_indexed_hit",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 78767415,
+      "latency_ns_per_op": 393.837075,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_indexed_hit",
+      "scale": 10000,
+      "iterations": 100000,
+      "duration_ns": 39559684,
+      "latency_ns_per_op": 395.59684,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_indexed_miss",
+      "scale": 100,
+      "iterations": 300000,
+      "duration_ns": 17433333,
+      "latency_ns_per_op": 58.11111,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_indexed_miss",
+      "scale": 1000,
+      "iterations": 200000,
+      "duration_ns": 10815443,
+      "latency_ns_per_op": 54.077215,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_indexed_miss",
+      "scale": 10000,
+      "iterations": 100000,
+      "duration_ns": 5392717,
+      "latency_ns_per_op": 53.92717,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_linear_hit",
+      "scale": 100,
+      "iterations": 200000,
+      "duration_ns": 319469191,
+      "latency_ns_per_op": 1597.345955,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_linear_hit",
+      "scale": 1000,
+      "iterations": 40000,
+      "duration_ns": 901745909,
+      "latency_ns_per_op": 22543.647725,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    },
+    {
+      "name": "route_lookup_linear_hit",
+      "scale": 10000,
+      "iterations": 4000,
+      "duration_ns": 1039993713,
+      "latency_ns_per_op": 259998.42825000003,
+      "alloc_calls": 0,
+      "alloc_bytes": 0,
+      "rss_delta_kb": 0
+    }
+  ]
+}

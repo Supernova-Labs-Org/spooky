@@ -14,6 +14,7 @@ use spooky_config::config::Config;
 use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
 
+pub mod benchmark;
 pub mod quic_listener;
 mod route_index;
 

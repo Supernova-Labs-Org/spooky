@@ -14,14 +14,17 @@ use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
 use spooky_bridge::h3_to_h2::build_h2_request;
+use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
-use spooky_errors::ProxyError;
 use tokio::runtime::Handle;
 
 use spooky_config::config::Config as SpookyConfig;
 
-use crate::{Metrics, QUICListener, QuicConnection, RequestEnvelope, outcome_from_status};
+use crate::{
+    Metrics, QUICListener, QuicConnection, RequestEnvelope, outcome_from_status,
+    route_index::RouteIndex,
+};
 
 fn is_hop_header(name: &str) -> bool {
     matches!(
@@ -40,39 +43,6 @@ fn request_hash_key(req: &RequestEnvelope) -> &str {
     }
 
     &req.method
-}
-
-fn find_upstream_for_request<'a>(
-    upstreams: &'a std::collections::HashMap<String, spooky_config::config::Upstream>,
-    path: &str,
-    host: Option<&str>,
-) -> Option<&'a str> {
-    // Find the most specific route that matches the path and/or host
-    // We need to find the longest matching path prefix
-    let mut best_match: Option<(&str, usize)> = None;
-
-    for (upstream_name, upstream) in upstreams {
-        let has_host_match = match (&upstream.route.host, host) {
-            (Some(route_host), Some(request_host)) => route_host == request_host,
-            (None, _) => true,        // No host constraint
-            (Some(_), None) => false, // Host constraint but no host in request
-        };
-
-        let path_match_len = match &upstream.route.path_prefix {
-            Some(path_prefix) if path.starts_with(path_prefix) => path_prefix.len(),
-            None => 0,     // No path constraint, matches but with lowest priority
-            _ => continue, // No match
-        };
-
-        if has_host_match {
-            // Keep the match with the longest path prefix
-            if best_match.is_none() || path_match_len > best_match.unwrap().1 {
-                best_match = Some((upstream_name.as_str(), path_match_len));
-            }
-        }
-    }
-
-    best_match.map(|(name, _)| name)
 }
 
 const BACKEND_TIMEOUT: Duration = Duration::from_secs(2);
@@ -152,6 +122,7 @@ impl QUICListener {
                 UpstreamPool::from_upstream(upstream).expect("Failed to create upstream pool");
             upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
         }
+        let routing_index = RouteIndex::from_upstreams(&config.upstream);
 
         let metrics = Metrics::default();
 
@@ -164,6 +135,7 @@ impl QUICListener {
             h3_config,
             h2_pool,
             upstream_pools,
+            routing_index,
             metrics,
             draining: false,
             drain_start: None,
@@ -613,7 +585,7 @@ impl QUICListener {
                 &mut connection,
                 &h2_pool,
                 &self.upstream_pools,
-                &self.config.upstream,
+                &self.routing_index,
                 &self.metrics,
             )
         {
@@ -703,7 +675,7 @@ impl QUICListener {
         connection: &mut QuicConnection,
         h2_pool: &H2Pool,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
-        upstreams: &std::collections::HashMap<String, spooky_config::config::Upstream>,
+        routing_index: &RouteIndex,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; 65_535];
@@ -779,7 +751,7 @@ impl QUICListener {
                             req,
                             h2_pool,
                             upstream_pools,
-                            upstreams,
+                            routing_index,
                             metrics,
                         )?;
                     }
@@ -805,7 +777,7 @@ impl QUICListener {
         req: RequestEnvelope,
         h2_pool: &H2Pool,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
-        upstreams: &std::collections::HashMap<String, spooky_config::config::Upstream>,
+        routing_index: &RouteIndex,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
         let start = req.start;
@@ -820,16 +792,15 @@ impl QUICListener {
         }
 
         // Find the upstream for this request
-        let upstream_name =
-            find_upstream_for_request(upstreams, &req.path, req.authority.as_deref()).ok_or_else(
-                || {
-                    error!(
-                        "No route found for path: {} (host: {:?})",
-                        req.path, req.authority
-                    );
-                    quiche::h3::Error::InternalError
-                },
-            )?;
+        let upstream_name = routing_index
+            .lookup(&req.path, req.authority.as_deref())
+            .ok_or_else(|| {
+                error!(
+                    "No route found for path: {} (host: {:?})",
+                    req.path, req.authority
+                );
+                quiche::h3::Error::InternalError
+            })?;
 
         let upstream_pool = upstream_pools.get(upstream_name).ok_or_else(|| {
             error!("Upstream pool not found for: {}", upstream_name);
@@ -895,9 +866,13 @@ impl QUICListener {
             Ok((status, headers, body)) => {
                 let transition = upstream_pool.lock().ok().and_then(|mut pool| {
                     match outcome_from_status(status) {
-                        crate::HealthClassification::Success => pool.pool.mark_success(backend_index),
-                        crate::HealthClassification::Failure => pool.pool.mark_failure(backend_index),
-                        crate::HealthClassification::Neutral => None
+                        crate::HealthClassification::Success => {
+                            pool.pool.mark_success(backend_index)
+                        }
+                        crate::HealthClassification::Failure => {
+                            pool.pool.mark_failure(backend_index)
+                        }
+                        crate::HealthClassification::Neutral => None,
                     }
                 });
                 if let Some(transition) = transition {

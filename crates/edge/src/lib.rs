@@ -15,6 +15,7 @@ use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
 
 pub mod quic_listener;
+mod route_index;
 
 pub struct QUICListener {
     pub socket: UdpSocket,
@@ -23,6 +24,7 @@ pub struct QUICListener {
     pub h3_config: Arc<quiche::h3::Config>,
     pub h2_pool: Arc<H2Pool>,
     pub upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub(crate) routing_index: route_index::RouteIndex,
     pub metrics: Metrics,
     pub draining: bool,
     pub drain_start: Option<Instant>,
@@ -59,17 +61,20 @@ pub struct RequestEnvelope {
 
 #[derive(Debug)]
 pub enum HealthClassification {
-    Success,           // 2xx, 3xx responses
-    Failure,           // 5xx responses, Transport/Pool/Timeout errors
-    Neutral,           // 4xx responses, Bridge/TLS errors
+    Success, // 2xx, 3xx responses
+    Failure, // 5xx responses, Transport/Pool/Timeout errors
+    Neutral, // 4xx responses, Bridge/TLS errors
 }
 
 pub fn outcome_from_status(status: http::StatusCode) -> HealthClassification {
-    if status.is_server_error() { // 5xx
+    if status.is_server_error() {
+        // 5xx
         HealthClassification::Failure
-    } else if status.is_client_error() { // 4xx
+    } else if status.is_client_error() {
+        // 4xx
         HealthClassification::Neutral
-    } else {    // 2xx, 3xx
+    } else {
+        // 2xx, 3xx
         HealthClassification::Success
     }
 }

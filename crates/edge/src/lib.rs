@@ -34,6 +34,7 @@ pub struct QUICListener {
 
     pub connections: HashMap<Arc<[u8]>, QuicConnection>, // KEY: SCID(server connection id)
     pub cid_routes: HashMap<Vec<u8>, Vec<u8>>,           // KEY: alias SCID, VALUE: primary SCID
+    pub peer_routes: HashMap<SocketAddr, Arc<[u8]>>,     // KEY: peer address, VALUE: primary SCID
 }
 
 pub struct QuicConnection {

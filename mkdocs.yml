@@ -49,6 +49,7 @@ nav:
     - Troubleshooting: troubleshooting/common-issues.md
   - Development:
     - Contributing: development/contributing.md
+    - Benchmarks: benchmarks.md
     - Changelog: changelog.md
   - Protocols:
     - HTTP/3: protocols/http3.md

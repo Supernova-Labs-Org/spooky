@@ -3,16 +3,16 @@ use std::collections::HashMap;
 use spooky_config::config::Upstream;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct IndexedRoute {
+pub struct IndexedRoute {
     upstream_idx: usize,
     path_len: usize,
     order: usize,
 }
 
 #[derive(Default)]
-struct TrieNode {
-    route: Option<IndexedRoute>,
-    children: HashMap<u8, TrieNode>,
+pub struct TrieNode {
+    pub route: Option<IndexedRoute>,
+    pub children: HashMap<u8, TrieNode>,
 }
 
 impl TrieNode {

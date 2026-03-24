@@ -22,8 +22,7 @@ use tokio::runtime::Handle;
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
-    Metrics, QUICListener, QuicConnection, RequestEnvelope, outcome_from_status,
-    route_index::RouteIndex,
+    Metrics, QUICListener, QuicConnection, RequestEnvelope, cid_radix::CidRadix, outcome_from_status, route_index::RouteIndex
 };
 
 fn is_hop_header(name: &str) -> bool {
@@ -144,6 +143,7 @@ impl QUICListener {
             connections: HashMap::new(),
             cid_routes: HashMap::new(),
             peer_routes: HashMap::new(),
+            cid_radix: CidRadix::new()
         })
     }
 
@@ -193,6 +193,7 @@ impl QUICListener {
         self.connections.clear();
         self.cid_routes.clear();
         self.peer_routes.clear();
+        self.cid_radix.clear();
     }
 
     fn take_or_create_connection(
@@ -230,19 +231,16 @@ impl QUICListener {
         // For Short packets, try prefix match (client may append bytes to our SCID)
         // This handles cases where client uses longer DCIDs based on server's SCID
         if header.ty == quiche::Type::Short && dcid_bytes.len() > 8 {
-            for stored_cid in self.connections.keys() {
-                if dcid_bytes.starts_with(stored_cid.as_ref()) {
-                    debug!(
-                        "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
-                        stored_cid, &dcid_bytes
-                    );
-                    let stored_cid_copy: Arc<[u8]> = Arc::clone(stored_cid);
-                    if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
-                        self.peer_routes.remove(&connection.peer_address);
-                        connection.peer_address = peer;
-                        return Some((connection, stored_cid_copy));
-                    }
-                    break;
+            if let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes) {
+                debug!(
+                    "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
+                    matched_cid, &dcid_bytes
+                );
+                let stored_cid_copy: Arc<[u8]> = Arc::clone(&matched_cid);
+                if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
+                    self.peer_routes.remove(&connection.peer_address);
+                    connection.peer_address = peer;
+                    return Some((connection, stored_cid_copy));
                 }
             }
         }
@@ -341,8 +339,10 @@ impl QUICListener {
     }
 
     fn remove_connection_routes(&mut self, connection: &QuicConnection) {
+        self.cid_radix.remove(&connection.primary_scid);
         self.cid_routes.remove(&connection.primary_scid);
         for cid in &connection.routing_scids {
+            self.cid_radix.remove(cid);
             self.cid_routes.remove(cid);
         }
         self.peer_routes.remove(&connection.peer_address);
@@ -373,6 +373,7 @@ impl QUICListener {
         };
 
         for retired in connection.routing_scids.difference(&active_scids) {
+            self.cid_radix.remove(retired);
             self.cid_routes.remove(retired);
         }
 
@@ -382,6 +383,14 @@ impl QUICListener {
                 continue;
             }
             self.cid_routes.insert(cid.clone(), primary.clone());
+        }
+
+        // Add new SCIDs to radix trie
+        for cid in &active_scids {
+            // Get Arc<[u8]> reference from connections HashMap
+            if let Some(arc_cid) = self.connections.keys().find(|k| k.as_ref() == cid.as_slice()) {
+                self.cid_radix.insert(Arc::clone(arc_cid));  // NEW
+            }
         }
 
         connection.routing_scids = active_scids;

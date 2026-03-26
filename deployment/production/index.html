@@ -98,6 +98,25 @@
 
     
 
+    
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll("a.headerlink").forEach(function (link) {
+            link.addEventListener("click", function (e) {
+                e.preventDefault();
+
+                // Build the full URL with the anchor fragment
+                const url = window.location.origin + window.location.pathname + this.getAttribute("href");
+
+                navigator.clipboard.writeText(url).then(function () {
+                    // Optional: brief visual feedback
+                });
+            });
+        });
+    });
+</script>
+    
+
 </head>
 
 <body
@@ -186,6 +205,7 @@
     document.addEventListener("keydown", searchShortcutHandler);
 </script>
                 </div>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px ml-2 hidden lg:block">
                 </div>
@@ -202,6 +222,7 @@
                     </span>
                     
                 </a>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px 3xl:flex hidden">
                 </div>
@@ -241,13 +262,18 @@
 </header>
         <main class="flex flex-1 flex-col">
             <div class="container-wrapper flex flex-1 flex-col px-2">
-                <div data-slot="sidebar-wrapper" style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
+                <div data-slot="sidebar-wrapper"
+                    style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
                     class="group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex w-full 3xl:fixed:container 3xl:fixed:px-3 min-h-min flex-1 items-start px-0 [--sidebar-width:220px] [--top-spacing:0] lg:grid lg:grid-cols-[var(--sidebar-width)_minmax(0,1fr)] lg:[--sidebar-width:240px] lg:[--top-spacing:calc(var(--spacing)*4)]">
                     <div data-slot="sidebar"
                         class="w-(--sidebar-width) flex-col text-sidebar-foreground sticky top-[calc(var(--header-height)+0.6rem)] z-30 hidden h-[calc(100svh-10rem)] overscroll-none bg-transparent [--sidebar-menu-width:--spacing(56)] lg:flex">
                         <div class="h-9"></div>
-                        <div class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs"></div>
-                        <div class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex"></div>
+                        <div
+                            class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs">
+                        </div>
+                        <div
+                            class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex">
+                        </div>
                         <div data-slot="sidebar-content" data-sidebar="content" view-transition-name="sidebar"
                             class="flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden mx-auto no-scrollbar w-(--sidebar-menu-width) overflow-x-hidden px-2">
                             
@@ -736,9 +762,7 @@
   <div class="flex flex-col gap-2">
     <div class="flex flex-col gap-2">
       <div id="page-header" class="flex items-start justify-between">
-        <h1
-          class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl"
-        >
+        <h1 class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl">
           Production
         </h1>
 
@@ -751,53 +775,29 @@
     <path d="M7 7m0 2.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z"></path><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"></path>
 </svg>
 <span class="max-md:hidden">Copy Page</span>
-</button> 
+</button>
           
-          <a
-            data-slot="button"
-            id="previous-button"
+          <a data-slot="button" id="previous-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/architecture/components/"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-left"
-            >
+            href="/spooky/architecture/components/">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-left">
               <path d="M5 12l14 0"></path>
               <path d="M5 12l6 6"></path>
               <path d="M5 12l6 -6"></path>
             </svg>
             <span class="sr-only">Previous</span>
           </a>
-           
           
-          <a
-            data-slot="button"
-            id="next-button"
+          
+          <a data-slot="button" id="next-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/troubleshooting/common-issues/"
-          >
+            href="/spooky/troubleshooting/common-issues/">
             <span class="sr-only">Next</span>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-right"
-            >
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-right">
               <path d="M5 12l14 0"></path>
               <path d="M13 18l6 -6"></path>
               <path d="M13 6l6 6"></path>
@@ -1786,6 +1786,12 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
 </ul>
 <p>For issues not covered in this guide, consult the project repository issue tracker or engage with the development team.</p>
   </div>
+  
+  <script>
+    document.querySelectorAll('article h2, article h3').forEach((header) => {
+      toc.observer.observe(header);
+    });
+  </script>
 </article>
                                 <div class="mx-auto flex flex-wrap h-16 w-full max-w-2xl items-center gap-2 px-4 md:px-0">
     
@@ -2043,7 +2049,7 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
                             <div
                                 class="sticky top-[calc(var(--header-height)+1px)] ml-auto hidden h-[calc(100svh-var(--header-height)-var(--footer-height))] w-72 flex-col gap-4 overflow-hidden overscroll-none pb-8 xl:flex">
                                 <div class="h-(--top-spacing) shrink-0"></div>
-                                <div view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
+                                <div id="toc" view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
     <div class="flex flex-col gap-2 p-4 pt-0 text-sm">
         <p class="text-muted-foreground bg-background sticky top-0 h-6 text-xs">On This Page</p>
         
@@ -2052,20 +2058,20 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#pre-deployment-checklist"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#pre-deployment-checklist');">
             Pre-Deployment Checklist
         </a>
         
         
         <a href="#infrastructure-requirements"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#infrastructure-requirements');">
             Infrastructure Requirements
         </a>
         
         <a href="#pre-deployment-validation"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#pre-deployment-validation');">
             Pre-Deployment Validation
         </a>
         
@@ -2074,32 +2080,32 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#system-configuration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#system-configuration');">
             System Configuration
         </a>
         
         
         <a href="#binary-installation"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#binary-installation');">
             Binary Installation
         </a>
         
         <a href="#kernel-parameter-tuning"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#kernel-parameter-tuning');">
             Kernel Parameter Tuning
         </a>
         
         <a href="#resource-limits"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#resource-limits');">
             Resource Limits
         </a>
         
         <a href="#production-configuration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#production-configuration');">
             Production Configuration
         </a>
         
@@ -2108,20 +2114,20 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#tls-certificate-management"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#tls-certificate-management');">
             TLS Certificate Management
         </a>
         
         
         <a href="#certificate-acquisition"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#certificate-acquisition');">
             Certificate Acquisition
         </a>
         
         <a href="#certificate-validation"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#certificate-validation');">
             Certificate Validation
         </a>
         
@@ -2130,20 +2136,20 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#systemd-service-configuration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#systemd-service-configuration');">
             Systemd Service Configuration
         </a>
         
         
         <a href="#service-unit"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#service-unit');">
             Service Unit
         </a>
         
         <a href="#service-management"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#service-management');">
             Service Management
         </a>
         
@@ -2152,26 +2158,26 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#security-hardening"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#security-hardening');">
             Security Hardening
         </a>
         
         
         <a href="#network-security"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#network-security');">
             Network Security
         </a>
         
         <a href="#application-security"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#application-security');">
             Application Security
         </a>
         
         <a href="#selinux-apparmor"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#selinux-apparmor');">
             SELinux / AppArmor
         </a>
         
@@ -2180,32 +2186,32 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#monitoring-and-observability"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#monitoring-and-observability');">
             Monitoring and Observability
         </a>
         
         
         <a href="#metrics-exposition"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#metrics-exposition');">
             Metrics Exposition
         </a>
         
         <a href="#key-metrics-to-monitor"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#key-metrics-to-monitor');">
             Key Metrics to Monitor
         </a>
         
         <a href="#alerting-rules"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#alerting-rules');">
             Alerting Rules
         </a>
         
         <a href="#log-management"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#log-management');">
             Log Management
         </a>
         
@@ -2214,26 +2220,26 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#high-availability-architecture"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#high-availability-architecture');">
             High Availability Architecture
         </a>
         
         
         <a href="#active-active-configuration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#active-active-configuration');">
             Active-Active Configuration
         </a>
         
         <a href="#configuration-synchronization"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#configuration-synchronization');">
             Configuration Synchronization
         </a>
         
         <a href="#health-checking"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#health-checking');">
             Health Checking
         </a>
         
@@ -2242,32 +2248,32 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#performance-optimization"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#performance-optimization');">
             Performance Optimization
         </a>
         
         
         <a href="#connection-pooling"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-pooling');">
             Connection Pooling
         </a>
         
         <a href="#quic-tuning"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#quic-tuning');">
             QUIC Tuning
         </a>
         
         <a href="#cpu-affinity"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#cpu-affinity');">
             CPU Affinity
         </a>
         
         <a href="#memory-management"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#memory-management');">
             Memory Management
         </a>
         
@@ -2276,32 +2282,32 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#operational-procedures"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#operational-procedures');">
             Operational Procedures
         </a>
         
         
         <a href="#deployment-process"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#deployment-process');">
             Deployment Process
         </a>
         
         <a href="#configuration-changes"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#configuration-changes');">
             Configuration Changes
         </a>
         
         <a href="#incident-response"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#incident-response');">
             Incident Response
         </a>
         
         <a href="#capacity-planning"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#capacity-planning');">
             Capacity Planning
         </a>
         
@@ -2310,20 +2316,20 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#troubleshooting"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#troubleshooting');">
             Troubleshooting
         </a>
         
         
         <a href="#diagnostic-commands"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#diagnostic-commands');">
             Diagnostic Commands
         </a>
         
         <a href="#common-issues"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#common-issues');">
             Common Issues
         </a>
         
@@ -2332,20 +2338,20 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#backup-and-disaster-recovery"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#backup-and-disaster-recovery');">
             Backup and Disaster Recovery
         </a>
         
         
         <a href="#configuration-backup"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#configuration-backup');">
             Configuration Backup
         </a>
         
         <a href="#recovery-procedures"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#recovery-procedures');">
             Recovery Procedures
         </a>
         
@@ -2354,14 +2360,14 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#maintenance-windows"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#maintenance-windows');">
             Maintenance Windows
         </a>
         
         
         <a href="#planned-maintenance-checklist"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#planned-maintenance-checklist');">
             Planned Maintenance Checklist
         </a>
         
@@ -2370,7 +2376,7 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
         
         <a href="#additional-resources"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#additional-resources');">
             Additional Resources
         </a>
         
@@ -2382,6 +2388,7 @@ Recovery Point Objective (RPO): Configuration changes backed up daily</p>
 
     </div>
     <div class="h-12"></div>
+
 </div>
                             </div>
                         </div>

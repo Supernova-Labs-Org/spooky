@@ -98,6 +98,25 @@
 
     
 
+    
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll("a.headerlink").forEach(function (link) {
+            link.addEventListener("click", function (e) {
+                e.preventDefault();
+
+                // Build the full URL with the anchor fragment
+                const url = window.location.origin + window.location.pathname + this.getAttribute("href");
+
+                navigator.clipboard.writeText(url).then(function () {
+                    // Optional: brief visual feedback
+                });
+            });
+        });
+    });
+</script>
+    
+
 </head>
 
 <body
@@ -186,6 +205,7 @@
     document.addEventListener("keydown", searchShortcutHandler);
 </script>
                 </div>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px ml-2 hidden lg:block">
                 </div>
@@ -202,6 +222,7 @@
                     </span>
                     
                 </a>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px 3xl:flex hidden">
                 </div>
@@ -241,13 +262,18 @@
 </header>
         <main class="flex flex-1 flex-col">
             <div class="container-wrapper flex flex-1 flex-col px-2">
-                <div data-slot="sidebar-wrapper" style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
+                <div data-slot="sidebar-wrapper"
+                    style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
                     class="group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex w-full 3xl:fixed:container 3xl:fixed:px-3 min-h-min flex-1 items-start px-0 [--sidebar-width:220px] [--top-spacing:0] lg:grid lg:grid-cols-[var(--sidebar-width)_minmax(0,1fr)] lg:[--sidebar-width:240px] lg:[--top-spacing:calc(var(--spacing)*4)]">
                     <div data-slot="sidebar"
                         class="w-(--sidebar-width) flex-col text-sidebar-foreground sticky top-[calc(var(--header-height)+0.6rem)] z-30 hidden h-[calc(100svh-10rem)] overscroll-none bg-transparent [--sidebar-menu-width:--spacing(56)] lg:flex">
                         <div class="h-9"></div>
-                        <div class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs"></div>
-                        <div class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex"></div>
+                        <div
+                            class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs">
+                        </div>
+                        <div
+                            class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex">
+                        </div>
                         <div data-slot="sidebar-content" data-sidebar="content" view-transition-name="sidebar"
                             class="flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden mx-auto no-scrollbar w-(--sidebar-menu-width) overflow-x-hidden px-2">
                             
@@ -736,9 +762,7 @@
   <div class="flex flex-col gap-2">
     <div class="flex flex-col gap-2">
       <div id="page-header" class="flex items-start justify-between">
-        <h1
-          class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl"
-        >
+        <h1 class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl">
           QUIC
         </h1>
 
@@ -751,53 +775,29 @@
     <path d="M7 7m0 2.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z"></path><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"></path>
 </svg>
 <span class="max-md:hidden">Copy Page</span>
-</button> 
+</button>
           
-          <a
-            data-slot="button"
-            id="previous-button"
+          <a data-slot="button" id="previous-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/protocols/http3/"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-left"
-            >
+            href="/spooky/protocols/http3/">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-left">
               <path d="M5 12l14 0"></path>
               <path d="M5 12l6 6"></path>
               <path d="M5 12l6 -6"></path>
             </svg>
             <span class="sr-only">Previous</span>
           </a>
-           
           
-          <a
-            data-slot="button"
-            id="next-button"
+          
+          <a data-slot="button" id="next-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/api/overview/"
-          >
+            href="/spooky/api/overview/">
             <span class="sr-only">Next</span>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-right"
-            >
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-right">
               <path d="M5 12l14 0"></path>
               <path d="M13 18l6 -6"></path>
               <path d="M13 6l6 6"></path>
@@ -1179,6 +1179,12 @@
 <li>RFC 9287: Greasing the QUIC Bit</li>
 </ul>
   </div>
+  
+  <script>
+    document.querySelectorAll('article h2, article h3').forEach((header) => {
+      toc.observer.observe(header);
+    });
+  </script>
 </article>
                                 <div class="mx-auto flex flex-wrap h-16 w-full max-w-2xl items-center gap-2 px-4 md:px-0">
     
@@ -1436,7 +1442,7 @@
                             <div
                                 class="sticky top-[calc(var(--header-height)+1px)] ml-auto hidden h-[calc(100svh-var(--header-height)-var(--footer-height))] w-72 flex-col gap-4 overflow-hidden overscroll-none pb-8 xl:flex">
                                 <div class="h-(--top-spacing) shrink-0"></div>
-                                <div view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
+                                <div id="toc" view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
     <div class="flex flex-col gap-2 p-4 pt-0 text-sm">
         <p class="text-muted-foreground bg-background sticky top-0 h-6 text-xs">On This Page</p>
         
@@ -1445,20 +1451,20 @@
         
         <a href="#protocol-fundamentals"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#protocol-fundamentals');">
             Protocol Fundamentals
         </a>
         
         
         <a href="#design-goals"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#design-goals');">
             Design Goals
         </a>
         
         <a href="#transport-architecture"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#transport-architecture');">
             Transport Architecture
         </a>
         
@@ -1467,32 +1473,32 @@
         
         <a href="#connection-lifecycle"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#connection-lifecycle');">
             Connection Lifecycle
         </a>
         
         
         <a href="#connection-establishment"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-establishment');">
             Connection Establishment
         </a>
         
         <a href="#transport-parameters"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#transport-parameters');">
             Transport Parameters
         </a>
         
         <a href="#connection-migration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-migration');">
             Connection Migration
         </a>
         
         <a href="#connection-termination"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-termination');">
             Connection Termination
         </a>
         
@@ -1501,26 +1507,26 @@
         
         <a href="#stream-multiplexing"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#stream-multiplexing');">
             Stream Multiplexing
         </a>
         
         
         <a href="#stream-types"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#stream-types');">
             Stream Types
         </a>
         
         <a href="#stream-lifecycle"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#stream-lifecycle');">
             Stream Lifecycle
         </a>
         
         <a href="#flow-control"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#flow-control');">
             Flow Control
         </a>
         
@@ -1529,32 +1535,32 @@
         
         <a href="#reliability-and-loss-recovery"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#reliability-and-loss-recovery');">
             Reliability and Loss Recovery
         </a>
         
         
         <a href="#reliable-delivery"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#reliable-delivery');">
             Reliable Delivery
         </a>
         
         <a href="#loss-detection"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#loss-detection');">
             Loss Detection
         </a>
         
         <a href="#retransmission"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#retransmission');">
             Retransmission
         </a>
         
         <a href="#congestion-control"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#congestion-control');">
             Congestion Control
         </a>
         
@@ -1563,26 +1569,26 @@
         
         <a href="#packet-structure"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#packet-structure');">
             Packet Structure
         </a>
         
         
         <a href="#long-header-handshake-packets"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#long-header-handshake-packets');">
             Long Header (Handshake Packets)
         </a>
         
         <a href="#short-header-1-rtt-packets"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#short-header-1-rtt-packets');">
             Short Header (1-RTT Packets)
         </a>
         
         <a href="#frame-types"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#frame-types');">
             Frame Types
         </a>
         
@@ -1591,26 +1597,26 @@
         
         <a href="#security-properties"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#security-properties');">
             Security Properties
         </a>
         
         
         <a href="#encryption"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#encryption');">
             Encryption
         </a>
         
         <a href="#header-protection"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#header-protection');">
             Header Protection
         </a>
         
         <a href="#replay-protection"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#replay-protection');">
             Replay Protection
         </a>
         
@@ -1619,38 +1625,38 @@
         
         <a href="#quic-implementation-in-spooky"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#quic-implementation-in-spooky');">
             QUIC Implementation in Spooky
         </a>
         
         
         <a href="#connection-management"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-management');">
             Connection Management
         </a>
         
         <a href="#tls-integration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#tls-integration');">
             TLS Integration
         </a>
         
         <a href="#stream-handling"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#stream-handling');">
             Stream Handling
         </a>
         
         <a href="#flow-control_1"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#flow-control_1');">
             Flow Control
         </a>
         
         <a href="#congestion-control_1"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#congestion-control_1');">
             Congestion Control
         </a>
         
@@ -1659,32 +1665,32 @@
         
         <a href="#performance-considerations"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#performance-considerations');">
             Performance Considerations
         </a>
         
         
         <a href="#udp-socket-optimization"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#udp-socket-optimization');">
             UDP Socket Optimization
         </a>
         
         <a href="#packet-pacing"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#packet-pacing');">
             Packet Pacing
         </a>
         
         <a href="#cpu-usage"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#cpu-usage');">
             CPU Usage
         </a>
         
         <a href="#memory-footprint"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#memory-footprint');">
             Memory Footprint
         </a>
         
@@ -1693,7 +1699,7 @@
         
         <a href="#comparison-with-tcp"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#comparison-with-tcp');">
             Comparison with TCP
         </a>
         
@@ -1701,7 +1707,7 @@
         
         <a href="#references"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#references');">
             References
         </a>
         
@@ -1713,6 +1719,7 @@
 
     </div>
     <div class="h-12"></div>
+
 </div>
                             </div>
                         </div>

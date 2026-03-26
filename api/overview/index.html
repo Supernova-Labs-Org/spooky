@@ -98,6 +98,25 @@
 
     
 
+    
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll("a.headerlink").forEach(function (link) {
+            link.addEventListener("click", function (e) {
+                e.preventDefault();
+
+                // Build the full URL with the anchor fragment
+                const url = window.location.origin + window.location.pathname + this.getAttribute("href");
+
+                navigator.clipboard.writeText(url).then(function () {
+                    // Optional: brief visual feedback
+                });
+            });
+        });
+    });
+</script>
+    
+
 </head>
 
 <body
@@ -186,6 +205,7 @@
     document.addEventListener("keydown", searchShortcutHandler);
 </script>
                 </div>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px ml-2 hidden lg:block">
                 </div>
@@ -202,6 +222,7 @@
                     </span>
                     
                 </a>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px 3xl:flex hidden">
                 </div>
@@ -241,13 +262,18 @@
 </header>
         <main class="flex flex-1 flex-col">
             <div class="container-wrapper flex flex-1 flex-col px-2">
-                <div data-slot="sidebar-wrapper" style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
+                <div data-slot="sidebar-wrapper"
+                    style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
                     class="group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex w-full 3xl:fixed:container 3xl:fixed:px-3 min-h-min flex-1 items-start px-0 [--sidebar-width:220px] [--top-spacing:0] lg:grid lg:grid-cols-[var(--sidebar-width)_minmax(0,1fr)] lg:[--sidebar-width:240px] lg:[--top-spacing:calc(var(--spacing)*4)]">
                     <div data-slot="sidebar"
                         class="w-(--sidebar-width) flex-col text-sidebar-foreground sticky top-[calc(var(--header-height)+0.6rem)] z-30 hidden h-[calc(100svh-10rem)] overscroll-none bg-transparent [--sidebar-menu-width:--spacing(56)] lg:flex">
                         <div class="h-9"></div>
-                        <div class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs"></div>
-                        <div class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex"></div>
+                        <div
+                            class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs">
+                        </div>
+                        <div
+                            class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex">
+                        </div>
                         <div data-slot="sidebar-content" data-sidebar="content" view-transition-name="sidebar"
                             class="flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden mx-auto no-scrollbar w-(--sidebar-menu-width) overflow-x-hidden px-2">
                             
@@ -736,9 +762,7 @@
   <div class="flex flex-col gap-2">
     <div class="flex flex-col gap-2">
       <div id="page-header" class="flex items-start justify-between">
-        <h1
-          class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl"
-        >
+        <h1 class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl">
           Overview
         </h1>
 
@@ -751,53 +775,29 @@
     <path d="M7 7m0 2.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z"></path><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"></path>
 </svg>
 <span class="max-md:hidden">Copy Page</span>
-</button> 
+</button>
           
-          <a
-            data-slot="button"
-            id="previous-button"
+          <a data-slot="button" id="previous-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/protocols/quic/"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-left"
-            >
+            href="/spooky/protocols/quic/">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-left">
               <path d="M5 12l14 0"></path>
               <path d="M5 12l6 6"></path>
               <path d="M5 12l6 -6"></path>
             </svg>
             <span class="sr-only">Previous</span>
           </a>
-           
           
-          <a
-            data-slot="button"
-            id="next-button"
+          
+          <a data-slot="button" id="next-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/references/"
-          >
+            href="/spooky/references/">
             <span class="sr-only">Next</span>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-right"
-            >
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-right">
               <path d="M5 12l14 0"></path>
               <path d="M13 18l6 -6"></path>
               <path d="M13 6l6 6"></path>
@@ -1141,6 +1141,12 @@ RUST_LOG=trace spooky --config config.yaml
 <p><strong>Note</strong>: Environment variable interpolation in configuration files is not currently supported. Configuration values must be provided literally in the YAML file.</p>
 <p>For dynamic configuration, consider using external configuration management tools or templating the configuration file before loading.</p>
   </div>
+  
+  <script>
+    document.querySelectorAll('article h2, article h3').forEach((header) => {
+      toc.observer.observe(header);
+    });
+  </script>
 </article>
                                 <div class="mx-auto flex flex-wrap h-16 w-full max-w-2xl items-center gap-2 px-4 md:px-0">
     
@@ -1398,7 +1404,7 @@ RUST_LOG=trace spooky --config config.yaml
                             <div
                                 class="sticky top-[calc(var(--header-height)+1px)] ml-auto hidden h-[calc(100svh-var(--header-height)-var(--footer-height))] w-72 flex-col gap-4 overflow-hidden overscroll-none pb-8 xl:flex">
                                 <div class="h-(--top-spacing) shrink-0"></div>
-                                <div view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
+                                <div id="toc" view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
     <div class="flex flex-col gap-2 p-4 pt-0 text-sm">
         <p class="text-muted-foreground bg-background sticky top-0 h-6 text-xs">On This Page</p>
         
@@ -1407,26 +1413,26 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#command-line-interface"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#command-line-interface');">
             Command Line Interface
         </a>
         
         
         <a href="#basic-usage"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#basic-usage');">
             Basic Usage
         </a>
         
         <a href="#options"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#options');">
             Options
         </a>
         
         <a href="#examples"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#examples');">
             Examples
         </a>
         
@@ -1435,20 +1441,20 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#configuration-api"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#configuration-api');">
             Configuration API
         </a>
         
         
         <a href="#configuration-file-format"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#configuration-file-format');">
             Configuration File Format
         </a>
         
         <a href="#type-definitions"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#type-definitions');">
             Type Definitions
         </a>
         
@@ -1457,32 +1463,32 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#metrics-system"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#metrics-system');">
             Metrics System
         </a>
         
         
         <a href="#current-available-metrics"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#current-available-metrics');">
             Current Available Metrics
         </a>
         
         <a href="#metrics-implementation-details"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#metrics-implementation-details');">
             Metrics Implementation Details
         </a>
         
         <a href="#future-metrics-api-endpoint"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#future-metrics-api-endpoint');">
             Future: Metrics API Endpoint
         </a>
         
         <a href="#admin-api"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#admin-api');">
             Admin API
         </a>
         
@@ -1491,20 +1497,20 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#health-check-api"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#health-check-api');">
             Health Check API
         </a>
         
         
         <a href="#backend-health-checks"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#backend-health-checks');">
             Backend Health Checks
         </a>
         
         <a href="#spooky-health-endpoint"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#spooky-health-endpoint');">
             Spooky Health Endpoint
         </a>
         
@@ -1513,26 +1519,26 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#configuration-validation"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#configuration-validation');">
             Configuration Validation
         </a>
         
         
         <a href="#startup-validation"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#startup-validation');">
             Startup Validation
         </a>
         
         <a href="#exit-codes"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#exit-codes');">
             Exit Codes
         </a>
         
         <a href="#validation-output"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#validation-output');">
             Validation Output
         </a>
         
@@ -1541,14 +1547,14 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#error-codes"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#error-codes');">
             Error Codes
         </a>
         
         
         <a href="#http-status-codes"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#http-status-codes');">
             HTTP Status Codes
         </a>
         
@@ -1557,38 +1563,38 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#logging"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#logging');">
             Logging
         </a>
         
         
         <a href="#log-format"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#log-format');">
             Log Format
         </a>
         
         <a href="#log-output-examples"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#log-output-examples');">
             Log Output Examples
         </a>
         
         <a href="#log-levels"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#log-levels');">
             Log Levels
         </a>
         
         <a href="#log-configuration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#log-configuration');">
             Log Configuration
         </a>
         
         <a href="#environment-variable-control"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#environment-variable-control');">
             Environment Variable Control
         </a>
         
@@ -1597,7 +1603,7 @@ RUST_LOG=trace spooky --config config.yaml
         
         <a href="#environment-variables"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#environment-variables');">
             Environment Variables
         </a>
         
@@ -1609,6 +1615,7 @@ RUST_LOG=trace spooky --config config.yaml
 
     </div>
     <div class="h-12"></div>
+
 </div>
                             </div>
                         </div>

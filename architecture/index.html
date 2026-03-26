@@ -98,6 +98,25 @@
 
     
 
+    
+    <script>
+    document.addEventListener("DOMContentLoaded", function () {
+        document.querySelectorAll("a.headerlink").forEach(function (link) {
+            link.addEventListener("click", function (e) {
+                e.preventDefault();
+
+                // Build the full URL with the anchor fragment
+                const url = window.location.origin + window.location.pathname + this.getAttribute("href");
+
+                navigator.clipboard.writeText(url).then(function () {
+                    // Optional: brief visual feedback
+                });
+            });
+        });
+    });
+</script>
+    
+
 </head>
 
 <body
@@ -186,6 +205,7 @@
     document.addEventListener("keydown", searchShortcutHandler);
 </script>
                 </div>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px ml-2 hidden lg:block">
                 </div>
@@ -202,6 +222,7 @@
                     </span>
                     
                 </a>
+                
                 <div data-orientation="vertical" role="none" data-slot="separator"
                     class="bg-border shrink-0 data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-px 3xl:flex hidden">
                 </div>
@@ -241,13 +262,18 @@
 </header>
         <main class="flex flex-1 flex-col">
             <div class="container-wrapper flex flex-1 flex-col px-2">
-                <div data-slot="sidebar-wrapper" style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
+                <div data-slot="sidebar-wrapper"
+                    style="--sidebar-width:calc(var(--spacing) * 72);--sidebar-width-icon:3rem;"
                     class="group/sidebar-wrapper has-data-[variant=inset]:bg-sidebar flex w-full 3xl:fixed:container 3xl:fixed:px-3 min-h-min flex-1 items-start px-0 [--sidebar-width:220px] [--top-spacing:0] lg:grid lg:grid-cols-[var(--sidebar-width)_minmax(0,1fr)] lg:[--sidebar-width:240px] lg:[--top-spacing:calc(var(--spacing)*4)]">
                     <div data-slot="sidebar"
                         class="w-(--sidebar-width) flex-col text-sidebar-foreground sticky top-[calc(var(--header-height)+0.6rem)] z-30 hidden h-[calc(100svh-10rem)] overscroll-none bg-transparent [--sidebar-menu-width:--spacing(56)] lg:flex">
                         <div class="h-9"></div>
-                        <div class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs"></div>
-                        <div class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex"></div>
+                        <div
+                            class="absolute top-8 z-10 h-8 w-(--sidebar-menu-width) shrink-0 bg-gradient-to-b from-background via-background/80 to-background/50 blur-xs">
+                        </div>
+                        <div
+                            class="absolute top-12 right-2 bottom-0 hidden h-full w-px bg-gradient-to-b from-transparent via-border to-transparent lg:flex">
+                        </div>
                         <div data-slot="sidebar-content" data-sidebar="content" view-transition-name="sidebar"
                             class="flex min-h-0 flex-1 flex-col gap-2 overflow-auto group-data-[collapsible=icon]:overflow-hidden mx-auto no-scrollbar w-(--sidebar-menu-width) overflow-x-hidden px-2">
                             
@@ -736,9 +762,7 @@
   <div class="flex flex-col gap-2">
     <div class="flex flex-col gap-2">
       <div id="page-header" class="flex items-start justify-between">
-        <h1
-          class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl"
-        >
+        <h1 class="scroll-m-20 text-4xl font-semibold tracking-tight sm:text-3xl xl:text-4xl">
           Overview
         </h1>
 
@@ -751,53 +775,29 @@
     <path d="M7 7m0 2.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z"></path><path d="M4.012 16.737a2.005 2.005 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1"></path>
 </svg>
 <span class="max-md:hidden">Copy Page</span>
-</button> 
+</button>
           
-          <a
-            data-slot="button"
-            id="previous-button"
+          <a data-slot="button" id="previous-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/user-guide/load-balancing/"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-left"
-            >
+            href="/spooky/user-guide/load-balancing/">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-left">
               <path d="M5 12l14 0"></path>
               <path d="M5 12l6 6"></path>
               <path d="M5 12l6 -6"></path>
             </svg>
             <span class="sr-only">Previous</span>
           </a>
-           
           
-          <a
-            data-slot="button"
-            id="next-button"
+          
+          <a data-slot="button" id="next-button"
             class="inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 [&amp;_svg]:pointer-events-none [&amp;_svg:not([class*='size-'])]:size-4 shrink-0 [&amp;_svg]:shrink-0 outline-none focus-visible:border-ring focus-visible:ring-ring/50 focus-visible:ring-[3px] aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive bg-secondary text-secondary-foreground hover:bg-secondary/80 extend-touch-target size-8 shadow-none md:size-7"
-            href="/spooky/architecture/overview/"
-          >
+            href="/spooky/architecture/overview/">
             <span class="sr-only">Next</span>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="24"
-              height="24"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="tabler-icon tabler-icon-arrow-right"
-            >
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+              class="tabler-icon tabler-icon-arrow-right">
               <path d="M5 12l14 0"></path>
               <path d="M13 18l6 -6"></path>
               <path d="M13 6l6 6"></path>
@@ -835,7 +835,8 @@
 │  │           QUIC Listener (crates/edge)              │ │
 │  │  - UDP socket management                           │ │
 │  │  - quiche connection handling                      │ │
-│  │  - Connection ID routing                           │ │
+│  │  - Hierarchical Connection ID routing (O(1) fast  │ │
+│  │    path + O(k) radix trie for prefix matching)   │ │
 │  │  - HTTP/3 stream multiplexing                      │ │
 │  └───────────┬────────────────────────────────────────┘ │
 │              │                                           │
@@ -954,17 +955,86 @@
 - Selected: <code>/api</code> (longest match)</p>
 <h2 id="connection-management">Connection Management</h2>
 <h3 id="connection-id-routing">Connection ID Routing</h3>
-<p>Spooky uses a connection ID-based routing scheme to multiplex multiple QUIC connections:</p>
+<p>Spooky uses a multi-level, hierarchical connection ID-based routing scheme to multiplex multiple QUIC connections efficiently:</p>
+<h4 id="routing-hierarchy-in-lookup-order">Routing Hierarchy (in lookup order)</h4>
 <ol>
-<li><strong>Initial Packet</strong>: Client sends with random DCID</li>
-<li><strong>Server Response</strong>: Generates 16-byte SCID, stores connection</li>
-<li><strong>Subsequent Packets</strong>: Client uses server SCID as DCID</li>
-<li><strong>Lookup</strong>: HashMap lookup by DCID finds connection</li>
+<li><strong>Exact DCID Match</strong> → <code>connections: HashMap&lt;Arc&lt;[u8]&gt;, QuicConnection&gt;</code></li>
+<li>Key: Server-generated 16-byte SCID</li>
+<li>Lookup: O(1), handles typical packets</li>
+<li>
+<p>Coverage: ~99% of packets in steady state</p>
+</li>
+<li>
+<p><strong>SCID Alias Lookup</strong> → <code>cid_routes: HashMap&lt;Vec&lt;u8&gt;, Vec&lt;u8&gt;&gt;</code></p>
+</li>
+<li>Maps non-primary SCIDs to primary SCID during rotation</li>
+<li>
+<p>Lookup: O(1), handles SCID rotation scenarios</p>
+</li>
+<li>
+<p><strong>Peer Address Fallback</strong> → <code>peer_routes: HashMap&lt;SocketAddr, Arc&lt;[u8]&gt;&gt;</code></p>
+</li>
+<li>Maps peer address to primary SCID for connection migration</li>
+<li>
+<p>Lookup: O(1), handles peer IP changes</p>
+</li>
+<li>
+<p><strong>Radix Prefix Match</strong> → <code>cid_radix: CidRadix</code> (byte-radix trie)</p>
+</li>
+<li>Handles clients that extend DCID with extra bytes</li>
+<li>Lookup: O(k) where k = DCID length (8-20 bytes, constant)</li>
+<li>Uses longest-prefix matching (prefers longer prefixes)</li>
+<li>
+<p>Memory: O(Σ SCID_length), shares common byte prefixes</p>
+</li>
+<li>
+<p><strong>New Connection Creation</strong></p>
+</li>
+<li>Only for Initial packets</li>
+<li>Generates new 16-byte SCID</li>
+<li>Stores in all four indices</li>
 </ol>
-<p><strong>Special Cases</strong>:
-- <strong>Prefix Match</strong>: Client extends DCID (e.g., 20 bytes) → match by prefix
-- <strong>Peer Fallback</strong>: DCID not found → search by peer address
-- <strong>Version Negotiation</strong>: Unsupported version → send version negotiation packet</p>
+<h4 id="performance-characteristics">Performance Characteristics</h4>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Lookup Step</th>
+<th>Complexity</th>
+<th>Typical Time</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Exact DCID</td>
+<td>O(1)</td>
+<td>&lt;1 μs</td>
+</tr>
+<tr>
+<td>SCID alias</td>
+<td>O(1)</td>
+<td>&lt;1 μs</td>
+</tr>
+<tr>
+<td>Peer fallback</td>
+<td>O(1)</td>
+<td>&lt;1 μs</td>
+</tr>
+<tr>
+<td>Radix prefix</td>
+<td>O(k)</td>
+<td>~5 μs (k≈16 bytes)</td>
+</tr>
+</tbody>
+</table></div>
+<p>With 10,000 concurrent connections, radix lookup time remains constant (~5 μs) instead of scaling linearly (~500+ μs for naive scan).</p>
+<h4 id="scid-lifecycle">SCID Lifecycle</h4>
+<ul>
+<li><strong>Generation</strong>: 16 random bytes, one per connection</li>
+<li><strong>Rotation</strong>: Every 60 seconds or after 8 packets (SCID_ROTATION_INTERVAL, SCID_ROTATION_PACKET_THRESHOLD)</li>
+<li><strong>Tracking</strong>: Active SCIDs maintained in <code>connection.routing_scids</code> HashSet</li>
+<li><strong>Retirement</strong>: Older SCIDs removed from all indices (cid_radix, cid_routes)</li>
+<li><strong>Updates</strong>: Handled incrementally on sync_connection_routes() call, not per-packet</li>
+</ul>
 <h3 id="connection-lifecycle">Connection Lifecycle</h3>
 <pre><code>[Initial Packet] → [Handshake] → [Established] → [Active] → [Draining] → [Closed]
        │                                │            │           │
@@ -1022,17 +1092,29 @@ Unhealthy ─[cooldown expires + success_threshold succeeds]─&gt; Healthy
 </code></pre>
 <h2 id="data-structures">Data Structures</h2>
 <h3 id="quiclistener">QUICListener</h3>
+<p>Main QUIC connection handler. Manages all active connections and routes packets to them.</p>
 <pre><code class="language-rust">pub struct QUICListener {
     socket: UdpSocket,
     quic_config: quiche::Config,
     h3_config: Arc&lt;quiche::h3::Config&gt;,
-    connections: HashMap&lt;Vec&lt;u8&gt;, QuicConnection&gt;,  // Key: SCID
+
+    // Connection ID routing indices
+    connections: HashMap&lt;Arc&lt;[u8]&gt;, QuicConnection&gt;,  // Primary: SCID → Connection
+    cid_routes: HashMap&lt;Vec&lt;u8&gt;, Vec&lt;u8&gt;&gt;,             // Alias: non-primary SCID → primary SCID
+    peer_routes: HashMap&lt;SocketAddr, Arc&lt;[u8]&gt;&gt;,       // Fallback: Peer address → primary SCID
+    cid_radix: CidRadix,                               // Prefix: byte-radix trie for DCID matching
+
     upstream_pools: HashMap&lt;String, Arc&lt;Mutex&lt;UpstreamPool&gt;&gt;&gt;,
     h2_pool: Arc&lt;H2Pool&gt;,
     metrics: Metrics,
     // ...
 }
 </code></pre>
+<p><strong>Connection ID Indices Explanation</strong>:
+- <strong>connections</strong>: Primary index, O(1) exact DCID lookup (fast path)
+- <strong>cid_routes</strong>: Handles SCID rotation where old SCIDs map to current primary
+- <strong>peer_routes</strong>: Allows connection migration when client IP changes
+- <strong>cid_radix</strong>: O(k) longest-prefix matching when client extends DCID bytes</p>
 <h3 id="quicconnection">QuicConnection</h3>
 <pre><code class="language-rust">pub struct QuicConnection {
     quic: quiche::Connection,
@@ -1188,7 +1270,7 @@ where
 </tr>
 </tbody>
 </table></div>
-<h2 id="performance-characteristics">Performance Characteristics</h2>
+<h2 id="performance-characteristics_1">Performance Characteristics</h2>
 <h3 id="memory-usage">Memory Usage</h3>
 <ul>
 <li>Base process: ~50MB</li>
@@ -1276,6 +1358,12 @@ where
 <li>Configuration hot reload</li>
 </ul>
   </div>
+  
+  <script>
+    document.querySelectorAll('article h2, article h3').forEach((header) => {
+      toc.observer.observe(header);
+    });
+  </script>
 </article>
                                 <div class="mx-auto flex flex-wrap h-16 w-full max-w-2xl items-center gap-2 px-4 md:px-0">
     
@@ -1533,7 +1621,7 @@ where
                             <div
                                 class="sticky top-[calc(var(--header-height)+1px)] ml-auto hidden h-[calc(100svh-var(--header-height)-var(--footer-height))] w-72 flex-col gap-4 overflow-hidden overscroll-none pb-8 xl:flex">
                                 <div class="h-(--top-spacing) shrink-0"></div>
-                                <div view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
+                                <div id="toc" view-transition-name="toc" class="no-scrollbar overflow-y-auto px-8">
     <div class="flex flex-col gap-2 p-4 pt-0 text-sm">
         <p class="text-muted-foreground bg-background sticky top-0 h-6 text-xs">On This Page</p>
         
@@ -1542,7 +1630,7 @@ where
         
         <a href="#overview"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#overview');">
             Overview
         </a>
         
@@ -1550,7 +1638,7 @@ where
         
         <a href="#design-principles"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#design-principles');">
             Design Principles
         </a>
         
@@ -1558,7 +1646,7 @@ where
         
         <a href="#component-architecture"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#component-architecture');">
             Component Architecture
         </a>
         
@@ -1566,26 +1654,26 @@ where
         
         <a href="#request-flow"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#request-flow');">
             Request Flow
         </a>
         
         
         <a href="#1-connection-establishment"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#1-connection-establishment');">
             1. Connection Establishment
         </a>
         
         <a href="#2-http3-request-processing"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#2-http3-request-processing');">
             2. HTTP/3 Request Processing
         </a>
         
         <a href="#3-route-matching-algorithm"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#3-route-matching-algorithm');">
             3. Route Matching Algorithm
         </a>
         
@@ -1594,20 +1682,20 @@ where
         
         <a href="#connection-management"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#connection-management');">
             Connection Management
         </a>
         
         
         <a href="#connection-id-routing"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-id-routing');">
             Connection ID Routing
         </a>
         
         <a href="#connection-lifecycle"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-lifecycle');">
             Connection Lifecycle
         </a>
         
@@ -1616,26 +1704,26 @@ where
         
         <a href="#load-balancing"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#load-balancing');">
             Load Balancing
         </a>
         
         
         <a href="#backend-selection"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#backend-selection');">
             Backend Selection
         </a>
         
         <a href="#algorithms"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#algorithms');">
             Algorithms
         </a>
         
         <a href="#health-checking"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#health-checking');">
             Health Checking
         </a>
         
@@ -1644,26 +1732,26 @@ where
         
         <a href="#data-structures"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#data-structures');">
             Data Structures
         </a>
         
         
         <a href="#quiclistener"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#quiclistener');">
             QUICListener
         </a>
         
         <a href="#quicconnection"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#quicconnection');">
             QuicConnection
         </a>
         
         <a href="#upstreampool"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#upstreampool');">
             UpstreamPool
         </a>
         
@@ -1672,26 +1760,26 @@ where
         
         <a href="#concurrency-model"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#concurrency-model');">
             Concurrency Model
         </a>
         
         
         <a href="#main-thread-synchronous"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#main-thread-synchronous');">
             Main Thread (Synchronous)
         </a>
         
         <a href="#async-tasks-tokio-runtime"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#async-tasks-tokio-runtime');">
             Async Tasks (Tokio Runtime)
         </a>
         
         <a href="#blocking-operations"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#blocking-operations');">
             Blocking Operations
         </a>
         
@@ -1700,20 +1788,20 @@ where
         
         <a href="#configuration-system"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#configuration-system');">
             Configuration System
         </a>
         
         
         <a href="#validation-pipeline"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#validation-pipeline');">
             Validation Pipeline
         </a>
         
         <a href="#validation-checks"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#validation-checks');">
             Validation Checks
         </a>
         
@@ -1722,54 +1810,54 @@ where
         
         <a href="#error-handling"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#error-handling');">
             Error Handling
         </a>
         
         
         <a href="#request-level-errors"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#request-level-errors');">
             Request-Level Errors
         </a>
         
         <a href="#connection-level-errors"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-level-errors');">
             Connection-Level Errors
         </a>
         
         <a href="#system-level-errors"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#system-level-errors');">
             System-Level Errors
         </a>
         
         
 
         
-        <a href="#performance-characteristics"
+        <a href="#performance-characteristics_1"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#performance-characteristics_1');">
             Performance Characteristics
         </a>
         
         
         <a href="#memory-usage"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#memory-usage');">
             Memory Usage
         </a>
         
         <a href="#cpu-usage"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#cpu-usage');">
             CPU Usage
         </a>
         
         <a href="#bottlenecks"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#bottlenecks');">
             Bottlenecks
         </a>
         
@@ -1778,20 +1866,20 @@ where
         
         <a href="#security"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#security');">
             Security
         </a>
         
         
         <a href="#tls-configuration"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#tls-configuration');">
             TLS Configuration
         </a>
         
         <a href="#attack-mitigation"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#attack-mitigation');">
             Attack Mitigation
         </a>
         
@@ -1800,26 +1888,26 @@ where
         
         <a href="#observability"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#observability');">
             Observability
         </a>
         
         
         <a href="#logging"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#logging');">
             Logging
         </a>
         
         <a href="#metrics"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#metrics');">
             Metrics
         </a>
         
         <a href="#debugging"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3">
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#debugging');">
             Debugging
         </a>
         
@@ -1828,7 +1916,7 @@ where
         
         <a href="#future-directions"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2">
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#future-directions');">
             Future Directions
         </a>
         
@@ -1840,6 +1928,7 @@ where
 
     </div>
     <div class="h-12"></div>
+
 </div>
                             </div>
                         </div>

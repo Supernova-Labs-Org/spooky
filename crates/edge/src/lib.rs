@@ -15,9 +15,11 @@ use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
 
 use crate::cid_radix::CidRadix;
+use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
 
 pub mod benchmark;
 pub mod cid_radix;
+pub mod constants;
 pub mod quic_listener;
 mod route_index;
 
@@ -33,8 +35,8 @@ pub struct QUICListener {
     pub draining: bool,
     pub drain_start: Option<Instant>,
 
-    pub recv_buf: [u8; 65535], // array initialization, let arr [<data type>, <no of elements>] = [<value of all>, <no of elements>]
-    pub send_buf: [u8; 65535],
+    pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
+    pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
 
     pub connections: HashMap<Arc<[u8]>, QuicConnection>, // KEY: SCID(server connection id)
     pub cid_routes: HashMap<Vec<u8>, Vec<u8>>,           // KEY: alias SCID, VALUE: primary SCID

@@ -1,12 +1,11 @@
-use std::{
-    collections::BTreeMap,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use rand::Rng;
 use spooky_config::config::{Backend, HealthCheck};
 
 const DEFAULT_REPLICAS: u32 = 64;
+const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x00000100000001b3;
 
 #[derive(Clone)]
 pub struct BackendState {
@@ -96,6 +95,7 @@ impl BackendState {
 
 pub struct BackendPool {
     backends: Vec<BackendState>,
+    membership_epoch: u64,
 }
 
 pub struct UpstreamPool {
@@ -126,7 +126,10 @@ impl UpstreamPool {
 
 impl BackendPool {
     pub fn new_from_states(backends: Vec<BackendState>) -> Self {
-        Self { backends }
+        Self {
+            backends,
+            membership_epoch: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -143,14 +146,24 @@ impl BackendPool {
 
     pub fn mark_success(&mut self, index: usize) -> Option<HealthTransition> {
         if let Some(backend) = self.backends.get_mut(index) {
-            return backend.record_success();
+            let was_healthy = backend.is_healthy();
+            let transition = backend.record_success();
+            if was_healthy != backend.is_healthy() {
+                self.membership_epoch = self.membership_epoch.wrapping_add(1);
+            }
+            return transition;
         }
         None
     }
 
     pub fn mark_failure(&mut self, index: usize) -> Option<HealthTransition> {
         if let Some(backend) = self.backends.get_mut(index) {
-            return backend.record_failure();
+            let was_healthy = backend.is_healthy();
+            let transition = backend.record_failure();
+            if was_healthy != backend.is_healthy() {
+                self.membership_epoch = self.membership_epoch.wrapping_add(1);
+            }
+            return transition;
         }
         None
     }
@@ -173,6 +186,10 @@ impl BackendPool {
 
     pub fn backend(&self, index: usize) -> Option<&BackendState> {
         self.backends.get(index)
+    }
+
+    pub fn membership_epoch(&self) -> u64 {
+        self.membership_epoch
     }
 }
 
@@ -241,34 +258,68 @@ impl Default for RoundRobin {
 
 pub struct ConsistentHash {
     replicas: u32,
+    ring: Vec<(u64, usize)>,
+    ring_epoch: Option<u64>,
+    ring_rebuilds: u64,
 }
 
 impl ConsistentHash {
     pub fn new(replicas: u32) -> Self {
         Self {
             replicas: replicas.max(1),
+            ring: Vec::new(),
+            ring_epoch: None,
+            ring_rebuilds: 0,
         }
     }
 
-    pub fn pick(&self, key: &str, pool: &BackendPool) -> Option<usize> {
+    pub fn pick(&mut self, key: &str, pool: &BackendPool) -> Option<usize> {
         if pool.is_empty() {
             return None;
         }
 
-        let candidates = pool.healthy_indices();
-        if candidates.is_empty() {
+        let epoch = pool.membership_epoch();
+        if self.ring_epoch != Some(epoch) {
+            self.rebuild_ring(pool);
+            self.ring_epoch = Some(epoch);
+            self.ring_rebuilds = self.ring_rebuilds.wrapping_add(1);
+        }
+
+        if self.ring.is_empty() {
             return None;
         }
 
-        let ring = build_ring(pool, &candidates, self.replicas);
         let key_hash = hash64(key.as_bytes());
+        let lookup_idx = match self.ring.binary_search_by(|(hash, _)| hash.cmp(&key_hash)) {
+            Ok(idx) => idx,
+            Err(idx) if idx < self.ring.len() => idx,
+            Err(_) => 0,
+        };
 
-        let (_, idx) = ring
-            .range(key_hash..)
-            .next()
-            .or_else(|| ring.iter().next())?;
+        Some(self.ring[lookup_idx].1)
+    }
 
-        Some(*idx)
+    fn rebuild_ring(&mut self, pool: &BackendPool) {
+        self.ring.clear();
+
+        let expected = expected_ring_entries(pool, self.replicas);
+        if self.ring.capacity() < expected {
+            self.ring.reserve(expected - self.ring.capacity());
+        }
+
+        for (idx, backend) in pool.backends.iter().enumerate() {
+            if !backend.is_healthy() {
+                continue;
+            }
+
+            let replicas = self.replicas.saturating_mul(backend.weight());
+            for replica in 0..replicas {
+                self.ring
+                    .push((hash_backend_replica(backend.address(), replica), idx));
+            }
+        }
+
+        self.ring.sort_unstable();
     }
 }
 
@@ -297,36 +348,50 @@ impl Default for Random {
     }
 }
 
-fn build_ring(pool: &BackendPool, indices: &[usize], replicas: u32) -> BTreeMap<u64, usize> {
-    let mut ring = BTreeMap::new();
-    for &idx in indices {
-        let backend = match pool.backend(idx) {
-            Some(backend) => backend,
-            None => continue,
-        };
+fn expected_ring_entries(pool: &BackendPool, replicas: u32) -> usize {
+    pool.backends
+        .iter()
+        .filter(|backend| backend.is_healthy())
+        .map(|backend| replicas.saturating_mul(backend.weight()) as usize)
+        .sum()
+}
 
-        let weight = backend.weight();
-        let replicas = replicas.saturating_mul(weight);
-        for replica in 0..replicas {
-            let mut key = Vec::new();
-            key.extend_from_slice(backend.address().as_bytes());
-            key.extend_from_slice(b"-");
-            key.extend_from_slice(replica.to_string().as_bytes());
-            ring.insert(hash64(&key), idx);
+fn hash_backend_replica(address: &str, replica: u32) -> u64 {
+    let mut hash = FNV_OFFSET;
+    for &byte in address.as_bytes() {
+        hash = hash64_update(hash, byte);
+    }
+    hash = hash64_update(hash, b'-');
+
+    let mut digits = [0u8; 10];
+    let mut value = replica;
+    let mut cursor = digits.len();
+    loop {
+        cursor -= 1;
+        digits[cursor] = b'0' + (value % 10) as u8;
+        value /= 10;
+        if value == 0 {
+            break;
         }
     }
-    ring
+
+    for &digit in &digits[cursor..] {
+        hash = hash64_update(hash, digit);
+    }
+
+    hash
 }
 
 fn hash64(data: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x00000100000001b3;
     let mut hash = FNV_OFFSET;
     for byte in data {
-        hash ^= *byte as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
+        hash = hash64_update(hash, *byte);
     }
     hash
+}
+
+fn hash64_update(hash: u64, byte: u8) -> u64 {
+    (hash ^ byte as u64).wrapping_mul(FNV_PRIME)
 }
 
 #[cfg(test)]
@@ -373,10 +438,60 @@ mod tests {
             create_backend_state("10.0.0.3:1", 1),
         ]);
 
-        let ch = ConsistentHash::new(16);
+        let mut ch = ConsistentHash::new(16);
         let first = ch.pick("user:123", &pool);
         let second = ch.pick("user:123", &pool);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn consistent_hash_rebuilds_only_when_membership_changes() {
+        let mut pool = BackendPool::new_from_states(vec![
+            create_backend_state("10.0.0.1:1", 1),
+            create_backend_state("10.0.0.2:1", 1),
+            create_backend_state("10.0.0.3:1", 1),
+        ]);
+
+        let mut ch = ConsistentHash::new(16);
+
+        let _ = ch.pick("user:123", &pool);
+        let first_rebuilds = ch.ring_rebuilds;
+        let first_len = ch.ring.len();
+        assert_eq!(first_rebuilds, 1);
+
+        for key in ["user:123", "user:124", "user:125", "user:126"] {
+            let _ = ch.pick(key, &pool);
+        }
+        assert_eq!(ch.ring_rebuilds, first_rebuilds);
+        assert_eq!(ch.ring.len(), first_len);
+
+        pool.mark_failure(0);
+        pool.mark_failure(0);
+        pool.mark_failure(0);
+
+        let _ = ch.pick("user:127", &pool);
+        assert_eq!(ch.ring_rebuilds, first_rebuilds + 1);
+        assert!(ch.ring.len() < first_len);
+    }
+
+    #[test]
+    fn consistent_hash_ring_size_matches_weighted_healthy_membership() {
+        let mut pool = BackendPool::new_from_states(vec![
+            create_backend_state("10.0.0.1:1", 2),
+            create_backend_state("10.0.0.2:1", 3),
+        ]);
+
+        let mut ch = ConsistentHash::new(8);
+
+        let _ = ch.pick("user:1", &pool);
+        assert_eq!(ch.ring.len(), (8 * (2 + 3)) as usize);
+
+        pool.mark_failure(0);
+        pool.mark_failure(0);
+        pool.mark_failure(0);
+
+        let _ = ch.pick("user:2", &pool);
+        assert_eq!(ch.ring.len(), (8 * 3) as usize);
     }
 
     #[test]

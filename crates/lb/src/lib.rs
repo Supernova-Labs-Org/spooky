@@ -495,6 +495,28 @@ mod tests {
     }
 
     #[test]
+    fn backend_pool_epoch_changes_only_on_health_membership_transition() {
+        let mut pool = BackendPool::new_from_states(vec![create_backend_state("10.0.0.1:1", 1)]);
+        assert_eq!(pool.membership_epoch(), 0);
+
+        pool.mark_failure(0);
+        pool.mark_failure(0);
+        assert_eq!(pool.membership_epoch(), 0);
+
+        pool.mark_failure(0);
+        assert_eq!(pool.membership_epoch(), 1);
+
+        pool.mark_failure(0);
+        assert_eq!(pool.membership_epoch(), 1);
+
+        pool.mark_success(0);
+        assert_eq!(pool.membership_epoch(), 2);
+
+        pool.mark_success(0);
+        assert_eq!(pool.membership_epoch(), 2);
+    }
+
+    #[test]
     fn unhealthy_backends_are_skipped() {
         let mut pool = BackendPool::new_from_states(vec![
             create_backend_state("10.0.0.1:1", 1),

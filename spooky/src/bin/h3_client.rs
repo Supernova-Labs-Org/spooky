@@ -6,6 +6,11 @@ use std::{
 use clap::Parser;
 use quiche::h3::NameValue;
 use rand::RngCore;
+use spooky_edge::constants::{
+    MAX_DATAGRAM_SIZE_BYTES, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
+    QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
+    REQUEST_TIMEOUT_SECS, UDP_READ_TIMEOUT_MS,
+};
 
 #[derive(Parser)]
 #[command(version, about = "Minimal HTTP/3 client using quiche")]
@@ -34,15 +39,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
     config.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)?;
-    config.set_max_idle_timeout(5_000);
-    config.set_max_recv_udp_payload_size(65_527);
-    config.set_max_send_udp_payload_size(65_527);
-    config.set_initial_max_data(10_000_000);
-    config.set_initial_max_stream_data_bidi_local(1_000_000);
-    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-    config.set_initial_max_stream_data_uni(1_000_000);
-    config.set_initial_max_streams_bidi(100);
-    config.set_initial_max_streams_uni(100);
+    config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
     config.enable_early_data();
     config.verify_peer(!cli.insecure);
 
@@ -56,8 +61,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut response_done = false;
     let mut response_body = Vec::new();
 
-    let mut out = [0u8; 65_535];
-    let mut buf = [0u8; 65_535];
+    let mut out = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
     let start = Instant::now();
     let mut last_timeout = Instant::now();
 
@@ -75,7 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let timeout = conn.timeout().unwrap_or(Duration::from_millis(50));
+        let timeout = conn
+            .timeout()
+            .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS));
         socket.set_read_timeout(Some(timeout))?;
 
         match socket.recv_from(&mut buf) {
@@ -154,7 +161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        if start.elapsed() > Duration::from_secs(5) && !response_done {
+        if start.elapsed() > Duration::from_secs(REQUEST_TIMEOUT_SECS) && !response_done {
             return Err("timeout waiting for response".into());
         }
     }

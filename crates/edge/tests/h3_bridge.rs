@@ -18,6 +18,11 @@ use tokio::net::TcpListener;
 
 use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
 use spooky_edge::QUICListener;
+use spooky_edge::constants::{
+    MAX_DATAGRAM_SIZE_BYTES, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
+    QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
+    REQUEST_TIMEOUT_SECS, UDP_READ_TIMEOUT_MS,
+};
 
 fn write_test_certs(dir: &TempDir) -> (String, String) {
     let mut params = CertificateParams::new(vec!["localhost".into()]);
@@ -120,15 +125,15 @@ fn run_h3_client(addr: SocketAddr) -> Result<String, String> {
     config
         .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
         .map_err(|e| format!("alpn: {e:?}"))?;
-    config.set_max_idle_timeout(5_000);
-    config.set_max_recv_udp_payload_size(1350);
-    config.set_max_send_udp_payload_size(1350);
-    config.set_initial_max_data(10_000_000);
-    config.set_initial_max_stream_data_bidi_local(1_000_000);
-    config.set_initial_max_stream_data_bidi_remote(1_000_000);
-    config.set_initial_max_stream_data_uni(1_000_000);
-    config.set_initial_max_streams_bidi(100);
-    config.set_initial_max_streams_uni(100);
+    config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
     config.set_disable_active_migration(true);
 
     let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
@@ -141,8 +146,8 @@ fn run_h3_client(addr: SocketAddr) -> Result<String, String> {
     let h3_config = quiche::h3::Config::new().map_err(|e| format!("h3: {e:?}"))?;
     let mut h3_conn: Option<quiche::h3::Connection> = None;
 
-    let mut out = [0u8; 1350];
-    let mut buf = [0u8; 65_535];
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
     let (write, send_info) = conn.send(&mut out).map_err(|e| format!("send: {e:?}"))?;
     socket
@@ -164,7 +169,9 @@ fn run_h3_client(addr: SocketAddr) -> Result<String, String> {
             }
         }
 
-        let timeout = conn.timeout().unwrap_or(Duration::from_millis(50));
+        let timeout = conn
+            .timeout()
+            .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS));
         socket
             .set_read_timeout(Some(timeout))
             .map_err(|e| format!("timeout: {e:?}"))?;
@@ -233,7 +240,7 @@ fn run_h3_client(addr: SocketAddr) -> Result<String, String> {
             }
         }
 
-        if start.elapsed() > Duration::from_secs(5) {
+        if start.elapsed() > Duration::from_secs(REQUEST_TIMEOUT_SECS) {
             return Err("timeout waiting for response".to_string());
         }
     }

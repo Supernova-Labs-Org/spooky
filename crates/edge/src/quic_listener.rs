@@ -22,7 +22,17 @@ use tokio::runtime::Handle;
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
-    Metrics, QUICListener, QuicConnection, RequestEnvelope, cid_radix::CidRadix, outcome_from_status, route_index::RouteIndex
+    Metrics, QUICListener, QuicConnection, RequestEnvelope,
+    cid_radix::CidRadix,
+    constants::{
+        DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
+        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
+        QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
+        RESET_TOKEN_LEN_BYTES, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
+        backend_timeout, drain_timeout, scid_rotation_interval,
+    },
+    outcome_from_status,
+    route_index::RouteIndex,
 };
 
 fn is_hop_header(name: &str) -> bool {
@@ -44,19 +54,13 @@ fn request_hash_key(req: &RequestEnvelope) -> &str {
     &req.method
 }
 
-const BACKEND_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_INFLIGHT_PER_BACKEND: usize = 64;
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-const SCID_ROTATION_INTERVAL: Duration = Duration::from_secs(60);
-const SCID_ROTATION_PACKET_THRESHOLD: u64 = 8;
-
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let socket_address = format!("{}:{}", &config.listen.address, &config.listen.port);
 
         let socket = UdpSocket::bind(socket_address.as_str()).expect("Failed to bind UDP socker");
         socket
-            .set_read_timeout(Some(Duration::from_millis(50)))
+            .set_read_timeout(Some(Duration::from_millis(UDP_READ_TIMEOUT_MS)))
             .expect("Failed to set UDP read timeout");
 
         let mut quic_config = Config::new(quiche::PROTOCOL_VERSION).expect("REASON");
@@ -84,15 +88,15 @@ impl QUICListener {
         quic_config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
             .unwrap();
-        quic_config.set_max_idle_timeout(5000);
-        quic_config.set_max_recv_udp_payload_size(1350);
-        quic_config.set_max_send_udp_payload_size(1350);
-        quic_config.set_initial_max_data(10_000_000);
-        quic_config.set_initial_max_stream_data_bidi_local(1_000_000);
-        quic_config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        quic_config.set_initial_max_stream_data_uni(1_000_000);
-        quic_config.set_initial_max_streams_bidi(100);
-        quic_config.set_initial_max_streams_uni(100);
+        quic_config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+        quic_config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+        quic_config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+        quic_config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+        quic_config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+        quic_config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+        quic_config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+        quic_config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+        quic_config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
         quic_config.set_disable_active_migration(true);
         quic_config.verify_peer(false);
 
@@ -138,12 +142,12 @@ impl QUICListener {
             metrics,
             draining: false,
             drain_start: None,
-            recv_buf: [0; 65535],
-            send_buf: [0; 65535],
+            recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
+            send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
             cid_routes: HashMap::new(),
             peer_routes: HashMap::new(),
-            cid_radix: CidRadix::new()
+            cid_radix: CidRadix::new(),
         })
     }
 
@@ -166,7 +170,7 @@ impl QUICListener {
         }
 
         if let Some(start) = self.drain_start
-            && start.elapsed() >= DRAIN_TIMEOUT
+            && start.elapsed() >= drain_timeout()
         {
             self.close_all();
             return true;
@@ -184,7 +188,7 @@ impl QUICListener {
             }
         };
 
-        let mut send_buf = [0u8; 65_535];
+        let mut send_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
         for connection in self.connections.values_mut() {
             let _ = connection.quic.close(true, 0x0, b"draining");
             Self::flush_send(&socket, &mut send_buf, connection);
@@ -230,7 +234,7 @@ impl QUICListener {
 
         // For Short packets, try prefix match (client may append bytes to our SCID)
         // This handles cases where client uses longer DCIDs based on server's SCID
-        if header.ty == quiche::Type::Short && dcid_bytes.len() > 8 {
+        if header.ty == quiche::Type::Short && dcid_bytes.len() > MIN_SCID_LEN_BYTES {
             if let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes) {
                 debug!(
                     "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
@@ -261,7 +265,7 @@ impl QUICListener {
             // return None;
         }
 
-        let mut scid_bytes = [0u8; 16]; // scid must be >= 8 bytes, 16 is perfect
+        let mut scid_bytes = [0u8; DEFAULT_SCID_LEN_BYTES];
         rand::thread_rng().fill_bytes(&mut scid_bytes);
 
         let scid = quiche::ConnectionId::from_ref(&scid_bytes);
@@ -292,7 +296,7 @@ impl QUICListener {
     }
 
     fn random_reset_token() -> u128 {
-        let mut token = [0u8; 16];
+        let mut token = [0u8; RESET_TOKEN_LEN_BYTES];
         rand::thread_rng().fill_bytes(&mut token);
         u128::from_be_bytes(token)
     }
@@ -305,7 +309,7 @@ impl QUICListener {
         let now = Instant::now();
         let elapsed = now.saturating_duration_since(connection.last_scid_rotation);
         if connection.packets_since_rotation < SCID_ROTATION_PACKET_THRESHOLD
-            && elapsed < SCID_ROTATION_INTERVAL
+            && elapsed < scid_rotation_interval()
         {
             return;
         }
@@ -314,7 +318,12 @@ impl QUICListener {
             return;
         }
 
-        let cid_len = connection.quic.source_id().as_ref().len().max(8);
+        let cid_len = connection
+            .quic
+            .source_id()
+            .as_ref()
+            .len()
+            .max(MIN_SCID_LEN_BYTES);
         let mut cid_bytes = vec![0u8; cid_len];
         rand::thread_rng().fill_bytes(&mut cid_bytes);
 
@@ -388,8 +397,12 @@ impl QUICListener {
         // Add new SCIDs to radix trie
         for cid in &active_scids {
             // Get Arc<[u8]> reference from connections HashMap
-            if let Some(arc_cid) = self.connections.keys().find(|k| k.as_ref() == cid.as_slice()) {
-                self.cid_radix.insert(Arc::clone(arc_cid));  // NEW
+            if let Some(arc_cid) = self
+                .connections
+                .keys()
+                .find(|k| k.as_ref() == cid.as_slice())
+            {
+                self.cid_radix.insert(Arc::clone(arc_cid)); // NEW
             }
         }
 
@@ -587,7 +600,7 @@ impl QUICListener {
 
         Self::maybe_rotate_scid(&mut connection, &self.metrics);
 
-        let mut send_buf = [0u8; 65_535];
+        let mut send_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
         Self::flush_send(&socket, &mut send_buf, &mut connection);
         Self::handle_timeout(&socket, &mut send_buf, &mut connection);
@@ -621,7 +634,7 @@ impl QUICListener {
             }
         };
 
-        let mut send_buf = [0u8; 65_535];
+        let mut send_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
         let mut to_remove = Vec::new();
 
         for (scid, connection) in self.connections.iter_mut() {
@@ -673,7 +686,7 @@ impl QUICListener {
         routing_index: &RouteIndex,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
-        let mut body_buf = [0u8; 65_535];
+        let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
         if connection.h3.is_none() {
             connection.h3 = Some(quiche::h3::Connection::with_transport(
@@ -978,7 +991,7 @@ impl QUICListener {
         .map_err(ProxyError::Bridge)?;
 
         let response = run_blocking(|| async {
-            tokio::time::timeout(BACKEND_TIMEOUT, h2_pool.send(backend_addr, request)).await
+            tokio::time::timeout(backend_timeout(), h2_pool.send(backend_addr, request)).await
         })
         .map_err(|e| ProxyError::Transport(format!("send: {e}")))?;
 
@@ -989,9 +1002,10 @@ impl QUICListener {
 
         let (parts, body) = response.into_parts();
 
-        let body_bytes =
-            run_blocking(|| async { tokio::time::timeout(BACKEND_TIMEOUT, body.collect()).await })
-                .map_err(|e| ProxyError::Transport(format!("body: {e}")))?;
+        let body_bytes = run_blocking(|| async {
+            tokio::time::timeout(backend_timeout(), body.collect()).await
+        })
+        .map_err(|e| ProxyError::Transport(format!("body: {e}")))?;
 
         let body_bytes = match body_bytes {
             Ok(inner) => inner

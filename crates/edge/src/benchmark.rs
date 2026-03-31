@@ -3,6 +3,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use spooky_config::config::{Backend, HealthCheck, LoadBalancing, RouteMatch, Upstream};
 
+use crate::constants::{
+    BENCH_CONN_ALIAS_SUFFIX, BENCH_CONN_MISS_ID_FILL, BENCH_CONN_MISS_ID_LEN_BYTES,
+    BENCH_CONN_MISS_PORT, BENCH_CONN_PEER_BASE_PORT, BENCH_CONN_PEER_PORT_SPAN,
+    BENCH_CONN_PRIMARY_ID_LEN_BYTES, BENCH_CONN_PRIMARY_ID_PREFIX_BYTES,
+};
 use crate::route_index::{RouteIndex, scan_lookup};
 
 fn default_health_check() -> HealthCheck {
@@ -108,8 +113,9 @@ impl ConnectionLookupBench {
         let mut peer_routes = HashMap::with_capacity(size);
 
         for i in 0..size {
-            let mut primary = vec![0_u8; 16];
-            primary[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let mut primary = vec![0_u8; BENCH_CONN_PRIMARY_ID_LEN_BYTES];
+            primary[..BENCH_CONN_PRIMARY_ID_PREFIX_BYTES]
+                .copy_from_slice(&(i as u64).to_be_bytes());
             let peer = SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(
                     172,
@@ -117,14 +123,14 @@ impl ConnectionLookupBench {
                     ((i >> 8) & 0xff) as u8,
                     (i & 0xff) as u8,
                 )),
-                20_000 + (i % 20_000) as u16,
+                BENCH_CONN_PEER_BASE_PORT + (i % BENCH_CONN_PEER_PORT_SPAN) as u16,
             );
 
             exact_routes.insert(primary.clone(), peer);
             peer_routes.insert(peer, primary.clone());
 
             let mut alias = primary.clone();
-            alias.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
+            alias.extend_from_slice(&BENCH_CONN_ALIAS_SUFFIX);
             alias_routes.insert(alias, primary);
         }
 
@@ -132,12 +138,15 @@ impl ConnectionLookupBench {
             .to_be_bytes()
             .iter()
             .copied()
-            .chain([0_u8; 8])
+            .chain([0_u8; BENCH_CONN_PRIMARY_ID_PREFIX_BYTES])
             .collect();
         let mut hit_alias = hit_exact.clone();
-        hit_alias.extend_from_slice(&[0xaa, 0xbb, 0xcc, 0xdd]);
-        let prefix_miss = vec![0xff; 24];
-        let miss_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255)), 65535);
+        hit_alias.extend_from_slice(&BENCH_CONN_ALIAS_SUFFIX);
+        let prefix_miss = vec![BENCH_CONN_MISS_ID_FILL; BENCH_CONN_MISS_ID_LEN_BYTES];
+        let miss_peer = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255)),
+            BENCH_CONN_MISS_PORT,
+        );
 
         Self {
             exact_routes,

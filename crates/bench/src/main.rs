@@ -188,10 +188,10 @@ fn scan_iterations(scale: usize) -> u64 {
 
 fn lb_ch_iterations(scale: usize) -> u64 {
     match scale {
-        100 => 3_000,
-        1_000 => 500,
-        10_000 => 40,
-        _ => 100,
+        100 => 300_000,
+        1_000 => 200_000,
+        10_000 => 80_000,
+        _ => 50_000,
     }
 }
 

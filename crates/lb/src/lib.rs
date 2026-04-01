@@ -95,6 +95,8 @@ impl BackendState {
 
 pub struct BackendPool {
     backends: Vec<BackendState>,
+    healthy: Vec<usize>,
+    healthy_pos: Vec<Option<usize>>,
     membership_epoch: u64,
 }
 
@@ -126,8 +128,20 @@ impl UpstreamPool {
 
 impl BackendPool {
     pub fn new_from_states(backends: Vec<BackendState>) -> Self {
+        let mut healthy = Vec::with_capacity(backends.len());
+        let mut healthy_pos = vec![None; backends.len()];
+
+        for (idx, backend) in backends.iter().enumerate() {
+            if backend.is_healthy() {
+                healthy_pos[idx] = Some(healthy.len());
+                healthy.push(idx);
+            }
+        }
+
         Self {
             backends,
+            healthy,
+            healthy_pos,
             membership_epoch: 0,
         }
     }
@@ -145,27 +159,53 @@ impl BackendPool {
     }
 
     pub fn mark_success(&mut self, index: usize) -> Option<HealthTransition> {
-        if let Some(backend) = self.backends.get_mut(index) {
+        if index >= self.backends.len() {
+            return None;
+        }
+
+        let (was_healthy, is_healthy, transition) = {
+            let backend = &mut self.backends[index];
             let was_healthy = backend.is_healthy();
             let transition = backend.record_success();
-            if was_healthy != backend.is_healthy() {
-                self.membership_epoch = self.membership_epoch.wrapping_add(1);
+            let is_healthy = backend.is_healthy();
+            (was_healthy, is_healthy, transition)
+        };
+
+        if was_healthy != is_healthy {
+            if is_healthy {
+                debug_assert!(self.mark_healthy(index));
+            } else {
+                debug_assert!(self.mark_unhealthy(index));
             }
-            return transition;
+            self.membership_epoch = self.membership_epoch.wrapping_add(1);
         }
-        None
+
+        transition
     }
 
     pub fn mark_failure(&mut self, index: usize) -> Option<HealthTransition> {
-        if let Some(backend) = self.backends.get_mut(index) {
+        if index >= self.backends.len() {
+            return None;
+        }
+
+        let (was_healthy, is_healthy, transition) = {
+            let backend = &mut self.backends[index];
             let was_healthy = backend.is_healthy();
             let transition = backend.record_failure();
-            if was_healthy != backend.is_healthy() {
-                self.membership_epoch = self.membership_epoch.wrapping_add(1);
+            let is_healthy = backend.is_healthy();
+            (was_healthy, is_healthy, transition)
+        };
+
+        if was_healthy != is_healthy {
+            if is_healthy {
+                debug_assert!(self.mark_healthy(index));
+            } else {
+                debug_assert!(self.mark_unhealthy(index));
             }
-            return transition;
+            self.membership_epoch = self.membership_epoch.wrapping_add(1);
         }
-        None
+
+        transition
     }
 
     pub fn health_check(&self, index: usize) -> Option<HealthCheck> {
@@ -173,11 +213,7 @@ impl BackendPool {
     }
 
     pub fn healthy_indices(&self) -> Vec<usize> {
-        self.backends
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, backend)| backend.is_healthy().then_some(idx))
-            .collect()
+        self.healthy.clone()
     }
 
     pub fn all_indices(&self) -> Vec<usize> {
@@ -190,6 +226,42 @@ impl BackendPool {
 
     pub fn membership_epoch(&self) -> u64 {
         self.membership_epoch
+    }
+
+    fn mark_healthy(&mut self, index: usize) -> bool {
+        if index >= self.backends.len() {
+            return false;
+        }
+
+        if self.healthy_pos[index].is_some() {
+            return false;
+        }
+
+        let pos = self.healthy.len();
+        self.healthy.push(index);
+        self.healthy_pos[index] = Some(pos);
+        true
+    }
+
+    fn mark_unhealthy(&mut self, index: usize) -> bool {
+        if index >= self.backends.len() {
+            return false;
+        }
+
+        let Some(pos) = self.healthy_pos[index] else {
+            return false;
+        };
+
+        let removed = self.healthy.swap_remove(pos);
+        debug_assert_eq!(removed, index);
+
+        if pos < self.healthy.len() {
+            let moved_index = self.healthy[pos];
+            self.healthy_pos[moved_index] = Some(pos);
+        }
+
+        self.healthy_pos[index] = None;
+        true
     }
 }
 
@@ -239,12 +311,11 @@ impl RoundRobin {
     }
 
     pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
-        let candidates = pool.healthy_indices();
-        if candidates.is_empty() {
+        if pool.healthy.is_empty() {
             return None;
         }
 
-        let idx = candidates[self.next % candidates.len()];
+        let idx = pool.healthy[self.next % pool.healthy.len()];
         self.next = self.next.wrapping_add(1);
         Some(idx)
     }
@@ -307,11 +378,8 @@ impl ConsistentHash {
             self.ring.reserve(expected - self.ring.capacity());
         }
 
-        for (idx, backend) in pool.backends.iter().enumerate() {
-            if !backend.is_healthy() {
-                continue;
-            }
-
+        for &idx in &pool.healthy {
+            let backend = &pool.backends[idx];
             let replicas = self.replicas.saturating_mul(backend.weight());
             for replica in 0..replicas {
                 self.ring
@@ -331,14 +399,13 @@ impl Random {
     }
 
     pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
-        let candidates = pool.healthy_indices();
-        if candidates.is_empty() {
+        if pool.healthy.is_empty() {
             return None;
         }
 
         let mut rng = rand::thread_rng();
-        let idx = rng.gen_range(0..candidates.len());
-        Some(candidates[idx])
+        let idx = rng.gen_range(0..pool.healthy.len());
+        Some(pool.healthy[idx])
     }
 }
 
@@ -349,10 +416,9 @@ impl Default for Random {
 }
 
 fn expected_ring_entries(pool: &BackendPool, replicas: u32) -> usize {
-    pool.backends
+    pool.healthy
         .iter()
-        .filter(|backend| backend.is_healthy())
-        .map(|backend| replicas.saturating_mul(backend.weight()) as usize)
+        .map(|&idx| replicas.saturating_mul(pool.backends[idx].weight()) as usize)
         .sum()
 }
 
@@ -514,6 +580,33 @@ mod tests {
 
         pool.mark_success(0);
         assert_eq!(pool.membership_epoch(), 2);
+    }
+
+    #[test]
+    fn healthy_cache_tracks_membership_changes_without_duplicates() {
+        let mut pool = BackendPool::new_from_states(vec![
+            create_backend_state("10.0.0.1:1", 1),
+            create_backend_state("10.0.0.2:1", 1),
+            create_backend_state("10.0.0.3:1", 1),
+        ]);
+
+        assert_eq!(pool.healthy_indices(), vec![0, 1, 2]);
+
+        pool.mark_failure(1);
+        pool.mark_failure(1);
+        pool.mark_failure(1);
+        assert_eq!(pool.healthy_indices(), vec![0, 2]);
+
+        // Repeated failure for an already unhealthy backend should not change cache.
+        pool.mark_failure(1);
+        assert_eq!(pool.healthy_indices(), vec![0, 2]);
+
+        pool.mark_success(1);
+        let healthy = pool.healthy_indices();
+        assert_eq!(healthy.len(), 3);
+        assert!(healthy.contains(&0));
+        assert!(healthy.contains(&1));
+        assert!(healthy.contains(&2));
     }
 
     #[test]

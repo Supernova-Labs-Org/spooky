@@ -30,6 +30,7 @@ serde_yaml = "0.9.34"
 thiserror = "1"
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
+smallvec = "1"
 
 [workspace.package]
 version = "0.1.0"

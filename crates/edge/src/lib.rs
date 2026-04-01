@@ -1,3 +1,4 @@
+use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet},
     net::UdpSocket,
@@ -62,7 +63,7 @@ pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
     pub authority: Option<String>,
-    pub headers: Vec<(Vec<u8>, Vec<u8>)>,
+    pub headers: SmallVec<[(Vec<u8>, Vec<u8>); 16]>,
     pub body: Vec<u8>,
     pub start: Instant,
 }

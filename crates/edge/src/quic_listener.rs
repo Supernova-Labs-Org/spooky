@@ -13,6 +13,7 @@ use log::{debug, error, info};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
+use smallvec::SmallVec;
 use spooky_bridge::h3_to_h2::build_h2_request;
 use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
@@ -706,7 +707,8 @@ impl QUICListener {
                     let mut method = String::new();
                     let mut path = String::new();
                     let mut authority = None;
-                    let mut headers = Vec::with_capacity(list.len());
+                    let mut headers =
+                        SmallVec::<[(Vec<u8>, Vec<u8>); 16]>::with_capacity(list.len());
 
                     for header in list {
                         headers.push((header.name().to_vec(), header.value().to_vec()));
@@ -723,9 +725,13 @@ impl QUICListener {
                         }
                     }
 
+                    if !method.is_empty() && !path.is_empty() {
+                        info!("HTTP/3 request {} {}", method, path);
+                    }
+
                     let envelope = RequestEnvelope {
-                        method: method.clone(),
-                        path: path.clone(),
+                        method,
+                        path,
                         authority,
                         headers,
                         body: Vec::new(),
@@ -734,10 +740,6 @@ impl QUICListener {
 
                     metrics.inc_total();
                     connection.streams.insert(stream_id, envelope);
-
-                    if !method.is_empty() && !path.is_empty() {
-                        info!("HTTP/3 request {} {}", method, path);
-                    }
                 }
                 Ok((stream_id, quiche::h3::Event::Data)) => loop {
                     match h3.recv_body(&mut connection.quic, stream_id, &mut body_buf) {

@@ -61,7 +61,7 @@ Clear separation of concerns across crate boundaries:
 │  │  Protocol Bridge               │     │
 │  │  - HTTP/3 → HTTP/2 conversion  │     │
 │  │  - Header normalization        │     │
-│  │  - Full body buffering (streaming planned)              │     │
+│  │  - Streaming body via ChannelBody (mpsc-backed)        │     │
 │  └───────────┬────────────────────┘     │
 │              │                           │
 │  ┌───────────▼────────────────────┐     │
@@ -75,7 +75,7 @@ Clear separation of concerns across crate boundaries:
 │  │  HTTP/2 Connection Pool        │     │
 │  │  - Connection reuse            │     │
 │  │  - Request forwarding          │     │
-│  │  - Full response buffering (streaming planned)          │     │
+│  │  - Per-frame response streaming                        │     │
 │  └───────────┬────────────────────┘     │
 └──────────────┼──────────────────────────┘
                │ HTTP/2
@@ -159,7 +159,7 @@ Backend response is processed:
 1. HTTP/2 response is received from backend
 2. Status code and headers are extracted
 3. Response is written back to HTTP/3 stream
-4. Body is buffered from backend and sent to client (streaming planned)
+4. Body is streamed to client per frame via incremental `h3.send_body` calls
 5. Stream is finalized when response is complete
 
 ### 7. Health Management

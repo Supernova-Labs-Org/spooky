@@ -1,16 +1,22 @@
+use std::convert::Infallible;
+
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue, Method, Request, Uri};
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
 
 pub use spooky_errors::BridgeError;
 
+/// Build an HTTP/2 request with a pre-boxed streaming body.
+/// `content_length` is `Some(n)` only when the full length is known upfront
+/// (i.e. the body was fully buffered); pass `None` for streaming bodies.
 pub fn build_h2_request(
     backend: &str,
     method: &str,
     path: &str,
     headers: &[(Vec<u8>, Vec<u8>)],
-    body: &[u8],
-) -> Result<Request<Full<Bytes>>, BridgeError> {
+    body: BoxBody<Bytes, Infallible>,
+    content_length: Option<usize>,
+) -> Result<Request<BoxBody<Bytes, Infallible>>, BridgeError> {
     let method = Method::from_bytes(method.as_bytes()).map_err(|_| BridgeError::InvalidMethod)?;
 
     let request_path = if path.is_empty() { "/" } else { path };
@@ -43,11 +49,11 @@ pub fn build_h2_request(
         builder = builder.header(http::header::HOST, backend);
     }
 
-    if !body.is_empty() {
-        builder = builder.header(http::header::CONTENT_LENGTH, body.len());
+    if let Some(len) = content_length {
+        if len > 0 {
+            builder = builder.header(http::header::CONTENT_LENGTH, len);
+        }
     }
 
-    builder
-        .body(Full::new(Bytes::copy_from_slice(body)))
-        .map_err(BridgeError::Build)
+    builder.body(body).map_err(BridgeError::Build)
 }

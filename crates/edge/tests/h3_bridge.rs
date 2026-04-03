@@ -8,6 +8,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use quiche::h3::NameValue;
 use http_body_util::Full;
 use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -19,9 +20,9 @@ use tokio::net::TcpListener;
 use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
-    MAX_DATAGRAM_SIZE_BYTES, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
-    QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
-    REQUEST_TIMEOUT_SECS, UDP_READ_TIMEOUT_MS,
+    MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS,
+    QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
+    QUIC_INITIAL_STREAM_DATA, REQUEST_TIMEOUT_SECS, UDP_READ_TIMEOUT_MS,
 };
 
 fn write_test_certs(dir: &TempDir) -> (String, String) {
@@ -92,6 +93,37 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
             level: "info".to_string(),
             file: Default::default(),
         },
+    }
+}
+
+fn quic_read_timeout(conn: &quiche::Connection) -> Duration {
+    conn.timeout()
+        .filter(|d| !d.is_zero())
+        .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS))
+}
+
+struct ListenerTaskGuard {
+    stop: Arc<AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ListenerTaskGuard {
+    fn spawn(rt: &tokio::runtime::Runtime, mut listener: QUICListener) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_flag = stop.clone();
+        let handle = rt.spawn_blocking(move || {
+            while !stop_flag.load(Ordering::Relaxed) {
+                listener.poll();
+            }
+        });
+        Self { stop, handle }
+    }
+}
+
+impl Drop for ListenerTaskGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.handle.abort();
     }
 }
 
@@ -169,9 +201,7 @@ fn run_h3_client(addr: SocketAddr) -> Result<String, String> {
             }
         }
 
-        let timeout = conn
-            .timeout()
-            .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS));
+        let timeout = quic_read_timeout(&conn);
         socket
             .set_read_timeout(Some(timeout))
             .map_err(|e| format!("timeout: {e:?}"))?;
@@ -254,21 +284,178 @@ fn http3_to_http2_roundtrip() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
     let backend_addr = rt.block_on(start_h2_backend());
     let config = make_config(0, backend_addr.to_string(), cert, key);
-    let mut listener = QUICListener::new(config).expect("failed to create listener");
+    let listener = QUICListener::new(config).expect("failed to create listener");
     let listen_addr = listener.socket.local_addr().unwrap();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_flag = stop.clone();
-
-    let handle = rt.spawn_blocking(move || {
-        while !stop_flag.load(Ordering::Relaxed) {
-            listener.poll();
-        }
-    });
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
 
     let body = run_h3_client(listen_addr).expect("client request failed");
-    stop.store(true, Ordering::Relaxed);
-    handle.abort();
 
     assert!(body.contains("backend ok"));
+}
+
+/// A request body exceeding MAX_REQUEST_BODY_BYTES must be rejected with 413
+/// before the backend is contacted.
+///
+/// The body is sent in two chunks so the client interleaves send/recv between
+/// them, allowing the server to reply with 413 after the first chunk crosses
+/// the limit without the client blocking on a single large send_body call.
+#[test]
+fn oversized_request_body_returns_413() {
+    use rand::RngCore;
+
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend());
+    let config = make_config(0, backend_addr.to_string(), cert, key);
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    // Two chunks that together exceed the limit; each fits within quiche flow control.
+    let chunk_size = MAX_REQUEST_BODY_BYTES / 2 + 1;
+    let chunk1 = vec![0u8; chunk_size];
+    let chunk2 = vec![0u8; chunk_size];
+    let total_len = chunk1.len() + chunk2.len();
+
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let local_addr = socket.local_addr().unwrap();
+
+    let mut qconfig =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    qconfig.verify_peer(false);
+    qconfig.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+    qconfig.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    qconfig.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    // Window large enough to transmit both chunks.
+    let window = (total_len as u64 + 1) * 2;
+    qconfig.set_initial_max_data(window * 4);
+    qconfig.set_initial_max_stream_data_bidi_local(window);
+    qconfig.set_initial_max_stream_data_bidi_remote(window);
+    qconfig.set_initial_max_stream_data_uni(window);
+    qconfig.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    qconfig.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+    qconfig.set_disable_active_migration(true);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+    let mut conn =
+        quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig).unwrap();
+    let h3_config = quiche::h3::Config::new().unwrap();
+
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    // Send initial QUIC packet.
+    let (w, si) = conn.send(&mut out).unwrap();
+    socket.send_to(&out[..w], si.to).unwrap();
+
+    let start = Instant::now();
+    let mut h3: Option<quiche::h3::Connection> = None;
+    let mut stream_id: Option<u64> = None;
+    let mut chunk1_written = 0usize;
+    let mut chunk2_written = 0usize;
+    let mut response_status = String::new();
+    let mut response_body = Vec::new();
+
+    let status = 'outer: loop {
+        // Flush send.
+        loop {
+            match conn.send(&mut out) {
+                Ok((w, si)) => { let _ = socket.send_to(&out[..w], si.to); }
+                Err(quiche::Error::Done) => break,
+                Err(e) => panic!("send: {e:?}"),
+            }
+        }
+
+        let timeout = quic_read_timeout(&conn);
+        socket.set_read_timeout(Some(timeout)).unwrap();
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr }).unwrap();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                       || e.kind() == std::io::ErrorKind::TimedOut => {
+                conn.on_timeout();
+            }
+            Err(e) => panic!("recv: {e:?}"),
+        }
+
+        if conn.is_established() && h3.is_none() {
+            h3 = Some(quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap());
+        }
+
+        if let Some(h3c) = h3.as_mut() {
+            // Send headers + first chunk.
+            if stream_id.is_none() && conn.is_established() {
+                let content_length = total_len.to_string();
+                let headers = vec![
+                    quiche::h3::Header::new(b":method", b"POST"),
+                    quiche::h3::Header::new(b":scheme", b"https"),
+                    quiche::h3::Header::new(b":authority", b"localhost"),
+                    quiche::h3::Header::new(b":path", b"/"),
+                    quiche::h3::Header::new(b"content-length", content_length.as_bytes()),
+                ];
+                let sid = h3c.send_request(&mut conn, &headers, false).unwrap();
+                stream_id = Some(sid);
+            }
+
+            if let Some(sid) = stream_id {
+                // send_body() can write partial buffers; keep retrying until both chunks are
+                // fully queued so the server always receives > MAX_REQUEST_BODY_BYTES.
+                if chunk1_written < chunk1.len() {
+                    match h3c.send_body(&mut conn, sid, &chunk1[chunk1_written..], false) {
+                        Ok(written) => chunk1_written += written,
+                        Err(quiche::h3::Error::Done | quiche::h3::Error::StreamBlocked) => {}
+                        Err(e) => panic!("send_body chunk1: {e:?}"),
+                    }
+                } else if chunk2_written < chunk2.len() {
+                    match h3c.send_body(&mut conn, sid, &chunk2[chunk2_written..], true) {
+                        Ok(written) => chunk2_written += written,
+                        Err(quiche::h3::Error::Done | quiche::h3::Error::StreamBlocked) => {}
+                        Err(e) => panic!("send_body chunk2: {e:?}"),
+                    }
+                }
+            }
+
+            // Poll for server response.
+            loop {
+                match h3c.poll(&mut conn) {
+                    Ok((_sid, quiche::h3::Event::Headers { list, .. })) => {
+                        for h in &list {
+                            if h.name() == b":status" {
+                                response_status = String::from_utf8_lossy(h.value()).to_string();
+                            }
+                        }
+                    }
+                    Ok((sid, quiche::h3::Event::Data)) => loop {
+                        match h3c.recv_body(&mut conn, sid, &mut buf) {
+                            Ok(r) => response_body.extend_from_slice(&buf[..r]),
+                            Err(quiche::h3::Error::Done) => break,
+                            Err(e) => panic!("recv_body: {e:?}"),
+                        }
+                    },
+                    Ok((_sid, quiche::h3::Event::Finished)) => {
+                        break 'outer response_status.clone();
+                    }
+                    Ok((_sid, quiche::h3::Event::Reset(_))) => {
+                        break 'outer response_status.clone();
+                    }
+                    Ok(_) => {}
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(e) => panic!("poll: {e:?}"),
+                }
+            }
+        }
+
+        if start.elapsed() > Duration::from_secs(REQUEST_TIMEOUT_SECS) {
+            panic!("timeout waiting for 413 response");
+        }
+    };
+
+    assert_eq!(status, "413", "expected 413 Payload Too Large, got {status}");
 }

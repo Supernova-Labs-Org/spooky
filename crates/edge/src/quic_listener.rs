@@ -1,14 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     net::UdpSocket,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use core::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use log::{debug, error, info};
 use quiche::Config;
 use quiche::h3::NameValue;
@@ -23,14 +23,14 @@ use tokio::runtime::Handle;
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
-    Metrics, QUICListener, QuicConnection, RequestEnvelope,
+    ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
-        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
-        QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
-        RESET_TOKEN_LEN_BYTES, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
-        backend_timeout, drain_timeout, scid_rotation_interval,
+        MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS,
+        QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
+        QUIC_INITIAL_STREAM_DATA, RESET_TOKEN_LEN_BYTES, SCID_ROTATION_PACKET_THRESHOLD,
+        UDP_READ_TIMEOUT_MS, backend_timeout, drain_timeout, scid_rotation_interval,
     },
     outcome_from_status,
     route_index::RouteIndex,
@@ -41,18 +41,6 @@ fn is_hop_header(name: &str) -> bool {
         name,
         "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade"
     )
-}
-
-fn request_hash_key(req: &RequestEnvelope) -> &str {
-    if let Some(authority) = &req.authority {
-        return authority;
-    }
-
-    if !req.path.is_empty() {
-        return &req.path;
-    }
-
-    &req.method
 }
 
 impl QUICListener {
@@ -590,7 +578,7 @@ impl QUICListener {
         if (connection.quic.is_established() || connection.quic.is_in_early_data())
             && let Err(e) = Self::handle_h3(
                 &mut connection,
-                &h2_pool,
+                Arc::clone(&h2_pool),
                 &self.upstream_pools,
                 &self.routing_index,
                 &self.metrics,
@@ -682,7 +670,7 @@ impl QUICListener {
 
     fn handle_h3(
         connection: &mut QuicConnection,
-        h2_pool: &H2Pool,
+        h2_pool: Arc<H2Pool>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
         metrics: &Metrics,
@@ -729,23 +717,100 @@ impl QUICListener {
                         info!("HTTP/3 request {} {}", method, path);
                     }
 
-                    let envelope = RequestEnvelope {
-                        method,
-                        path,
-                        authority,
-                        headers,
-                        body: Vec::new(),
-                        start: Instant::now(),
+                    // Route lookup — needed to start the H2 request immediately.
+                    let resolved = Self::resolve_backend(
+                        &method, &path, authority.as_deref(),
+                        upstream_pools, routing_index,
+                    );
+
+                    let (body_tx, response_rx, backend_addr, backend_index) = match resolved {
+                        Ok((addr, idx, _pool)) => {
+                            // Create a channel body so quiche Data chunks stream
+                            // directly into the in-flight H2 request.
+                            let (tx, channel_body) = ChannelBody::channel(8);
+                            let boxed = channel_body.boxed();
+                            let h2 = h2_pool.clone();
+                            let req_headers = headers.clone();
+                            let req_method = method.clone();
+                            let req_path = path.clone();
+                            let fwd_addr = addr.clone();
+                            let handle: tokio::task::JoinHandle<ForwardResult> = {
+                                let fut = async move {
+                                    let request = build_h2_request(
+                                        &fwd_addr, &req_method, &req_path,
+                                        &req_headers, boxed, None,
+                                    )
+                                    .map_err(ProxyError::Bridge)?;
+
+                                    let response = tokio::time::timeout(
+                                        backend_timeout(),
+                                        h2.send(&fwd_addr, request),
+                                    )
+                                    .await
+                                    .map_err(|_| ProxyError::Timeout)??;
+
+                                    let (parts, body) = response.into_parts();
+                                    Ok((parts.status, parts.headers, body))
+                                };
+                                match Handle::try_current() {
+                                    Ok(handle) => handle.spawn(fut),
+                                    Err(_) => fallback_runtime().spawn(fut),
+                                }
+                            };
+                            (Some(tx), Some(handle), Some(addr), Some(idx))
+                        }
+                        Err(_) => (None, None, None, None),
                     };
 
                     metrics.inc_total();
-                    connection.streams.insert(stream_id, envelope);
+                    connection.streams.insert(
+                        stream_id,
+                        RequestEnvelope {
+                            method,
+                            path,
+                            authority,
+                            headers,
+                            body_tx,
+                            response_rx,
+                            body_buf: Vec::new(),
+                            body_bytes_received: 0,
+                            backend_addr,
+                            backend_index,
+                            start: Instant::now(),
+                        },
+                    );
                 }
                 Ok((stream_id, quiche::h3::Event::Data)) => loop {
                     match h3.recv_body(&mut connection.quic, stream_id, &mut body_buf) {
                         Ok(read) => {
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
-                                req.body.extend_from_slice(&body_buf[..read]);
+                                // Enforce cap on total bytes received for the stream,
+                                // including chunks already forwarded to the H2 body channel.
+                                let next_total =
+                                    req.body_bytes_received.saturating_add(read);
+                                if next_total > MAX_REQUEST_BODY_BYTES {
+                                    connection.streams.remove(&stream_id);
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::PAYLOAD_TOO_LARGE,
+                                        b"request body too large\n",
+                                    )?;
+                                    break;
+                                }
+                                req.body_bytes_received = next_total;
+                                let chunk = Bytes::copy_from_slice(&body_buf[..read]);
+                                if let Some(tx) = &req.body_tx {
+                                    // Non-blocking send: if the channel is full, fall
+                                    // back to buffering so the poll loop is not stalled.
+                                    match tx.try_send(chunk.clone()) {
+                                        Ok(_) => {}
+                                        Err(_) => req.body_buf.push(chunk),
+                                    }
+                                } else {
+                                    req.body_buf.push(chunk);
+                                }
                             }
                         }
                         Err(quiche::h3::Error::Done) => break,
@@ -753,13 +818,45 @@ impl QUICListener {
                     }
                 },
                 Ok((stream_id, quiche::h3::Event::Finished)) => {
-                    if let Some(req) = connection.streams.remove(&stream_id) {
-                        Self::handle_request_finish(
+                    if let Some(mut req) = connection.streams.remove(&stream_id) {
+                        // Drain any buffered chunks into the channel before
+                        // closing it, then drop the sender to signal end-of-body.
+                        if let Some(tx) = req.body_tx.take() {
+                            let buf = std::mem::take(&mut req.body_buf);
+                            run_blocking(|| async move {
+                                for chunk in buf {
+                                    let _ = tx.send(chunk).await;
+                                }
+                                // tx drops here, closing the channel
+                            })
+                            .ok();
+                        }
+
+                        // Await the in-flight H2 task and route the result.
+                        let forward_result = match req.response_rx.take() {
+                            Some(handle) => run_blocking(|| async move {
+                                match tokio::time::timeout(backend_timeout(), handle).await {
+                                    Ok(Ok(r)) => r,
+                                    Ok(Err(_)) => Err(ProxyError::Transport(
+                                        "task panicked".into(),
+                                    )),
+                                    Err(_) => Err(ProxyError::Timeout),
+                                }
+                            })
+                            .unwrap_or(Err(ProxyError::Transport(
+                                "run_blocking failed".into(),
+                            ))),
+                            None => Err(ProxyError::Transport(
+                                "no backend resolved for request".into(),
+                            )),
+                        };
+
+                        Self::handle_forward_result(
                             h3,
                             &mut connection.quic,
                             stream_id,
-                            req,
-                            h2_pool,
+                            &req,
+                            forward_result,
                             upstream_pools,
                             routing_index,
                             metrics,
@@ -779,244 +876,157 @@ impl QUICListener {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn handle_request_finish(
-        h3: &mut quiche::h3::Connection,
-        quic: &mut quiche::Connection,
-        stream_id: u64,
-        req: RequestEnvelope,
-        h2_pool: &H2Pool,
+    /// Resolve routing + LB for a request, returning `(backend_addr, backend_index, pool)`.
+    fn resolve_backend(
+        method: &str,
+        path: &str,
+        authority: Option<&str>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
-        metrics: &Metrics,
-    ) -> Result<(), quiche::h3::Error> {
-        let start = req.start;
-        if req.method.is_empty() || req.path.is_empty() {
-            return Self::send_simple_response(
-                h3,
-                quic,
-                stream_id,
-                http::StatusCode::BAD_REQUEST,
-                b"invalid request\n",
-            );
+    ) -> Result<(String, usize, Arc<Mutex<UpstreamPool>>), ProxyError> {
+        if method.is_empty() || path.is_empty() {
+            return Err(ProxyError::Transport("empty method or path".into()));
         }
 
-        // Find the upstream for this request
         let upstream_name = routing_index
-            .lookup(&req.path, req.authority.as_deref())
-            .ok_or_else(|| {
-                error!(
-                    "No route found for path: {} (host: {:?})",
-                    req.path, req.authority
-                );
-                quiche::h3::Error::InternalError
-            })?;
+            .lookup(path, authority)
+            .ok_or_else(|| ProxyError::Transport(format!("no route for {path}")))?;
 
-        let upstream_pool = upstream_pools.get(upstream_name).ok_or_else(|| {
-            error!("Upstream pool not found for: {}", upstream_name);
-            quiche::h3::Error::InternalError
-        })?;
+        let upstream_pool = upstream_pools
+            .get(upstream_name)
+            .ok_or_else(|| ProxyError::Transport(format!("pool not found: {upstream_name}")))?
+            .clone();
 
-        let upstream_len = upstream_pool
-            .lock()
-            .map(|pool| pool.pool.len())
-            .unwrap_or(0);
+        let upstream_len = upstream_pool.lock().map(|p| p.pool.len()).unwrap_or(0);
         if upstream_len == 0 {
-            return Self::send_simple_response(
-                h3,
-                quic,
-                stream_id,
-                http::StatusCode::SERVICE_UNAVAILABLE,
-                b"no servers configured for upstream\n",
-            );
+            return Err(ProxyError::Transport("no servers in upstream".into()));
         }
 
-        let key = request_hash_key(&req);
+        let key: &str = authority.unwrap_or(if !path.is_empty() { path } else { method });
+
         let (backend_index, lb_type) = {
             let mut pool = upstream_pool.lock().expect("upstream pool lock");
             let lb_type = pool.lb_name();
-            let backend_index = pool.pick(key);
-            (backend_index, lb_type)
+            let idx = pool.pick(key);
+            (idx, lb_type)
         };
-        let backend_index = match backend_index {
-            Some(index) => index,
-            None => {
-                return Self::send_simple_response(
-                    h3,
-                    quic,
-                    stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    b"no healthy servers\n",
-                );
-            }
-        };
+        let backend_index = backend_index
+            .ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
 
         let backend_addr = {
             let pool = upstream_pool.lock().expect("upstream pool lock");
             pool.pool
                 .address(backend_index)
-                .map(|addr| addr.to_string())
+                .map(|a| a.to_string())
+                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?
         };
-        let backend_addr = match backend_addr {
-            Some(addr) => addr,
-            None => {
+
+        info!("Selected backend {} via {}", backend_addr, lb_type);
+        Ok((backend_addr, backend_index, upstream_pool))
+    }
+
+    /// Handle an already-resolved `ForwardResult`, applying health transitions
+    /// and sending the H3 response.
+    #[allow(clippy::too_many_arguments)]
+    fn handle_forward_result(
+        h3: &mut quiche::h3::Connection,
+        quic: &mut quiche::Connection,
+        stream_id: u64,
+        req: &RequestEnvelope,
+        result: ForwardResult,
+        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        routing_index: &RouteIndex,
+        metrics: &Metrics,
+    ) -> Result<(), quiche::h3::Error> {
+        let start = req.start;
+
+        // If routing failed at Headers time, return an appropriate error now.
+        let (backend_addr, backend_index) = match (&req.backend_addr, req.backend_index) {
+            (Some(a), Some(i)) => (a.as_str(), i),
+            _ => {
+                metrics.inc_failure();
                 return Self::send_simple_response(
                     h3,
                     quic,
                     stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    b"invalid server\n",
+                    if req.method.is_empty() || req.path.is_empty() {
+                        http::StatusCode::BAD_REQUEST
+                    } else {
+                        http::StatusCode::SERVICE_UNAVAILABLE
+                    },
+                    b"no upstream available\n",
                 );
             }
         };
 
-        info!("Selected backend {} via {}", backend_addr, lb_type);
+        // Re-acquire the upstream pool for health marking.
+        let upstream_name = routing_index.lookup(&req.path, req.authority.as_deref());
+        let upstream_pool = upstream_name
+            .and_then(|n| upstream_pools.get(n))
+            .cloned();
 
-        match Self::forward_request(&backend_addr, h2_pool, req) {
+        match result {
             Ok((status, headers, body)) => {
-                let transition = upstream_pool.lock().ok().and_then(|mut pool| {
-                    match outcome_from_status(status) {
-                        crate::HealthClassification::Success => {
-                            pool.pool.mark_success(backend_index)
+                if let Some(pool) = &upstream_pool {
+                    let transition = pool.lock().ok().and_then(|mut p| {
+                        match outcome_from_status(status) {
+                            crate::HealthClassification::Success => {
+                                p.pool.mark_success(backend_index)
+                            }
+                            crate::HealthClassification::Failure => {
+                                p.pool.mark_failure(backend_index)
+                            }
+                            crate::HealthClassification::Neutral => None,
                         }
-                        crate::HealthClassification::Failure => {
-                            pool.pool.mark_failure(backend_index)
-                        }
-                        crate::HealthClassification::Neutral => None,
+                    });
+                    if let Some(t) = transition {
+                        Self::log_health_transition(backend_addr, t);
                     }
-                });
-                if let Some(transition) = transition {
-                    Self::log_health_transition(&backend_addr, transition);
                 }
                 metrics.inc_success();
-                let latency = start.elapsed().as_millis();
                 info!(
                     "Upstream {} status {} latency_ms {}",
-                    backend_addr, status, latency
+                    backend_addr, status, start.elapsed().as_millis()
                 );
-                Self::send_backend_response(h3, quic, stream_id, status, &headers, &body)
+                Self::send_backend_response(h3, quic, stream_id, status, &headers, body)
             }
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
-                let latency = start.elapsed().as_millis();
-                info!(
-                    "Upstream {} status 400 latency_ms {}",
-                    backend_addr, latency
-                );
-                Self::send_simple_response(
-                    h3,
-                    quic,
-                    stream_id,
-                    http::StatusCode::BAD_REQUEST,
-                    b"invalid request\n",
-                )
+                info!("Upstream {} status 400 latency_ms {}", backend_addr, start.elapsed().as_millis());
+                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::BAD_REQUEST, b"invalid request\n")
             }
             Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
                 error!("Transport error");
-                let transition = upstream_pool
-                    .lock()
-                    .ok()
-                    .and_then(|mut pool| pool.pool.mark_failure(backend_index));
-                if let Some(transition) = transition {
-                    Self::log_health_transition(&backend_addr, transition);
+                if let Some(pool) = &upstream_pool {
+                    if let Some(t) = pool.lock().ok().and_then(|mut p| p.pool.mark_failure(backend_index)) {
+                        Self::log_health_transition(backend_addr, t);
+                    }
                 }
                 metrics.inc_failure();
                 metrics.inc_backend_error();
-                let latency = start.elapsed().as_millis();
-                info!(
-                    "Upstream {} status 502 latency_ms {}",
-                    backend_addr, latency
-                );
-                Self::send_simple_response(
-                    h3,
-                    quic,
-                    stream_id,
-                    http::StatusCode::BAD_GATEWAY,
-                    b"upstream error\n",
-                )
+                info!("Upstream {} status 502 latency_ms {}", backend_addr, start.elapsed().as_millis());
+                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::BAD_GATEWAY, b"upstream error\n")
             }
             Err(ProxyError::Timeout) => {
                 error!("Server timeout");
-                let transition = upstream_pool
-                    .lock()
-                    .ok()
-                    .and_then(|mut pool| pool.pool.mark_failure(backend_index));
-                if let Some(transition) = transition {
-                    Self::log_health_transition(&backend_addr, transition);
+                if let Some(pool) = &upstream_pool {
+                    if let Some(t) = pool.lock().ok().and_then(|mut p| p.pool.mark_failure(backend_index)) {
+                        Self::log_health_transition(backend_addr, t);
+                    }
                 }
                 metrics.inc_failure();
                 metrics.inc_timeout();
-                let latency = start.elapsed().as_millis();
-                info!(
-                    "Upstream {} status 503 latency_ms {}",
-                    backend_addr, latency
-                );
-                Self::send_simple_response(
-                    h3,
-                    quic,
-                    stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
-                    b"upstream timeout\n",
-                )
+                info!("Upstream {} status 503 latency_ms {}", backend_addr, start.elapsed().as_millis());
+                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::SERVICE_UNAVAILABLE, b"upstream timeout\n")
             }
             Err(ProxyError::Tls(err)) => {
-                error!("TLS configuration error during request processing: {}", err);
-                // TLS errors during request processing indicate server misconfiguration
-                // Don't mark backend as failed since this is a local TLS issue
+                error!("TLS error: {}", err);
                 metrics.inc_failure();
-                let latency = start.elapsed().as_millis();
-                info!("TLS error for stream {} latency_ms {}", stream_id, latency);
-                Self::send_simple_response(
-                    h3,
-                    quic,
-                    stream_id,
-                    http::StatusCode::INTERNAL_SERVER_ERROR,
-                    b"internal server error\n",
-                )
+                info!("TLS error for stream {} latency_ms {}", stream_id, start.elapsed().as_millis());
+                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::INTERNAL_SERVER_ERROR, b"internal server error\n")
             }
         }
-    }
-
-    fn forward_request(
-        backend_addr: &str,
-        h2_pool: &H2Pool,
-        req: RequestEnvelope,
-    ) -> Result<(http::StatusCode, http::HeaderMap, Bytes), ProxyError> {
-        let request = build_h2_request(
-            backend_addr,
-            &req.method,
-            &req.path,
-            &req.headers,
-            &req.body,
-        )
-        .map_err(ProxyError::Bridge)?;
-
-        let response = run_blocking(|| async {
-            tokio::time::timeout(backend_timeout(), h2_pool.send(backend_addr, request)).await
-        })
-        .map_err(|e| ProxyError::Transport(format!("send: {e}")))?;
-
-        let response = match response {
-            Ok(inner) => inner?,
-            Err(_) => return Err(ProxyError::Timeout),
-        };
-
-        let (parts, body) = response.into_parts();
-
-        let body_bytes = run_blocking(|| async {
-            tokio::time::timeout(backend_timeout(), body.collect()).await
-        })
-        .map_err(|e| ProxyError::Transport(format!("body: {e}")))?;
-
-        let body_bytes = match body_bytes {
-            Ok(inner) => inner
-                .map(|c| c.to_bytes())
-                .map_err(|e| ProxyError::Transport(format!("body: {e:?}")))?,
-            Err(_) => return Err(ProxyError::Timeout),
-        };
-
-        Ok((parts.status, parts.headers, body_bytes))
     }
 
     fn send_backend_response(
@@ -1025,9 +1035,9 @@ impl QUICListener {
         stream_id: u64,
         status: http::StatusCode,
         headers: &http::HeaderMap,
-        body: &Bytes,
+        body: hyper::body::Incoming,
     ) -> Result<(), quiche::h3::Error> {
-        let mut resp_headers = Vec::with_capacity(headers.len() + 2);
+        let mut resp_headers = Vec::with_capacity(headers.len() + 1);
 
         resp_headers.push(quiche::h3::Header::new(
             b":status",
@@ -1044,13 +1054,71 @@ impl QUICListener {
             ));
         }
 
-        resp_headers.push(quiche::h3::Header::new(
-            b"content-length",
-            body.len().to_string().as_bytes(),
-        ));
+        // Drive the response body one frame at a time.  Each call to
+        // run_blocking fetches exactly the next data frame from the backend
+        // and returns it to the sync side, where send_body is called
+        // immediately.  This avoids accumulating the full response in memory:
+        // at most one frame is held between run_blocking returning and
+        // send_body completing.
+        //
+        // Note: h3/quic are !Send so they cannot enter the async closure.
+        // run_blocking(block_in_place) keeps execution on the same OS thread,
+        // making the per-frame loop safe without locks.
+        let deadline = std::time::Instant::now() + backend_timeout();
+
+        // Wrap body in a Mutex so the async closure can borrow it across
+        // repeated run_blocking calls without moving it.
+        let body = std::sync::Mutex::new(body);
 
         h3.send_response(quic, stream_id, &resp_headers, false)?;
-        h3.send_body(quic, stream_id, body, true)?;
+
+        let mut sent_any = false;
+        loop {
+            let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
+                Some(d) => d,
+                None => break, // timeout
+            };
+
+            // Fetch the next data frame from the backend.
+            let next: Option<Bytes> = match run_blocking(|| async {
+                tokio::time::timeout(remaining, async {
+                    let mut guard = body.lock().expect("body mutex");
+                    loop {
+                        match BodyExt::frame(&mut *guard).await {
+                            Some(Ok(f)) => {
+                                if let Ok(chunk) = f.into_data() {
+                                    return Some(chunk);
+                                }
+                                // trailers / other frames — skip
+                            }
+                            Some(Err(_)) | None => return None,
+                        }
+                    }
+                })
+                .await
+                .unwrap_or(None)
+            }) {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+
+            match next {
+                Some(chunk) => {
+                    h3.send_body(quic, stream_id, &chunk, false)?;
+                    sent_any = true;
+                }
+                None => {
+                    // Body exhausted — send final empty frame with fin=true.
+                    h3.send_body(quic, stream_id, b"", true)?;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Timeout or error path: close stream.
+        let _ = sent_any;
+        h3.send_body(quic, stream_id, b"", true)?;
+
         Ok(())
     }
 
@@ -1162,7 +1230,7 @@ impl QUICListener {
                     let request = match http::Request::builder()
                         .method("GET")
                         .uri(format!("http://{address}{path}"))
-                        .body(Full::new(Bytes::new()))
+                        .body(BoxBody::new(Full::new(Bytes::new())))
                     {
                         Ok(req) => req,
                         Err(_) => continue,
@@ -1203,9 +1271,18 @@ where
 {
     match Handle::try_current() {
         Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(f()))),
-        Err(_) => {
-            let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
-            Ok(rt.block_on(f()))
-        }
+        Err(_) => Ok(fallback_runtime().block_on(f())),
     }
+}
+
+fn fallback_runtime() -> &'static tokio::runtime::Runtime {
+    static FALLBACK_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    FALLBACK_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .thread_name("spooky-edge-fallback-rt")
+            .build()
+            .expect("failed to create fallback tokio runtime")
+    })
 }

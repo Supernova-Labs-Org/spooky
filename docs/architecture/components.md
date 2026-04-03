@@ -868,7 +868,7 @@ cargo test -p spooky-edge --test lb_integration
 - Amortize handshake cost
 
 **Async I/O:**
-- Backend requests with full body buffering (streaming planned)
+- Streaming request body via `ChannelBody` (mpsc channel, no full buffering)
 - Efficient task scheduling via Tokio
 
 ### Memory Management

@@ -1,22 +1,59 @@
+use bytes::Bytes;
 use smallvec::SmallVec;
 use std::{
     collections::{HashMap, HashSet},
+    convert::Infallible,
     net::UdpSocket,
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    task::{Context, Poll},
     time::Instant,
 };
 
 use core::net::SocketAddr;
 
+use hyper::body::{Body, Frame};
 use spooky_config::config::Config;
 use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::cid_radix::CidRadix;
 use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
+
+/// A streaming HTTP body backed by a tokio mpsc channel.
+/// The quiche Data handler sends chunks through the sender;
+/// hyper reads them from the receiver as the H2 request body.
+pub struct ChannelBody {
+    rx: mpsc::Receiver<Bytes>,
+}
+
+impl ChannelBody {
+    pub fn channel(buffer: usize) -> (mpsc::Sender<Bytes>, Self) {
+        let (tx, rx) = mpsc::channel(buffer);
+        (tx, Self { rx })
+    }
+}
+
+impl Body for ChannelBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(Some(chunk)) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 pub mod benchmark;
 pub mod cid_radix;
@@ -59,12 +96,26 @@ pub struct QuicConnection {
     pub last_scid_rotation: Instant,
 }
 
+/// Result type returned by the in-flight H2 forwarding task.
+pub type ForwardResult =
+    Result<(http::StatusCode, http::HeaderMap, hyper::body::Incoming), spooky_errors::ProxyError>;
+
 pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
     pub authority: Option<String>,
     pub headers: SmallVec<[(Vec<u8>, Vec<u8>); 16]>,
-    pub body: Vec<u8>,
+    /// Sender half of the body channel.  Dropping it signals end-of-body to hyper.
+    pub body_tx: Option<mpsc::Sender<Bytes>>,
+    /// In-flight H2 forwarding task.  Awaited on `Finished`.
+    pub response_rx: Option<JoinHandle<ForwardResult>>,
+    /// Body chunks that arrived before the channel had capacity.
+    pub body_buf: Vec<Bytes>,
+    /// Total body bytes received on this stream (buffered + already forwarded).
+    pub body_bytes_received: usize,
+    /// Resolved backend address and index (for health marking on response).
+    pub backend_addr: Option<String>,
+    pub backend_index: Option<usize>,
     pub start: Instant,
 }
 

@@ -1,14 +1,23 @@
-.PHONY: run build build-spooky clean certs certs-selfsigned certs-ca certs-clean certs-verify
+.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify
 
 run:
 	make build
 	sudo ./target/release/spooky --config config/config.yaml
 
 build:
-	cargo build --release
+	sudo cargo build --release
 
 build-spooky:
-	cargo build -p spooky --bin spooky --release
+	sudo cargo build -p spooky --bin spooky --release
+
+test:
+	sudo cargo test --workspace
+
+test-edge:
+	sudo cargo test -p spooky-edge
+
+test-transport:
+	sudo cargo test -p spooky-transport
 
 # Certificate generation targets
 certs-selfsigned:

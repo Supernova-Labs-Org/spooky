@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, sync::Arc};
 
-use http_body_util::Full;
+use http_body_util::combinators::BoxBody;
 use hyper::Request;
 use hyper::body::{Bytes, Incoming};
 use tokio::sync::Semaphore;
@@ -43,7 +43,7 @@ impl H2Pool {
     pub async fn send(
         &self,
         backend: &str,
-        req: Request<Full<Bytes>>,
+        req: Request<BoxBody<Bytes, Infallible>>,
     ) -> Result<hyper::Response<Incoming>, PoolError> {
         let handle = self
             .backends

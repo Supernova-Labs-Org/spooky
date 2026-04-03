@@ -1,12 +1,14 @@
-use http_body_util::Full;
+use std::convert::Infallible;
+use std::future::Future;
+
+use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
 use hyper::{Request, rt::Executor};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 
 pub struct H2Client {
-    client: Client<HttpConnector, Full<Bytes>>,
+    client: Client<HttpConnector, BoxBody<Bytes, Infallible>>,
 }
-use std::future::Future;
 
 #[derive(Clone, Copy)]
 struct TokioExecutor;
@@ -33,7 +35,7 @@ impl H2Client {
 
     pub async fn send(
         &self,
-        req: Request<Full<Bytes>>,
+        req: Request<BoxBody<Bytes, Infallible>>,
     ) -> Result<hyper::Response<hyper::body::Incoming>, hyper_util::client::legacy::Error> {
         self.client.request(req).await
     }

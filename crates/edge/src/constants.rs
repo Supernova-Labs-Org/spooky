@@ -11,6 +11,11 @@ pub const REQUEST_TIMEOUT_SECS: u64 = 5;
 pub const QUIC_IDLE_TIMEOUT_MS: u64 = 5_000;
 pub const QUIC_INITIAL_MAX_DATA: u64 = 10_000_000;
 pub const QUIC_INITIAL_STREAM_DATA: u64 = 1_000_000;
+
+/// Hard application-level cap on request body size per stream.
+/// Requests exceeding this are rejected with 413 before forwarding to upstream.
+/// Must be ≤ QUIC_INITIAL_STREAM_DATA (flow-control limit).
+pub const MAX_REQUEST_BODY_BYTES: usize = 1_000_000;
 pub const QUIC_INITIAL_MAX_STREAMS_BIDI: u64 = 100;
 pub const QUIC_INITIAL_MAX_STREAMS_UNI: u64 = 100;
 

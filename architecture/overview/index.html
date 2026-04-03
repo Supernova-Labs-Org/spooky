@@ -870,7 +870,7 @@
 │  │  Protocol Bridge               │     │
 │  │  - HTTP/3 → HTTP/2 conversion  │     │
 │  │  - Header normalization        │     │
-│  │  - Full body buffering (streaming planned)              │     │
+│  │  - Streaming body via ChannelBody (mpsc-backed)        │     │
 │  └───────────┬────────────────────┘     │
 │              │                           │
 │  ┌───────────▼────────────────────┐     │
@@ -884,7 +884,7 @@
 │  │  HTTP/2 Connection Pool        │     │
 │  │  - Connection reuse            │     │
 │  │  - Request forwarding          │     │
-│  │  - Full response buffering (streaming planned)          │     │
+│  │  - Per-frame response streaming                        │     │
 │  └───────────┬────────────────────┘     │
 └──────────────┼──────────────────────────┘
                │ HTTP/2
@@ -950,7 +950,7 @@
 1. HTTP/2 response is received from backend
 2. Status code and headers are extracted
 3. Response is written back to HTTP/3 stream
-4. Body is buffered from backend and sent to client (streaming planned)
+4. Body is streamed to client per frame via incremental <code>h3.send_body</code> calls
 5. Stream is finalized when response is complete</p>
 <h3 id="7-health-management">7. Health Management</h3>
 <p>Backend health is tracked continuously:

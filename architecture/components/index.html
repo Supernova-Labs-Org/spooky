@@ -1606,7 +1606,7 @@ cargo test -p spooky-edge --test lb_integration
 - HTTP/2 connection reuse
 - Amortize handshake cost</p>
 <p><strong>Async I/O:</strong>
-- Backend requests with full body buffering (streaming planned)
+- Streaming request body via <code>ChannelBody</code> (mpsc channel, no full buffering)
 - Efficient task scheduling via Tokio</p>
 <h3 id="memory-management">Memory Management</h3>
 <p><strong>Fixed Buffers:</strong>

@@ -7,7 +7,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
@@ -88,12 +88,12 @@ async fn pool_limits_inflight_per_backend() {
     let req1 = Request::builder()
         .method("GET")
         .uri(format!("http://{backend}/"))
-        .body(Full::new(Bytes::new()))
+        .body(Full::new(Bytes::new()).boxed())
         .unwrap();
     let req2 = Request::builder()
         .method("GET")
         .uri(format!("http://{backend}/"))
-        .body(Full::new(Bytes::new()))
+        .body(Full::new(Bytes::new()).boxed())
         .unwrap();
 
     let pool1 = pool.clone();
@@ -118,7 +118,7 @@ async fn pool_rejects_unknown_backend() {
     let req = Request::builder()
         .method("GET")
         .uri("http://127.0.0.1:12345/")
-        .body(Full::new(Bytes::new()))
+        .body(Full::new(Bytes::new()).boxed())
         .unwrap();
 
     let err = pool.send("127.0.0.1:9999", req).await.unwrap_err();

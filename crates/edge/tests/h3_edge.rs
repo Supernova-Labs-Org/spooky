@@ -96,6 +96,12 @@ fn make_config(port: u32, cert: String, key: String, backend_address: String) ->
     }
 }
 
+fn quic_read_timeout(conn: &quiche::Connection) -> Duration {
+    conn.timeout()
+        .filter(|d| !d.is_zero())
+        .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS))
+}
+
 async fn start_h2_backend(body: &'static str) -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -176,9 +182,7 @@ fn run_h3_client(addr: std::net::SocketAddr) -> Result<String, String> {
             }
         }
 
-        let timeout = conn
-            .timeout()
-            .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS));
+        let timeout = quic_read_timeout(&conn);
         socket
             .set_read_timeout(Some(timeout))
             .map_err(|e| format!("timeout: {e:?}"))?;
@@ -312,9 +316,7 @@ fn run_h3_client_multiple_requests(
             }
         }
 
-        let timeout = conn
-            .timeout()
-            .unwrap_or(Duration::from_millis(UDP_READ_TIMEOUT_MS));
+        let timeout = quic_read_timeout(&conn);
         socket
             .set_read_timeout(Some(timeout))
             .map_err(|e| format!("timeout: {e:?}"))?;

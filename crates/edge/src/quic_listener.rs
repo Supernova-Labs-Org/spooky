@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     net::UdpSocket,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
@@ -734,8 +734,8 @@ impl QUICListener {
                             let req_method = method.clone();
                             let req_path = path.clone();
                             let fwd_addr = addr.clone();
-                            let handle: tokio::task::JoinHandle<ForwardResult> =
-                                tokio::spawn(async move {
+                            let handle: tokio::task::JoinHandle<ForwardResult> = {
+                                let fut = async move {
                                     let request = build_h2_request(
                                         &fwd_addr, &req_method, &req_path,
                                         &req_headers, boxed, None,
@@ -751,7 +751,12 @@ impl QUICListener {
 
                                     let (parts, body) = response.into_parts();
                                     Ok((parts.status, parts.headers, body))
-                                });
+                                };
+                                match Handle::try_current() {
+                                    Ok(handle) => handle.spawn(fut),
+                                    Err(_) => fallback_runtime().spawn(fut),
+                                }
+                            };
                             (Some(tx), Some(handle), Some(addr), Some(idx))
                         }
                         Err(_) => (None, None, None, None),
@@ -768,6 +773,7 @@ impl QUICListener {
                             body_tx,
                             response_rx,
                             body_buf: Vec::new(),
+                            body_bytes_received: 0,
                             backend_addr,
                             backend_index,
                             start: Instant::now(),
@@ -778,10 +784,11 @@ impl QUICListener {
                     match h3.recv_body(&mut connection.quic, stream_id, &mut body_buf) {
                         Ok(read) => {
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
-                                // Enforce per-stream body cap across all buffered chunks.
-                                let buffered: usize =
-                                    req.body_buf.iter().map(|b| b.len()).sum();
-                                if buffered + read > MAX_REQUEST_BODY_BYTES {
+                                // Enforce cap on total bytes received for the stream,
+                                // including chunks already forwarded to the H2 body channel.
+                                let next_total =
+                                    req.body_bytes_received.saturating_add(read);
+                                if next_total > MAX_REQUEST_BODY_BYTES {
                                     connection.streams.remove(&stream_id);
                                     Self::send_simple_response(
                                         h3,
@@ -792,6 +799,7 @@ impl QUICListener {
                                     )?;
                                     break;
                                 }
+                                req.body_bytes_received = next_total;
                                 let chunk = Bytes::copy_from_slice(&body_buf[..read]);
                                 if let Some(tx) = &req.body_tx {
                                     // Non-blocking send: if the channel is full, fall
@@ -1263,9 +1271,18 @@ where
 {
     match Handle::try_current() {
         Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(f()))),
-        Err(_) => {
-            let rt = tokio::runtime::Runtime::new().map_err(|e| format!("runtime: {e}"))?;
-            Ok(rt.block_on(f()))
-        }
+        Err(_) => Ok(fallback_runtime().block_on(f())),
     }
+}
+
+fn fallback_runtime() -> &'static tokio::runtime::Runtime {
+    static FALLBACK_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    FALLBACK_RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(2)
+            .thread_name("spooky-edge-fallback-rt")
+            .build()
+            .expect("failed to create fallback tokio runtime")
+    })
 }

@@ -111,6 +111,8 @@ pub struct RequestEnvelope {
     pub response_rx: Option<JoinHandle<ForwardResult>>,
     /// Body chunks that arrived before the channel had capacity.
     pub body_buf: Vec<Bytes>,
+    /// Total body bytes received on this stream (buffered + already forwarded).
+    pub body_bytes_received: usize,
     /// Resolved backend address and index (for health marking on response).
     pub backend_addr: Option<String>,
     pub backend_index: Option<usize>,

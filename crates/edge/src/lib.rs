@@ -17,10 +17,10 @@ use core::net::SocketAddr;
 
 use hyper::body::{Body, Frame};
 use spooky_config::config::Config;
+use spooky_errors::ProxyError;
 use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::cid_radix::CidRadix;
 use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
@@ -98,7 +98,30 @@ pub struct QuicConnection {
 
 /// Result type returned by the in-flight H2 forwarding task.
 pub type ForwardResult =
-    Result<(http::StatusCode, http::HeaderMap, hyper::body::Incoming), spooky_errors::ProxyError>;
+    Result<(http::StatusCode, http::HeaderMap, hyper::body::Incoming), ProxyError>;
+
+/// Lifecycle phase of a single HTTP/3 request stream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamPhase {
+    /// Still receiving request headers/body from the QUIC client.
+    ReceivingRequest,
+    /// Request fully received; waiting for the upstream H2 response.
+    AwaitingUpstream,
+    /// Upstream responded; streaming response back to the QUIC client.
+    SendingResponse,
+    /// Stream finished cleanly.
+    Completed,
+    /// Stream terminated with an error.
+    Failed,
+}
+
+/// A chunk of the upstream response being streamed back to the client.
+#[derive(Debug)]
+pub enum ResponseChunk {
+    Data(Bytes),
+    End,
+    Error(ProxyError),
+}
 
 pub struct RequestEnvelope {
     pub method: String,
@@ -107,8 +130,6 @@ pub struct RequestEnvelope {
     pub headers: SmallVec<[(Vec<u8>, Vec<u8>); 16]>,
     /// Sender half of the body channel.  Dropping it signals end-of-body to hyper.
     pub body_tx: Option<mpsc::Sender<Bytes>>,
-    /// In-flight H2 forwarding task.  Awaited on `Finished`.
-    pub response_rx: Option<JoinHandle<ForwardResult>>,
     /// Body chunks that arrived before the channel had capacity.
     pub body_buf: Vec<Bytes>,
     /// Total body bytes received on this stream (buffered + already forwarded).
@@ -117,6 +138,17 @@ pub struct RequestEnvelope {
     pub backend_addr: Option<String>,
     pub backend_index: Option<usize>,
     pub start: Instant,
+
+    /// Current lifecycle phase of this stream.
+    pub phase: StreamPhase,
+    /// True once the client has sent FIN on the request stream.
+    pub request_fin_received: bool,
+    /// Receives the upstream H2 response (status, headers, body stream).
+    pub upstream_result_rx: Option<oneshot::Receiver<ForwardResult>>,
+    /// Receives response body chunks to write back over QUIC.
+    pub response_chunk_rx: Option<mpsc::Receiver<ResponseChunk>>,
+    /// A chunk that could not be written due to QUIC send backpressure; retried next poll.
+    pub pending_chunk: Option<ResponseChunk>,
 }
 
 #[derive(Debug)]

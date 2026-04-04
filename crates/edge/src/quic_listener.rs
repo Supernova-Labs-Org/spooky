@@ -19,11 +19,13 @@ use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
+    ResponseChunk, StreamPhase,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
@@ -723,7 +725,7 @@ impl QUICListener {
                         upstream_pools, routing_index,
                     );
 
-                    let (body_tx, response_rx, backend_addr, backend_index) = match resolved {
+                    let (body_tx, upstream_result_rx, backend_addr, backend_index) = match resolved {
                         Ok((addr, idx, _pool)) => {
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
@@ -734,8 +736,9 @@ impl QUICListener {
                             let req_method = method.clone();
                             let req_path = path.clone();
                             let fwd_addr = addr.clone();
-                            let handle: tokio::task::JoinHandle<ForwardResult> = {
-                                let fut = async move {
+                            let (result_tx, result_rx) = oneshot::channel::<ForwardResult>();
+                            let fut = async move {
+                                let result = async {
                                     let request = build_h2_request(
                                         &fwd_addr, &req_method, &req_path,
                                         &req_headers, boxed, None,
@@ -751,13 +754,16 @@ impl QUICListener {
 
                                     let (parts, body) = response.into_parts();
                                     Ok((parts.status, parts.headers, body))
-                                };
-                                match Handle::try_current() {
-                                    Ok(handle) => handle.spawn(fut),
-                                    Err(_) => fallback_runtime().spawn(fut),
                                 }
+                                .await;
+                                // Ignore send error: receiver dropped means the stream was reset.
+                                let _ = result_tx.send(result);
                             };
-                            (Some(tx), Some(handle), Some(addr), Some(idx))
+                            match Handle::try_current() {
+                                Ok(handle) => { handle.spawn(fut); }
+                                Err(_) => { fallback_runtime().spawn(fut); }
+                            }
+                            (Some(tx), Some(result_rx), Some(addr), Some(idx))
                         }
                         Err(_) => (None, None, None, None),
                     };
@@ -771,12 +777,16 @@ impl QUICListener {
                             authority,
                             headers,
                             body_tx,
-                            response_rx,
                             body_buf: Vec::new(),
                             body_bytes_received: 0,
                             backend_addr,
                             backend_index,
                             start: Instant::now(),
+                            phase: StreamPhase::ReceivingRequest,
+                            request_fin_received: false,
+                            upstream_result_rx,
+                            response_chunk_rx: None,
+                            pending_chunk: None,
                         },
                     );
                 }
@@ -818,49 +828,70 @@ impl QUICListener {
                     }
                 },
                 Ok((stream_id, quiche::h3::Event::Finished)) => {
-                    if let Some(mut req) = connection.streams.remove(&stream_id) {
-                        // Drain any buffered chunks into the channel before
-                        // closing it, then drop the sender to signal end-of-body.
-                        if let Some(tx) = req.body_tx.take() {
+                    if let Some(req) = connection.streams.get_mut(&stream_id) {
+                        req.request_fin_received = true;
+
+                        // Non-blocking body flush: push buffered chunks into the
+                        // channel with try_send.  Any that don't fit stay in body_buf
+                        // and will be retried on the next poll iteration.
+                        if let Some(tx) = &req.body_tx {
                             let buf = std::mem::take(&mut req.body_buf);
-                            run_blocking(|| async move {
-                                for chunk in buf {
-                                    let _ = tx.send(chunk).await;
+                            let mut overflow = Vec::new();
+                            for chunk in buf {
+                                if tx.try_send(chunk.clone()).is_err() {
+                                    overflow.push(chunk);
                                 }
-                                // tx drops here, closing the channel
-                            })
-                            .ok();
+                            }
+                            req.body_buf = overflow;
+                        }
+                        // If nothing is left buffered, drop body_tx to signal end-of-body.
+                        if req.body_buf.is_empty() {
+                            req.body_tx = None;
                         }
 
-                        // Await the in-flight H2 task and route the result.
-                        let forward_result = match req.response_rx.take() {
-                            Some(handle) => run_blocking(|| async move {
-                                match tokio::time::timeout(backend_timeout(), handle).await {
-                                    Ok(Ok(r)) => r,
-                                    Ok(Err(_)) => Err(ProxyError::Transport(
-                                        "task panicked".into(),
-                                    )),
-                                    Err(_) => Err(ProxyError::Timeout),
-                                }
-                            })
-                            .unwrap_or(Err(ProxyError::Transport(
-                                "run_blocking failed".into(),
-                            ))),
-                            None => Err(ProxyError::Transport(
-                                "no backend resolved for request".into(),
-                            )),
-                        };
+                        // Non-blocking poll of the upstream oneshot.
+                        let ready = req
+                            .upstream_result_rx
+                            .as_mut()
+                            .and_then(|rx| match rx.try_recv() {
+                                Ok(result) => Some(Ok(result)),
+                                Err(oneshot::error::TryRecvError::Empty) => None,
+                                Err(oneshot::error::TryRecvError::Closed) => Some(Err(())),
+                            });
 
-                        Self::handle_forward_result(
-                            h3,
-                            &mut connection.quic,
-                            stream_id,
-                            &req,
-                            forward_result,
-                            upstream_pools,
-                            routing_index,
-                            metrics,
-                        )?;
+                        match ready {
+                            Some(Ok(forward_result)) => {
+                                req.upstream_result_rx = None;
+                                let req = connection.streams.remove(&stream_id).unwrap();
+                                Self::handle_forward_result(
+                                    h3,
+                                    &mut connection.quic,
+                                    stream_id,
+                                    &req,
+                                    forward_result,
+                                    upstream_pools,
+                                    routing_index,
+                                    metrics,
+                                )?;
+                            }
+                            Some(Err(())) => {
+                                // Sender dropped without sending — treat as error.
+                                let req = connection.streams.remove(&stream_id).unwrap();
+                                Self::handle_forward_result(
+                                    h3,
+                                    &mut connection.quic,
+                                    stream_id,
+                                    &req,
+                                    Err(ProxyError::Transport("upstream task dropped sender".into())),
+                                    upstream_pools,
+                                    routing_index,
+                                    metrics,
+                                )?;
+                            }
+                            // Not ready yet — leave the stream in the map; the
+                            // deferred poll below will pick it up on a later iteration.
+                            None => {}
+                        }
                     }
                 }
                 Ok((stream_id, quiche::h3::Event::Reset(_))) => {
@@ -870,6 +901,81 @@ impl QUICListener {
                 Ok((_stream_id, quiche::h3::Event::GoAway)) => {}
                 Err(quiche::h3::Error::Done) => break,
                 Err(e) => return Err(e),
+            }
+        }
+
+        // Deferred stream poll: for any stream where the request FIN has been
+        // received but the upstream oneshot wasn't ready at Finished time,
+        // try again now.  Collect IDs first to avoid borrowing streams while
+        // also calling handle_forward_result (which needs &mut connection.quic).
+        let deferred: Vec<u64> = connection
+            .streams
+            .iter()
+            .filter_map(|(&id, req)| {
+                if req.request_fin_received && req.upstream_result_rx.is_some() {
+                    Some(id)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for stream_id in deferred {
+            // Retry non-blocking body flush for any overflow chunks.
+            if let Some(req) = connection.streams.get_mut(&stream_id) {
+                if let Some(tx) = &req.body_tx {
+                    let buf = std::mem::take(&mut req.body_buf);
+                    let mut overflow = Vec::new();
+                    for chunk in buf {
+                        if tx.try_send(chunk.clone()).is_err() {
+                            overflow.push(chunk);
+                        }
+                    }
+                    req.body_buf = overflow;
+                }
+                if req.body_buf.is_empty() {
+                    req.body_tx = None;
+                }
+            }
+
+            let ready = connection
+                .streams
+                .get_mut(&stream_id)
+                .and_then(|req| req.upstream_result_rx.as_mut())
+                .and_then(|rx| match rx.try_recv() {
+                    Ok(result) => Some(Ok(result)),
+                    Err(oneshot::error::TryRecvError::Empty) => None,
+                    Err(oneshot::error::TryRecvError::Closed) => Some(Err(())),
+                });
+
+            match ready {
+                Some(Ok(forward_result)) => {
+                    let req = connection.streams.remove(&stream_id).unwrap();
+                    Self::handle_forward_result(
+                        h3,
+                        &mut connection.quic,
+                        stream_id,
+                        &req,
+                        forward_result,
+                        upstream_pools,
+                        routing_index,
+                        metrics,
+                    )?;
+                }
+                Some(Err(())) => {
+                    let req = connection.streams.remove(&stream_id).unwrap();
+                    Self::handle_forward_result(
+                        h3,
+                        &mut connection.quic,
+                        stream_id,
+                        &req,
+                        Err(ProxyError::Transport("upstream task dropped sender".into())),
+                        upstream_pools,
+                        routing_index,
+                        metrics,
+                    )?;
+                }
+                None => {} // still waiting — try again next poll
             }
         }
 

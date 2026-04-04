@@ -976,14 +976,26 @@ impl QUICListener {
                         h3.send_response(quic, stream_id, &h3_headers, false)?;
 
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
+                        // Enforces backend_timeout() so a slow upstream body does not
+                        // leave the stream open indefinitely.
                         let (chunk_tx, chunk_rx) =
                             mpsc::channel::<ResponseChunk>(16);
+                        let deadline = tokio::time::Instant::now() + backend_timeout();
                         let fut = async move {
                             use http_body_util::BodyExt;
                             let mut body: hyper::body::Incoming = body;
                             loop {
-                                match BodyExt::frame(&mut body).await {
-                                    Some(Ok(f)) => {
+                                let frame_fut = BodyExt::frame(&mut body);
+                                let result = tokio::time::timeout_at(deadline, frame_fut).await;
+                                match result {
+                                    Err(_elapsed) => {
+                                        // Body read timed out — signal timeout to flush loop.
+                                        let _ = chunk_tx
+                                            .send(ResponseChunk::Error(ProxyError::Timeout))
+                                            .await;
+                                        return;
+                                    }
+                                    Ok(Some(Ok(f))) => {
                                         if let Ok(data) = f.into_data() {
                                             if chunk_tx.send(ResponseChunk::Data(data)).await.is_err() {
                                                 return;
@@ -991,7 +1003,7 @@ impl QUICListener {
                                         }
                                         // skip trailers / other frame types
                                     }
-                                    Some(Err(_)) => {
+                                    Ok(Some(Err(_))) => {
                                         let _ = chunk_tx
                                             .send(ResponseChunk::Error(ProxyError::Transport(
                                                 "upstream body error".into(),
@@ -999,7 +1011,7 @@ impl QUICListener {
                                             .await;
                                         return;
                                     }
-                                    None => {
+                                    Ok(None) => {
                                         let _ = chunk_tx.send(ResponseChunk::End).await;
                                         return;
                                     }
@@ -1053,18 +1065,21 @@ impl QUICListener {
                         }
                     }
                     Err(err) => {
-                        // Remove stream, send error response via existing helper.
-                        let req = streams.remove(&stream_id).unwrap();
-                        Self::handle_forward_result(
-                            h3,
-                            quic,
-                            stream_id,
-                            &req,
-                            Err(err),
-                            upstream_pools,
-                            routing_index,
-                            metrics,
-                        )?;
+                        // Send error response first, then remove the stream so
+                        // cleanup only happens after the response has been emitted.
+                        if let Some(req) = streams.get(&stream_id) {
+                            Self::handle_forward_result(
+                                h3,
+                                quic,
+                                stream_id,
+                                req,
+                                Err(err),
+                                upstream_pools,
+                                routing_index,
+                                metrics,
+                            )?;
+                        }
+                        streams.remove(&stream_id);
                         continue;
                     }
                 }
@@ -1103,10 +1118,48 @@ impl QUICListener {
                                 terminal = true;
                                 break;
                             }
-                            ResponseChunk::Error(_) => {
+                            ResponseChunk::Error(err) => {
                                 // Best-effort: close the stream.
                                 let _ = h3.send_body(quic, stream_id, b"", true);
                                 req.phase = StreamPhase::Failed;
+                                // Mirror the health/metrics updates from the old
+                                // send_backend_response timeout/error paths.
+                                let upstream_name = routing_index
+                                    .lookup(&req.path, req.authority.as_deref());
+                                if let (Some(idx), Some(pool)) = (
+                                    req.backend_index,
+                                    upstream_name.and_then(|n| upstream_pools.get(n)),
+                                ) {
+                                    if let Some(t) = pool
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut p| p.pool.mark_failure(idx))
+                                    {
+                                        if let Some(addr) = &req.backend_addr {
+                                            Self::log_health_transition(addr, t);
+                                        }
+                                    }
+                                }
+                                match err {
+                                    ProxyError::Timeout => {
+                                        metrics.inc_failure();
+                                        metrics.inc_timeout();
+                                        info!(
+                                            "Upstream {} body timeout latency_ms {}",
+                                            req.backend_addr.as_deref().unwrap_or("?"),
+                                            req.start.elapsed().as_millis()
+                                        );
+                                    }
+                                    _ => {
+                                        metrics.inc_failure();
+                                        metrics.inc_backend_error();
+                                        error!(
+                                            "Upstream {} body error: {:?}",
+                                            req.backend_addr.as_deref().unwrap_or("?"),
+                                            err
+                                        );
+                                    }
+                                }
                                 terminal = true;
                                 break;
                             }
@@ -1214,30 +1267,9 @@ impl QUICListener {
             .cloned();
 
         match result {
-            Ok((status, headers, body)) => {
-                if let Some(pool) = &upstream_pool {
-                    let transition = pool.lock().ok().and_then(|mut p| {
-                        match outcome_from_status(status) {
-                            crate::HealthClassification::Success => {
-                                p.pool.mark_success(backend_index)
-                            }
-                            crate::HealthClassification::Failure => {
-                                p.pool.mark_failure(backend_index)
-                            }
-                            crate::HealthClassification::Neutral => None,
-                        }
-                    });
-                    if let Some(t) = transition {
-                        Self::log_health_transition(backend_addr, t);
-                    }
-                }
-                metrics.inc_success();
-                info!(
-                    "Upstream {} status {} latency_ms {}",
-                    backend_addr, status, start.elapsed().as_millis()
-                );
-                Self::send_backend_response(h3, quic, stream_id, status, &headers, body)
-            }
+            // Ok variant is handled upstream by advance_streams_non_blocking;
+            // handle_forward_result is only called with Err variants.
+            Ok(_) => unreachable!("handle_forward_result called with Ok result"),
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
@@ -1275,99 +1307,6 @@ impl QUICListener {
                 Self::send_simple_response(h3, quic, stream_id, http::StatusCode::INTERNAL_SERVER_ERROR, b"internal server error\n")
             }
         }
-    }
-
-    fn send_backend_response(
-        h3: &mut quiche::h3::Connection,
-        quic: &mut quiche::Connection,
-        stream_id: u64,
-        status: http::StatusCode,
-        headers: &http::HeaderMap,
-        body: hyper::body::Incoming,
-    ) -> Result<(), quiche::h3::Error> {
-        let mut resp_headers = Vec::with_capacity(headers.len() + 1);
-
-        resp_headers.push(quiche::h3::Header::new(
-            b":status",
-            status.as_str().as_bytes(),
-        ));
-
-        for (name, value) in headers.iter() {
-            if is_hop_header(name.as_str()) || name == http::header::CONTENT_LENGTH {
-                continue;
-            }
-            resp_headers.push(quiche::h3::Header::new(
-                name.as_str().as_bytes(),
-                value.as_bytes(),
-            ));
-        }
-
-        // Drive the response body one frame at a time.  Each call to
-        // run_blocking fetches exactly the next data frame from the backend
-        // and returns it to the sync side, where send_body is called
-        // immediately.  This avoids accumulating the full response in memory:
-        // at most one frame is held between run_blocking returning and
-        // send_body completing.
-        //
-        // Note: h3/quic are !Send so they cannot enter the async closure.
-        // run_blocking(block_in_place) keeps execution on the same OS thread,
-        // making the per-frame loop safe without locks.
-        let deadline = std::time::Instant::now() + backend_timeout();
-
-        // Wrap body in a Mutex so the async closure can borrow it across
-        // repeated run_blocking calls without moving it.
-        let body = std::sync::Mutex::new(body);
-
-        h3.send_response(quic, stream_id, &resp_headers, false)?;
-
-        let mut sent_any = false;
-        loop {
-            let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
-                Some(d) => d,
-                None => break, // timeout
-            };
-
-            // Fetch the next data frame from the backend.
-            let next: Option<Bytes> = match run_blocking(|| async {
-                tokio::time::timeout(remaining, async {
-                    let mut guard = body.lock().expect("body mutex");
-                    loop {
-                        match BodyExt::frame(&mut *guard).await {
-                            Some(Ok(f)) => {
-                                if let Ok(chunk) = f.into_data() {
-                                    return Some(chunk);
-                                }
-                                // trailers / other frames — skip
-                            }
-                            Some(Err(_)) | None => return None,
-                        }
-                    }
-                })
-                .await
-                .unwrap_or(None)
-            }) {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-
-            match next {
-                Some(chunk) => {
-                    h3.send_body(quic, stream_id, &chunk, false)?;
-                    sent_any = true;
-                }
-                None => {
-                    // Body exhausted — send final empty frame with fin=true.
-                    h3.send_body(quic, stream_id, b"", true)?;
-                    return Ok(());
-                }
-            }
-        }
-
-        // Timeout or error path: close stream.
-        let _ = sent_any;
-        h3.send_body(quic, stream_id, b"", true)?;
-
-        Ok(())
     }
 
     fn send_simple_response(
@@ -1509,17 +1448,6 @@ impl QUICListener {
                 }
             });
         }
-    }
-}
-
-fn run_blocking<F, Fut, T>(f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = T>,
-{
-    match Handle::try_current() {
-        Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(f()))),
-        Err(_) => Ok(fallback_runtime().block_on(f())),
     }
 }
 

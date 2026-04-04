@@ -866,6 +866,8 @@ impl QUICListener {
                         if req.body_buf.is_empty() {
                             req.body_tx = None;
                         }
+                        // Request body fully handed off — now waiting on upstream.
+                        req.phase = StreamPhase::AwaitingUpstream;
                         // Upstream polling and response dispatch are handled entirely
                         // by advance_streams_non_blocking, called unconditionally below.
                     }

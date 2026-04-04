@@ -1,25 +1,23 @@
+use http::StatusCode;
+use spooky_config::config::{Backend, HealthCheck};
 use spooky_edge::{HealthClassification, outcome_from_status};
 use spooky_lb::{BackendPool, HealthTransition};
-use spooky_config::config::{Backend, HealthCheck};
-use http::StatusCode;
 
 /// Mock setup for backend pool testing
 fn create_test_backend_pool() -> BackendPool {
-    let backends = vec![
-        Backend {
-            id: "bk-1".to_string(),
-            address: "127.0.0.1:8001".to_string(),
-            weight: 1,
-            health_check: HealthCheck {
-                path: "/health".to_string(),
-                interval: 1000,
-                timeout_ms: 5000,
-                failure_threshold: 3,
-                success_threshold: 2,
-                cooldown_ms: 10000,
-            },
+    let backends = vec![Backend {
+        id: "bk-1".to_string(),
+        address: "127.0.0.1:8001".to_string(),
+        weight: 1,
+        health_check: HealthCheck {
+            path: "/health".to_string(),
+            interval: 1000,
+            timeout_ms: 5000,
+            failure_threshold: 3,
+            success_threshold: 2,
+            cooldown_ms: 10000,
         },
-    ];
+    }];
     let backend_states = backends.iter().map(spooky_lb::BackendState::new).collect();
     BackendPool::new_from_states(backend_states)
 }
@@ -34,13 +32,13 @@ fn test_4xx_response_does_not_change_health() {
 
     // All 4xx status codes should return Neutral outcome
     let test_cases = vec![
-        StatusCode::BAD_REQUEST,        // 400
-        StatusCode::FORBIDDEN,          // 403
-        StatusCode::NOT_FOUND,          // 404
-        StatusCode::METHOD_NOT_ALLOWED, // 405
-        StatusCode::CONFLICT,           // 409
+        StatusCode::BAD_REQUEST,          // 400
+        StatusCode::FORBIDDEN,            // 403
+        StatusCode::NOT_FOUND,            // 404
+        StatusCode::METHOD_NOT_ALLOWED,   // 405
+        StatusCode::CONFLICT,             // 409
         StatusCode::UNPROCESSABLE_ENTITY, // 422
-        StatusCode::TOO_MANY_REQUESTS,  // 429
+        StatusCode::TOO_MANY_REQUESTS,    // 429
     ];
 
     for status in test_cases {
@@ -76,10 +74,10 @@ fn test_5xx_response_marks_failure() {
 
     // All 5xx status codes should return Failure outcome
     let test_cases = vec![
-        StatusCode::INTERNAL_SERVER_ERROR,     // 500
-        StatusCode::BAD_GATEWAY,               // 502
-        StatusCode::SERVICE_UNAVAILABLE,       // 503
-        StatusCode::GATEWAY_TIMEOUT,           // 504
+        StatusCode::INTERNAL_SERVER_ERROR, // 500
+        StatusCode::BAD_GATEWAY,           // 502
+        StatusCode::SERVICE_UNAVAILABLE,   // 503
+        StatusCode::GATEWAY_TIMEOUT,       // 504
     ];
 
     for status in test_cases {
@@ -100,7 +98,11 @@ fn test_5xx_response_marks_failure() {
             let transition = pool.mark_failure(backend_index);
             if i < 2 {
                 // First 2 failures don't cause transition
-                assert!(transition.is_none(), "Transition should be None for failure {}", i + 1);
+                assert!(
+                    transition.is_none(),
+                    "Transition should be None for failure {}",
+                    i + 1
+                );
             } else {
                 // 3rd failure causes transition to unhealthy
                 assert!(
@@ -127,13 +129,13 @@ fn test_5xx_response_marks_failure() {
 #[test]
 fn test_2xx_3xx_response_marks_success() {
     let test_cases = vec![
-        StatusCode::OK,                      // 200
-        StatusCode::CREATED,                 // 201
-        StatusCode::ACCEPTED,                // 202
-        StatusCode::NO_CONTENT,              // 204
-        StatusCode::MOVED_PERMANENTLY,       // 301
-        StatusCode::FOUND,                   // 302
-        StatusCode::NOT_MODIFIED,            // 304
+        StatusCode::OK,                // 200
+        StatusCode::CREATED,           // 201
+        StatusCode::ACCEPTED,          // 202
+        StatusCode::NO_CONTENT,        // 204
+        StatusCode::MOVED_PERMANENTLY, // 301
+        StatusCode::FOUND,             // 302
+        StatusCode::NOT_MODIFIED,      // 304
     ];
 
     for status in test_cases {
@@ -188,7 +190,10 @@ fn test_2xx_response_recovers_failed_backend() {
         let transition = pool.mark_success(backend_index);
         if i < 1 {
             // First success doesn't cause transition (within cooldown)
-            assert!(transition.is_none(), "First success shouldn't transition yet");
+            assert!(
+                transition.is_none(),
+                "First success shouldn't transition yet"
+            );
         } else {
             // Second success causes transition to healthy (after cooldown expires)
             // Note: This test assumes cooldown has passed; in real code, time check happens
@@ -218,7 +223,10 @@ fn test_bridge_error_does_not_change_health() {
     // Simulate Bridge error (no health transition should occur)
     // In real code, this is handled by: Err(ProxyError::Bridge(_)) => no mark_success/mark_failure
     let transition = pool.mark_success(backend_index);
-    assert!(transition.is_none(), "Bridge error should not cause health transition");
+    assert!(
+        transition.is_none(),
+        "Bridge error should not cause health transition"
+    );
 
     // Verify backend health unchanged
     let healthy_indices = pool.healthy_indices();
@@ -243,7 +251,11 @@ fn test_transport_error_marks_failure() {
     for i in 0..3 {
         let transition = pool.mark_failure(backend_index);
         if i < 2 {
-            assert!(transition.is_none(), "Failure {} should not transition yet", i + 1);
+            assert!(
+                transition.is_none(),
+                "Failure {} should not transition yet",
+                i + 1
+            );
         } else {
             assert!(
                 matches!(transition, Some(HealthTransition::BecameUnhealthy)),
@@ -275,7 +287,11 @@ fn test_timeout_marks_failure() {
     for i in 0..3 {
         let transition = pool.mark_failure(backend_index);
         if i < 2 {
-            assert!(transition.is_none(), "Timeout {} should not transition yet", i + 1);
+            assert!(
+                transition.is_none(),
+                "Timeout {} should not transition yet",
+                i + 1
+            );
         } else {
             assert!(
                 matches!(transition, Some(HealthTransition::BecameUnhealthy)),
@@ -315,7 +331,10 @@ fn test_tls_error_does_not_change_health() {
     // Simulate TLS error (no health transition should occur)
     // In real code, this is handled by: Err(ProxyError::Tls(_)) => no mark_success/mark_failure
     let transition = pool.mark_success(backend_index);
-    assert!(transition.is_none(), "TLS error should not cause health transition");
+    assert!(
+        transition.is_none(),
+        "TLS error should not cause health transition"
+    );
 
     // Verify backend health unchanged
     let healthy_indices = pool.healthy_indices();
@@ -337,7 +356,10 @@ fn test_mixed_error_and_success_responses() {
     // Scenario: Backend receives mixed responses
     // 1. 200 OK -> stays healthy
     let transition = pool.mark_success(backend_index);
-    assert!(transition.is_none(), "200 OK should not transition healthy backend");
+    assert!(
+        transition.is_none(),
+        "200 OK should not transition healthy backend"
+    );
 
     // 2. 5xx -> trigger failure threshold (3 failures needed)
     let _ = pool.mark_failure(backend_index);

@@ -739,11 +739,15 @@ impl QUICListener {
 
                     // Route lookup — needed to start the H2 request immediately.
                     let resolved = Self::resolve_backend(
-                        &method, &path, authority.as_deref(),
-                        upstream_pools, routing_index,
+                        &method,
+                        &path,
+                        authority.as_deref(),
+                        upstream_pools,
+                        routing_index,
                     );
 
-                    let (body_tx, upstream_result_rx, backend_addr, backend_index) = match resolved {
+                    let (body_tx, upstream_result_rx, backend_addr, backend_index) = match resolved
+                    {
                         Ok((addr, idx, _pool)) => {
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
@@ -758,8 +762,12 @@ impl QUICListener {
                             let fut = async move {
                                 let result = async {
                                     let request = build_h2_request(
-                                        &fwd_addr, &req_method, &req_path,
-                                        &req_headers, boxed, None,
+                                        &fwd_addr,
+                                        &req_method,
+                                        &req_path,
+                                        &req_headers,
+                                        boxed,
+                                        None,
                                     )
                                     .map_err(ProxyError::Bridge)?;
 
@@ -778,8 +786,12 @@ impl QUICListener {
                                 let _ = result_tx.send(result);
                             };
                             match Handle::try_current() {
-                                Ok(handle) => { handle.spawn(fut); }
-                                Err(_) => { fallback_runtime().spawn(fut); }
+                                Ok(handle) => {
+                                    handle.spawn(fut);
+                                }
+                                Err(_) => {
+                                    fallback_runtime().spawn(fut);
+                                }
                             }
                             (Some(tx), Some(result_rx), Some(addr), Some(idx))
                         }
@@ -814,8 +826,7 @@ impl QUICListener {
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
                                 // Enforce cap on total bytes received for the stream,
                                 // including chunks already forwarded to the H2 body channel.
-                                let next_total =
-                                    req.body_bytes_received.saturating_add(read);
+                                let next_total = req.body_bytes_received.saturating_add(read);
                                 if next_total > MAX_REQUEST_BODY_BYTES {
                                     connection.streams.remove(&stream_id);
                                     Self::send_simple_response(
@@ -882,7 +893,14 @@ impl QUICListener {
             }
         }
 
-        Self::advance_streams_non_blocking(&mut connection.streams, &mut connection.quic, h3, upstream_pools, routing_index, metrics)?;
+        Self::advance_streams_non_blocking(
+            &mut connection.streams,
+            &mut connection.quic,
+            h3,
+            upstream_pools,
+            routing_index,
+            metrics,
+        )?;
 
         Ok(())
     }
@@ -935,20 +953,35 @@ impl QUICListener {
             }
 
             // ── 3: poll upstream oneshot ──────────────────────────────────────
+            // Only transition to response handling once request-body ingestion is
+            // complete. This preserves request-size enforcement semantics:
+            // oversized requests must still be able to terminate with 413 even if
+            // upstream produced an early response.
+            let can_poll_upstream = streams.get(&stream_id).is_some_and(|req| {
+                req.phase == StreamPhase::AwaitingUpstream
+                    && req.request_fin_received
+                    && req.body_tx.is_none()
+                    && req.body_buf.is_empty()
+            });
+
             // upstream_ready: Option<ForwardResult>
-            //   None          → oneshot not yet resolved, skip
+            //   None          → oneshot not yet resolved (or not eligible), skip
             //   Some(Ok(...)) → upstream responded successfully
             //   Some(Err(.))  → upstream error (or sender dropped)
-            let upstream_ready: Option<ForwardResult> = streams
-                .get_mut(&stream_id)
-                .and_then(|req| req.upstream_result_rx.as_mut())
-                .and_then(|rx| match rx.try_recv() {
-                    Ok(result) => Some(result),
-                    Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(oneshot::error::TryRecvError::Closed) => {
-                        Some(Err(ProxyError::Transport("upstream task dropped sender".into())))
-                    }
-                });
+            let upstream_ready: Option<ForwardResult> = if can_poll_upstream {
+                streams
+                    .get_mut(&stream_id)
+                    .and_then(|req| req.upstream_result_rx.as_mut())
+                    .and_then(|rx| match rx.try_recv() {
+                        Ok(result) => Some(result),
+                        Err(oneshot::error::TryRecvError::Empty) => None,
+                        Err(oneshot::error::TryRecvError::Closed) => Some(Err(
+                            ProxyError::Transport("upstream task dropped sender".into()),
+                        )),
+                    })
+            } else {
+                None
+            };
 
             if let Some(forward_result) = upstream_ready {
                 if let Some(req) = streams.get_mut(&stream_id) {
@@ -963,8 +996,7 @@ impl QUICListener {
                             status.as_str().as_bytes(),
                         ));
                         for (name, value) in resp_headers.iter() {
-                            if is_hop_header(name.as_str())
-                                || name == http::header::CONTENT_LENGTH
+                            if is_hop_header(name.as_str()) || name == http::header::CONTENT_LENGTH
                             {
                                 continue;
                             }
@@ -978,8 +1010,7 @@ impl QUICListener {
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
                         // Enforces backend_timeout() so a slow upstream body does not
                         // leave the stream open indefinitely.
-                        let (chunk_tx, chunk_rx) =
-                            mpsc::channel::<ResponseChunk>(16);
+                        let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
                         let deadline = tokio::time::Instant::now() + backend_timeout();
                         let fut = async move {
                             use http_body_util::BodyExt;
@@ -997,7 +1028,11 @@ impl QUICListener {
                                     }
                                     Ok(Some(Ok(f))) => {
                                         if let Ok(data) = f.into_data() {
-                                            if chunk_tx.send(ResponseChunk::Data(data)).await.is_err() {
+                                            if chunk_tx
+                                                .send(ResponseChunk::Data(data))
+                                                .await
+                                                .is_err()
+                                            {
                                                 return;
                                             }
                                         }
@@ -1019,8 +1054,12 @@ impl QUICListener {
                             }
                         };
                         match Handle::try_current() {
-                            Ok(h) => { h.spawn(fut); }
-                            Err(_) => { fallback_runtime().spawn(fut); }
+                            Ok(h) => {
+                                h.spawn(fut);
+                            }
+                            Err(_) => {
+                                fallback_runtime().spawn(fut);
+                            }
                         }
 
                         if let Some(req) = streams.get_mut(&stream_id) {
@@ -1030,17 +1069,16 @@ impl QUICListener {
 
                         // Update health/metrics for successful upstream response.
                         if let Some(req) = streams.get(&stream_id) {
-                            if let (Some(addr), Some(idx)) =
-                                (&req.backend_addr, req.backend_index)
+                            if let (Some(addr), Some(idx)) = (&req.backend_addr, req.backend_index)
                             {
                                 let upstream_name =
                                     routing_index.lookup(&req.path, req.authority.as_deref());
-                                if let Some(pool) = upstream_name
-                                    .and_then(|n| upstream_pools.get(n))
+                                if let Some(pool) =
+                                    upstream_name.and_then(|n| upstream_pools.get(n))
                                 {
                                     let transition =
-                                        pool.lock().ok().and_then(|mut p| {
-                                            match outcome_from_status(status) {
+                                        pool.lock().ok().and_then(
+                                            |mut p| match outcome_from_status(status) {
                                                 crate::HealthClassification::Success => {
                                                     p.pool.mark_success(idx)
                                                 }
@@ -1048,8 +1086,8 @@ impl QUICListener {
                                                     p.pool.mark_failure(idx)
                                                 }
                                                 crate::HealthClassification::Neutral => None,
-                                            }
-                                        });
+                                            },
+                                        );
                                     if let Some(t) = transition {
                                         Self::log_health_transition(addr, t);
                                     }
@@ -1105,8 +1143,7 @@ impl QUICListener {
                                     Ok(_) => {}
                                     Err(quiche::h3::Error::StreamBlocked) => {
                                         // QUIC flow-control backpressure — retry next poll.
-                                        req.pending_chunk =
-                                            Some(ResponseChunk::Data(data));
+                                        req.pending_chunk = Some(ResponseChunk::Data(data));
                                         break;
                                     }
                                     Err(e) => return Err(e),
@@ -1124,16 +1161,14 @@ impl QUICListener {
                                 req.phase = StreamPhase::Failed;
                                 // Mirror the health/metrics updates from the old
                                 // send_backend_response timeout/error paths.
-                                let upstream_name = routing_index
-                                    .lookup(&req.path, req.authority.as_deref());
+                                let upstream_name =
+                                    routing_index.lookup(&req.path, req.authority.as_deref());
                                 if let (Some(idx), Some(pool)) = (
                                     req.backend_index,
                                     upstream_name.and_then(|n| upstream_pools.get(n)),
                                 ) {
-                                    if let Some(t) = pool
-                                        .lock()
-                                        .ok()
-                                        .and_then(|mut p| p.pool.mark_failure(idx))
+                                    if let Some(t) =
+                                        pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
                                     {
                                         if let Some(addr) = &req.backend_addr {
                                             Self::log_health_transition(addr, t);
@@ -1211,8 +1246,8 @@ impl QUICListener {
             let idx = pool.pick(key);
             (idx, lb_type)
         };
-        let backend_index = backend_index
-            .ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
+        let backend_index =
+            backend_index.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
 
         let backend_addr = {
             let pool = upstream_pool.lock().expect("upstream pool lock");
@@ -1262,9 +1297,7 @@ impl QUICListener {
 
         // Re-acquire the upstream pool for health marking.
         let upstream_name = routing_index.lookup(&req.path, req.authority.as_deref());
-        let upstream_pool = upstream_name
-            .and_then(|n| upstream_pools.get(n))
-            .cloned();
+        let upstream_pool = upstream_name.and_then(|n| upstream_pools.get(n)).cloned();
 
         match result {
             // Ok variant is handled upstream by advance_streams_non_blocking;
@@ -1273,38 +1306,86 @@ impl QUICListener {
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
-                info!("Upstream {} status 400 latency_ms {}", backend_addr, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::BAD_REQUEST, b"invalid request\n")
+                info!(
+                    "Upstream {} status 400 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_REQUEST,
+                    b"invalid request\n",
+                )
             }
             Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
                 error!("Transport error");
                 if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool.lock().ok().and_then(|mut p| p.pool.mark_failure(backend_index)) {
+                    if let Some(t) = pool
+                        .lock()
+                        .ok()
+                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                    {
                         Self::log_health_transition(backend_addr, t);
                     }
                 }
                 metrics.inc_failure();
                 metrics.inc_backend_error();
-                info!("Upstream {} status 502 latency_ms {}", backend_addr, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::BAD_GATEWAY, b"upstream error\n")
+                info!(
+                    "Upstream {} status 502 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_GATEWAY,
+                    b"upstream error\n",
+                )
             }
             Err(ProxyError::Timeout) => {
                 error!("Server timeout");
                 if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool.lock().ok().and_then(|mut p| p.pool.mark_failure(backend_index)) {
+                    if let Some(t) = pool
+                        .lock()
+                        .ok()
+                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                    {
                         Self::log_health_transition(backend_addr, t);
                     }
                 }
                 metrics.inc_failure();
                 metrics.inc_timeout();
-                info!("Upstream {} status 503 latency_ms {}", backend_addr, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::SERVICE_UNAVAILABLE, b"upstream timeout\n")
+                info!(
+                    "Upstream {} status 503 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    b"upstream timeout\n",
+                )
             }
             Err(ProxyError::Tls(err)) => {
                 error!("TLS error: {}", err);
                 metrics.inc_failure();
-                info!("TLS error for stream {} latency_ms {}", stream_id, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::INTERNAL_SERVER_ERROR, b"internal server error\n")
+                info!(
+                    "TLS error for stream {} latency_ms {}",
+                    stream_id,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    b"internal server error\n",
+                )
             }
         }
     }

@@ -1,17 +1,25 @@
 use std::{
+    collections::HashMap,
+    convert::Infallible,
     net::SocketAddr,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    task::{Context, Poll},
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
-use quiche::h3::NameValue;
-use http_body_util::Full;
-use hyper::{Request, Response, body::Incoming, service::service_fn};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use hyper::{
+    Request, Response,
+    body::{Body, Frame, Incoming},
+    service::service_fn,
+};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use quiche::h3::NameValue;
 use rand::RngCore;
 use rcgen::{Certificate, CertificateParams, SanType};
 use tempfile::{TempDir, tempdir};
@@ -20,9 +28,10 @@ use tokio::net::TcpListener;
 use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
-    MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS,
-    QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
-    QUIC_INITIAL_STREAM_DATA, REQUEST_TIMEOUT_SECS, UDP_READ_TIMEOUT_MS,
+    BACKEND_TIMEOUT_SECS, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES,
+    QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI,
+    QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA, REQUEST_TIMEOUT_SECS,
+    UDP_READ_TIMEOUT_MS,
 };
 
 fn write_test_certs(dir: &TempDir) -> (String, String) {
@@ -276,6 +285,281 @@ fn run_h3_client(addr: SocketAddr) -> Result<String, String> {
     }
 }
 
+type TestBody = BoxBody<Bytes, Infallible>;
+
+struct DelayedChunkBody {
+    rx: tokio::sync::mpsc::Receiver<Bytes>,
+}
+
+impl DelayedChunkBody {
+    fn channel(buffer: usize) -> (tokio::sync::mpsc::Sender<Bytes>, Self) {
+        let (tx, rx) = tokio::sync::mpsc::channel(buffer);
+        (tx, Self { rx })
+    }
+}
+
+impl Body for DelayedChunkBody {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.rx.poll_recv(cx) {
+            Poll::Ready(Some(chunk)) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StreamObservation {
+    path: String,
+    status: Option<String>,
+    body: Vec<u8>,
+    data_events: Vec<Duration>,
+    finished_at: Option<Duration>,
+}
+
+fn observation_for<'a>(observations: &'a [StreamObservation], path: &str) -> &'a StreamObservation {
+    observations
+        .iter()
+        .find(|o| o.path == path)
+        .unwrap_or_else(|| panic!("missing observation for path {path}"))
+}
+
+fn run_h3_client_concurrent_get(
+    addr: SocketAddr,
+    paths: &[&str],
+    timeout: Duration,
+) -> Result<Vec<StreamObservation>, String> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let local_addr = socket.local_addr().map_err(|e| e.to_string())?;
+
+    let mut config =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(|e| format!("config: {e:?}"))?;
+    config.verify_peer(false);
+    config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .map_err(|e| format!("alpn: {e:?}"))?;
+    config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+    config.set_disable_active_migration(true);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+
+    let mut conn = quiche::connect(Some("localhost"), &scid, local_addr, addr, &mut config)
+        .map_err(|e| format!("connect: {e:?}"))?;
+
+    let h3_config = quiche::h3::Config::new().map_err(|e| format!("h3: {e:?}"))?;
+    let mut h3_conn: Option<quiche::h3::Connection> = None;
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+    let mut requests_sent = false;
+    let mut finished = 0usize;
+    let start = Instant::now();
+
+    let mut stream_to_observation: HashMap<u64, usize> = HashMap::new();
+    let mut observations: Vec<StreamObservation> = paths
+        .iter()
+        .map(|path| StreamObservation {
+            path: (*path).to_string(),
+            status: None,
+            body: Vec::new(),
+            data_events: Vec::new(),
+            finished_at: None,
+        })
+        .collect();
+
+    let (write, send_info) = conn.send(&mut out).map_err(|e| format!("send: {e:?}"))?;
+    socket
+        .send_to(&out[..write], send_info.to)
+        .map_err(|e| format!("send_to: {e:?}"))?;
+
+    loop {
+        loop {
+            match conn.send(&mut out) {
+                Ok((write, send_info)) => {
+                    let _ = socket.send_to(&out[..write], send_info.to);
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => return Err(format!("send loop: {e:?}")),
+            }
+        }
+
+        let read_timeout = quic_read_timeout(&conn);
+        socket
+            .set_read_timeout(Some(read_timeout))
+            .map_err(|e| format!("timeout: {e:?}"))?;
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                let recv_info = quiche::RecvInfo {
+                    from,
+                    to: local_addr,
+                };
+                conn.recv(&mut buf[..len], recv_info)
+                    .map_err(|e| format!("recv: {e:?}"))?;
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                conn.on_timeout();
+            }
+            Err(e) => return Err(format!("recv: {e:?}")),
+        }
+
+        if conn.is_established() && h3_conn.is_none() {
+            h3_conn = Some(
+                quiche::h3::Connection::with_transport(&mut conn, &h3_config)
+                    .map_err(|e| format!("h3 conn: {e:?}"))?,
+            );
+        }
+
+        if let Some(h3) = h3_conn.as_mut() {
+            if conn.is_established() && !requests_sent {
+                for (idx, path) in paths.iter().enumerate() {
+                    let req = vec![
+                        quiche::h3::Header::new(b":method", b"GET"),
+                        quiche::h3::Header::new(b":scheme", b"https"),
+                        quiche::h3::Header::new(b":authority", b"localhost"),
+                        quiche::h3::Header::new(b":path", path.as_bytes()),
+                        quiche::h3::Header::new(b"user-agent", b"spooky-regression-test"),
+                    ];
+                    let stream_id = h3
+                        .send_request(&mut conn, &req, true)
+                        .map_err(|e| format!("send_request: {e:?}"))?;
+                    stream_to_observation.insert(stream_id, idx);
+                }
+                requests_sent = true;
+            }
+
+            loop {
+                match h3.poll(&mut conn) {
+                    Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
+                        if let Some(idx) = stream_to_observation.get(&stream_id).copied() {
+                            for header in &list {
+                                if header.name() == b":status" {
+                                    observations[idx].status =
+                                        Some(String::from_utf8_lossy(header.value()).to_string());
+                                }
+                            }
+                        }
+                    }
+                    Ok((stream_id, quiche::h3::Event::Data)) => {
+                        let Some(idx) = stream_to_observation.get(&stream_id).copied() else {
+                            break;
+                        };
+                        loop {
+                            match h3.recv_body(&mut conn, stream_id, &mut buf) {
+                                Ok(read) => {
+                                    observations[idx].body.extend_from_slice(&buf[..read]);
+                                    observations[idx].data_events.push(start.elapsed());
+                                }
+                                Err(quiche::h3::Error::Done) => break,
+                                Err(e) => return Err(format!("recv_body: {e:?}")),
+                            }
+                        }
+                    }
+                    Ok((stream_id, quiche::h3::Event::Finished)) => {
+                        if let Some(idx) = stream_to_observation.get(&stream_id).copied() {
+                            if observations[idx].finished_at.is_none() {
+                                observations[idx].finished_at = Some(start.elapsed());
+                                finished += 1;
+                            }
+                        }
+                    }
+                    Ok((_stream_id, quiche::h3::Event::PriorityUpdate)) => {}
+                    Ok((_stream_id, quiche::h3::Event::GoAway)) => {}
+                    Ok((stream_id, quiche::h3::Event::Reset(_))) => {
+                        return Err(format!("stream reset on id {stream_id}"));
+                    }
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(e) => return Err(format!("poll: {e:?}")),
+                }
+            }
+        }
+
+        if finished == paths.len() {
+            return Ok(observations);
+        }
+
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "timeout waiting for responses (done={finished}, expected={})",
+                paths.len()
+            ));
+        }
+    }
+}
+
+async fn start_h2_backend_with_regression_routes() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+
+            let io = TokioIo::new(stream);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let path = req.uri().path().to_string();
+                let response: Response<TestBody> = match path.as_str() {
+                    "/fast" => Response::new(Full::new(Bytes::from_static(b"fast\n")).boxed()),
+                    "/slow" => {
+                        tokio::time::sleep(Duration::from_millis(700)).await;
+                        Response::new(Full::new(Bytes::from_static(b"slow\n")).boxed())
+                    }
+                    "/status500" => Response::builder()
+                        .status(500)
+                        .body(Full::new(Bytes::from_static(b"backend 500\n")).boxed())
+                        .unwrap(),
+                    "/timeout" => {
+                        tokio::time::sleep(Duration::from_secs(BACKEND_TIMEOUT_SECS + 1)).await;
+                        Response::new(Full::new(Bytes::from_static(b"late\n")).boxed())
+                    }
+                    "/stream" => {
+                        let (tx, body) = DelayedChunkBody::channel(8);
+                        tokio::spawn(async move {
+                            let _ = tx.send(Bytes::from_static(b"chunk-1")).await;
+                            tokio::time::sleep(Duration::from_millis(140)).await;
+                            let _ = tx.send(Bytes::from_static(b"chunk-2")).await;
+                            tokio::time::sleep(Duration::from_millis(140)).await;
+                            let _ = tx.send(Bytes::from_static(b"chunk-3")).await;
+                        });
+                        Response::new(body.boxed())
+                    }
+                    _ => Response::new(Full::new(Bytes::from_static(b"default\n")).boxed()),
+                };
+                Ok::<_, hyper::Error>(response)
+            });
+
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    });
+
+    addr
+}
+
 #[test]
 fn http3_to_http2_roundtrip() {
     let dir = tempdir().expect("failed to create temp dir");
@@ -322,10 +606,11 @@ fn oversized_request_body_returns_413() {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
     let local_addr = socket.local_addr().unwrap();
 
-    let mut qconfig =
-        quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    let mut qconfig = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
     qconfig.verify_peer(false);
-    qconfig.set_application_protos(quiche::h3::APPLICATION_PROTOCOL).unwrap();
+    qconfig
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
     qconfig.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
     qconfig.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
     qconfig.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
@@ -342,8 +627,14 @@ fn oversized_request_body_returns_413() {
     let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
     rand::thread_rng().fill_bytes(&mut scid_bytes);
     let scid = quiche::ConnectionId::from_ref(&scid_bytes);
-    let mut conn =
-        quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig).unwrap();
+    let mut conn = quiche::connect(
+        Some("localhost"),
+        &scid,
+        local_addr,
+        listen_addr,
+        &mut qconfig,
+    )
+    .unwrap();
     let h3_config = quiche::h3::Config::new().unwrap();
 
     let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
@@ -365,7 +656,9 @@ fn oversized_request_body_returns_413() {
         // Flush send.
         loop {
             match conn.send(&mut out) {
-                Ok((w, si)) => { let _ = socket.send_to(&out[..w], si.to); }
+                Ok((w, si)) => {
+                    let _ = socket.send_to(&out[..w], si.to);
+                }
                 Err(quiche::Error::Done) => break,
                 Err(e) => panic!("send: {e:?}"),
             }
@@ -376,10 +669,19 @@ fn oversized_request_body_returns_413() {
 
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr }).unwrap();
+                conn.recv(
+                    &mut buf[..len],
+                    quiche::RecvInfo {
+                        from,
+                        to: local_addr,
+                    },
+                )
+                .unwrap();
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                       || e.kind() == std::io::ErrorKind::TimedOut => {
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
                 conn.on_timeout();
             }
             Err(e) => panic!("recv: {e:?}"),
@@ -457,5 +759,164 @@ fn oversized_request_body_returns_413() {
         }
     };
 
-    assert_eq!(status, "413", "expected 413 Payload Too Large, got {status}");
+    assert_eq!(
+        status, "413",
+        "expected 413 Payload Too Large, got {status}"
+    );
+}
+
+#[test]
+fn slow_stream_does_not_block_fast_stream() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let config = make_config(0, backend_addr.to_string(), cert, key);
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/slow", "/fast"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("client requests failed");
+
+    let slow = observation_for(&observations, "/slow");
+    let fast = observation_for(&observations, "/fast");
+    assert_eq!(slow.status.as_deref(), Some("200"));
+    assert_eq!(fast.status.as_deref(), Some("200"));
+
+    let slow_done = slow.finished_at.expect("slow stream should finish");
+    let fast_done = fast.finished_at.expect("fast stream should finish");
+    assert!(
+        fast_done < slow_done,
+        "fast stream should complete before slow stream (fast={fast_done:?}, slow={slow_done:?})"
+    );
+}
+
+#[test]
+fn finished_stream_does_not_block_other_stream_progress() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let config = make_config(0, backend_addr.to_string(), cert, key);
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/slow", "/stream"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("client requests failed");
+
+    let slow = observation_for(&observations, "/slow");
+    let stream = observation_for(&observations, "/stream");
+    let slow_done = slow.finished_at.expect("slow stream should finish");
+    let first_stream_data = stream
+        .data_events
+        .first()
+        .copied()
+        .expect("stream path should produce at least one data chunk");
+
+    assert!(
+        first_stream_data < slow_done,
+        "stream data should arrive while slow stream is still pending (first_stream_data={first_stream_data:?}, slow_done={slow_done:?})"
+    );
+}
+
+#[test]
+fn response_body_is_streamed_progressively() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let config = make_config(0, backend_addr.to_string(), cert, key);
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/stream"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("stream request failed");
+
+    let stream = observation_for(&observations, "/stream");
+    assert_eq!(stream.status.as_deref(), Some("200"));
+
+    let body = String::from_utf8_lossy(&stream.body);
+    assert_eq!(body, "chunk-1chunk-2chunk-3");
+    assert!(
+        stream.data_events.len() >= 2,
+        "expected at least two data events, got {}",
+        stream.data_events.len()
+    );
+    let first = stream.data_events.first().copied().unwrap();
+    let last = stream.data_events.last().copied().unwrap();
+    let span = last.saturating_sub(first);
+    assert!(
+        span >= Duration::from_millis(200),
+        "expected delayed progressive delivery across chunks, got span {span:?}"
+    );
+}
+
+#[test]
+fn error_status_mapping_parity_is_preserved() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let config = make_config(0, backend_addr.to_string(), cert.clone(), key.clone());
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let status_500 = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/status500"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("status500 request failed");
+    let status_500_obs = observation_for(&status_500, "/status500");
+    assert_eq!(status_500_obs.status.as_deref(), Some("500"));
+
+    let timeout = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/timeout"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+    )
+    .expect("timeout request failed");
+    let timeout_obs = observation_for(&timeout, "/timeout");
+    assert_eq!(timeout_obs.status.as_deref(), Some("503"));
+    assert!(
+        String::from_utf8_lossy(&timeout_obs.body).contains("upstream timeout"),
+        "timeout body should indicate upstream timeout"
+    );
+
+    // Separate listener with unreachable backend to validate transport mapping.
+    let transport_config = make_config(0, "127.0.0.1:1".to_string(), cert, key);
+    let transport_listener =
+        QUICListener::new(transport_config).expect("failed to create transport listener");
+    let transport_addr = transport_listener.socket.local_addr().unwrap();
+    let _transport_task = ListenerTaskGuard::spawn(&rt, transport_listener);
+
+    let transport = run_h3_client_concurrent_get(
+        transport_addr,
+        &["/"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("transport error request failed");
+    let transport_obs = observation_for(&transport, "/");
+    assert_eq!(transport_obs.status.as_deref(), Some("502"));
+    assert!(
+        String::from_utf8_lossy(&transport_obs.body).contains("upstream error"),
+        "transport error body should indicate upstream error"
+    );
 }

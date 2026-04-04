@@ -19,7 +19,7 @@ use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use spooky_config::config::Config as SpookyConfig;
 
@@ -647,6 +647,24 @@ impl QUICListener {
 
             if connection.quic.is_closed() {
                 to_remove.push(scid.clone());
+                continue;
+            }
+
+            // Advance in-flight streams independent of inbound packets.
+            if connection.h3.is_some() {
+                let mut h3 = connection.h3.take().unwrap();
+                if let Err(e) = Self::advance_streams_non_blocking(
+                    &mut connection.streams,
+                    &mut connection.quic,
+                    &mut h3,
+                    &self.upstream_pools,
+                    &self.routing_index,
+                    &self.metrics,
+                ) {
+                    error!("advance_streams_non_blocking in timeout path: {:?}", e);
+                }
+                connection.h3 = Some(h3);
+                Self::flush_send(&socket, &mut send_buf, connection);
             }
         }
 
@@ -844,54 +862,12 @@ impl QUICListener {
                             }
                             req.body_buf = overflow;
                         }
-                        // If nothing is left buffered, drop body_tx to signal end-of-body.
+                        // If buffer is now empty, drop body_tx to signal end-of-body.
                         if req.body_buf.is_empty() {
                             req.body_tx = None;
                         }
-
-                        // Non-blocking poll of the upstream oneshot.
-                        let ready = req
-                            .upstream_result_rx
-                            .as_mut()
-                            .and_then(|rx| match rx.try_recv() {
-                                Ok(result) => Some(Ok(result)),
-                                Err(oneshot::error::TryRecvError::Empty) => None,
-                                Err(oneshot::error::TryRecvError::Closed) => Some(Err(())),
-                            });
-
-                        match ready {
-                            Some(Ok(forward_result)) => {
-                                req.upstream_result_rx = None;
-                                let req = connection.streams.remove(&stream_id).unwrap();
-                                Self::handle_forward_result(
-                                    h3,
-                                    &mut connection.quic,
-                                    stream_id,
-                                    &req,
-                                    forward_result,
-                                    upstream_pools,
-                                    routing_index,
-                                    metrics,
-                                )?;
-                            }
-                            Some(Err(())) => {
-                                // Sender dropped without sending — treat as error.
-                                let req = connection.streams.remove(&stream_id).unwrap();
-                                Self::handle_forward_result(
-                                    h3,
-                                    &mut connection.quic,
-                                    stream_id,
-                                    &req,
-                                    Err(ProxyError::Transport("upstream task dropped sender".into())),
-                                    upstream_pools,
-                                    routing_index,
-                                    metrics,
-                                )?;
-                            }
-                            // Not ready yet — leave the stream in the map; the
-                            // deferred poll below will pick it up on a later iteration.
-                            None => {}
-                        }
+                        // Upstream polling and response dispatch are handled entirely
+                        // by advance_streams_non_blocking, called unconditionally below.
                     }
                 }
                 Ok((stream_id, quiche::h3::Event::Reset(_))) => {
@@ -904,25 +880,43 @@ impl QUICListener {
             }
         }
 
-        // Deferred stream poll: for any stream where the request FIN has been
-        // received but the upstream oneshot wasn't ready at Finished time,
-        // try again now.  Collect IDs first to avoid borrowing streams while
-        // also calling handle_forward_result (which needs &mut connection.quic).
-        let deferred: Vec<u64> = connection
-            .streams
-            .iter()
-            .filter_map(|(&id, req)| {
-                if req.request_fin_received && req.upstream_result_rx.is_some() {
-                    Some(id)
-                } else {
-                    None
-                }
-            })
-            .collect();
+        Self::advance_streams_non_blocking(&mut connection.streams, &mut connection.quic, h3, upstream_pools, routing_index, metrics)?;
 
-        for stream_id in deferred {
-            // Retry non-blocking body flush for any overflow chunks.
-            if let Some(req) = connection.streams.get_mut(&stream_id) {
+        Ok(())
+    }
+
+    /// Advance all in-flight streams without blocking.
+    ///
+    /// Called after every packet-driven `handle_h3` pass and from
+    /// `handle_timeouts` so progress continues even when no new client
+    /// packets arrive.
+    ///
+    /// Per stream, in order:
+    /// 1. Drain request body buffer → body channel (`try_send`).
+    /// 2. Close body channel once FIN received and buffer empty.
+    /// 3. Poll `upstream_result_rx` (`try_recv`).
+    ///    - Error result  → send error response, mark terminal.
+    ///    - Ok result     → send H3 response headers, spawn body-pump task,
+    ///                      store `response_chunk_rx`, transition to SendingResponse.
+    /// 4. Flush `response_chunk_rx` chunks into H3 (`try_recv` loop).
+    ///    - `Data`  → `h3.send_body(..., false)`
+    ///    - `End`   → `h3.send_body(..., true)`, mark Completed
+    ///    - `Error` → send 502, mark Failed
+    /// 5. Remove streams in terminal phase (Completed / Failed).
+    #[allow(clippy::too_many_arguments)]
+    fn advance_streams_non_blocking(
+        streams: &mut HashMap<u64, RequestEnvelope>,
+        quic: &mut quiche::Connection,
+        h3: &mut quiche::h3::Connection,
+        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        routing_index: &RouteIndex,
+        metrics: &Metrics,
+    ) -> Result<(), quiche::h3::Error> {
+        let stream_ids: Vec<u64> = streams.keys().copied().collect();
+
+        for stream_id in stream_ids {
+            // ── 1 & 2: request body drain ────────────────────────────────────
+            if let Some(req) = streams.get_mut(&stream_id) {
                 if let Some(tx) = &req.body_tx {
                     let buf = std::mem::take(&mut req.body_buf);
                     let mut overflow = Vec::new();
@@ -933,49 +927,195 @@ impl QUICListener {
                     }
                     req.body_buf = overflow;
                 }
-                if req.body_buf.is_empty() {
-                    req.body_tx = None;
+                if req.request_fin_received && req.body_buf.is_empty() {
+                    req.body_tx = None; // signals EOF to the upstream H2 task
                 }
             }
 
-            let ready = connection
-                .streams
+            // ── 3: poll upstream oneshot ──────────────────────────────────────
+            // upstream_ready: Option<ForwardResult>
+            //   None          → oneshot not yet resolved, skip
+            //   Some(Ok(...)) → upstream responded successfully
+            //   Some(Err(.))  → upstream error (or sender dropped)
+            let upstream_ready: Option<ForwardResult> = streams
                 .get_mut(&stream_id)
                 .and_then(|req| req.upstream_result_rx.as_mut())
                 .and_then(|rx| match rx.try_recv() {
-                    Ok(result) => Some(Ok(result)),
+                    Ok(result) => Some(result),
                     Err(oneshot::error::TryRecvError::Empty) => None,
-                    Err(oneshot::error::TryRecvError::Closed) => Some(Err(())),
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        Some(Err(ProxyError::Transport("upstream task dropped sender".into())))
+                    }
                 });
 
-            match ready {
-                Some(Ok(forward_result)) => {
-                    let req = connection.streams.remove(&stream_id).unwrap();
-                    Self::handle_forward_result(
-                        h3,
-                        &mut connection.quic,
-                        stream_id,
-                        &req,
-                        forward_result,
-                        upstream_pools,
-                        routing_index,
-                        metrics,
-                    )?;
+            if let Some(forward_result) = upstream_ready {
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    req.upstream_result_rx = None;
                 }
-                Some(Err(())) => {
-                    let req = connection.streams.remove(&stream_id).unwrap();
-                    Self::handle_forward_result(
-                        h3,
-                        &mut connection.quic,
-                        stream_id,
-                        &req,
-                        Err(ProxyError::Transport("upstream task dropped sender".into())),
-                        upstream_pools,
-                        routing_index,
-                        metrics,
-                    )?;
+                match forward_result {
+                    Ok((status, resp_headers, body)) => {
+                        // Send H3 response headers immediately (non-blocking).
+                        let mut h3_headers = Vec::with_capacity(resp_headers.len() + 1);
+                        h3_headers.push(quiche::h3::Header::new(
+                            b":status",
+                            status.as_str().as_bytes(),
+                        ));
+                        for (name, value) in resp_headers.iter() {
+                            if is_hop_header(name.as_str())
+                                || name == http::header::CONTENT_LENGTH
+                            {
+                                continue;
+                            }
+                            h3_headers.push(quiche::h3::Header::new(
+                                name.as_str().as_bytes(),
+                                value.as_bytes(),
+                            ));
+                        }
+                        h3.send_response(quic, stream_id, &h3_headers, false)?;
+
+                        // Spawn a task that pumps body frames into a ResponseChunk channel.
+                        let (chunk_tx, chunk_rx) =
+                            mpsc::channel::<ResponseChunk>(16);
+                        let fut = async move {
+                            use http_body_util::BodyExt;
+                            let mut body: hyper::body::Incoming = body;
+                            loop {
+                                match BodyExt::frame(&mut body).await {
+                                    Some(Ok(f)) => {
+                                        if let Ok(data) = f.into_data() {
+                                            if chunk_tx.send(ResponseChunk::Data(data)).await.is_err() {
+                                                return;
+                                            }
+                                        }
+                                        // skip trailers / other frame types
+                                    }
+                                    Some(Err(_)) => {
+                                        let _ = chunk_tx
+                                            .send(ResponseChunk::Error(ProxyError::Transport(
+                                                "upstream body error".into(),
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                    None => {
+                                        let _ = chunk_tx.send(ResponseChunk::End).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        };
+                        match Handle::try_current() {
+                            Ok(h) => { h.spawn(fut); }
+                            Err(_) => { fallback_runtime().spawn(fut); }
+                        }
+
+                        if let Some(req) = streams.get_mut(&stream_id) {
+                            req.response_chunk_rx = Some(chunk_rx);
+                            req.phase = StreamPhase::SendingResponse;
+                        }
+
+                        // Update health/metrics for successful upstream response.
+                        if let Some(req) = streams.get(&stream_id) {
+                            if let (Some(addr), Some(idx)) =
+                                (&req.backend_addr, req.backend_index)
+                            {
+                                let upstream_name =
+                                    routing_index.lookup(&req.path, req.authority.as_deref());
+                                if let Some(pool) = upstream_name
+                                    .and_then(|n| upstream_pools.get(n))
+                                {
+                                    let transition =
+                                        pool.lock().ok().and_then(|mut p| {
+                                            match outcome_from_status(status) {
+                                                crate::HealthClassification::Success => {
+                                                    p.pool.mark_success(idx)
+                                                }
+                                                crate::HealthClassification::Failure => {
+                                                    p.pool.mark_failure(idx)
+                                                }
+                                                crate::HealthClassification::Neutral => None,
+                                            }
+                                        });
+                                    if let Some(t) = transition {
+                                        Self::log_health_transition(addr, t);
+                                    }
+                                }
+                            }
+                            metrics.inc_success();
+                            info!(
+                                "Upstream {} status {} latency_ms {}",
+                                req.backend_addr.as_deref().unwrap_or("?"),
+                                status,
+                                req.start.elapsed().as_millis()
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        // Remove stream, send error response via existing helper.
+                        let req = streams.remove(&stream_id).unwrap();
+                        Self::handle_forward_result(
+                            h3,
+                            quic,
+                            stream_id,
+                            &req,
+                            Err(err),
+                            upstream_pools,
+                            routing_index,
+                            metrics,
+                        )?;
+                        continue;
+                    }
                 }
-                None => {} // still waiting — try again next poll
+            }
+
+            // ── 4: flush response chunks ──────────────────────────────────────
+            let mut terminal = false;
+            if let Some(req) = streams.get_mut(&stream_id) {
+                if let Some(rx) = &mut req.response_chunk_rx {
+                    // Drain as many chunks as quiche will accept this iteration.
+                    loop {
+                        // Retry any chunk that previously hit backpressure.
+                        let chunk = match req.pending_chunk.take() {
+                            Some(c) => c,
+                            None => match rx.try_recv() {
+                                Ok(c) => c,
+                                Err(_) => break, // Empty or closed — nothing to flush
+                            },
+                        };
+                        match chunk {
+                            ResponseChunk::Data(data) => {
+                                match h3.send_body(quic, stream_id, &data, false) {
+                                    Ok(_) => {}
+                                    Err(quiche::h3::Error::StreamBlocked) => {
+                                        // QUIC flow-control backpressure — retry next poll.
+                                        req.pending_chunk =
+                                            Some(ResponseChunk::Data(data));
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            ResponseChunk::End => {
+                                h3.send_body(quic, stream_id, b"", true)?;
+                                req.phase = StreamPhase::Completed;
+                                terminal = true;
+                                break;
+                            }
+                            ResponseChunk::Error(_) => {
+                                // Best-effort: close the stream.
+                                let _ = h3.send_body(quic, stream_id, b"", true);
+                                req.phase = StreamPhase::Failed;
+                                terminal = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 5: remove terminal streams ────────────────────────────────────
+            if terminal {
+                streams.remove(&stream_id);
             }
         }
 

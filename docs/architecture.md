@@ -335,38 +335,57 @@ pub struct UpstreamPool {
 
 ## Concurrency Model
 
-### Main Thread (Synchronous)
+### Poll Thread (Synchronous, Non-Blocking)
+
+The main poll thread never blocks on I/O:
 
 - UDP socket polling with 50ms timeout
 - QUIC packet processing via quiche
-- HTTP/3 stream handling
+- HTTP/3 stream event dispatch (`h3.poll`)
 - Route matching and backend selection
-- Synchronous backend calls via `run_blocking`
+- Non-blocking stream state advancement via `advance_streams_non_blocking`
+
+All per-stream work follows a state machine driven by `try_recv` / `try_send`:
+
+```
+ReceivingRequest
+    │  (Event::Finished — body drained to channel, body_tx dropped)
+    ▼
+AwaitingUpstream
+    │  (upstream_result_rx.try_recv() returns Ok)
+    ▼
+SendingResponse       ← H3 response headers sent; body-pump task spawned
+    │  (response_chunk_rx.try_recv() drains Data/End/Error chunks)
+    ▼
+Completed / Failed    → stream removed from map
+```
+
+`advance_streams_non_blocking` is called:
+1. After every packet-driven `handle_h3` pass.
+2. On every `handle_timeouts` tick — so streams progress even when no new
+   client packets arrive.
 
 ### Async Tasks (Tokio Runtime)
 
 - Health check probes (one task per backend)
+- H2 request forwarding (one task per in-flight stream)
+- Response body pump (one task per in-flight stream, enforces `backend_timeout()`)
 - Shutdown signal handling
 
-### Blocking Operations
+### Why No Blocking Calls
 
-Backend forwarding temporarily enters Tokio runtime:
+The poll thread owns `quiche::Connection` and `quiche::h3::Connection`, both of
+which are `!Send`. Blocking the poll thread on async I/O would stall all QUIC
+connections sharing the thread. Instead:
 
-```rust
-fn run_blocking<F, T>(f: F) -> Result<T>
-where
-    F: FnOnce() -> Future<Output = T>,
-{
-    if let Ok(handle) = Handle::try_current() {
-        // Within Tokio context
-        tokio::task::block_in_place(|| handle.block_on(f()))
-    } else {
-        // Outside Tokio context
-        let rt = Runtime::new()?;
-        rt.block_on(f())
-    }
-}
-```
+- **Request body** is streamed to the H2 task via `mpsc::channel` using
+  `try_send`; overflow chunks are buffered in `body_buf` and retried.
+- **Upstream result** is delivered via `oneshot::channel`; the poll thread
+  polls it with `try_recv` each maintenance pass.
+- **Response body** is pumped by an async task into a bounded
+  `mpsc::channel<ResponseChunk>`; the poll thread drains it with `try_recv`
+  and writes to H3 with `h3.send_body`. QUIC flow-control backpressure
+  (`StreamBlocked`) parks the current chunk in `pending_chunk` for retry.
 
 ## Configuration System
 
@@ -440,10 +459,8 @@ YAML file → Parse → Validate → Build runtime structures
 
 Current architectural bottlenecks:
 
-1. **Synchronous backend calls**: Block main thread during HTTP/2 roundtrip
-2. **Full body buffering**: Materializes entire request/response in memory
-3. **Consistent hash ring**: Rebuilds on every request
-4. **Single-threaded poll loop**: All QUIC processing on one thread
+1. **Consistent hash ring**: Rebuilds on every request
+2. **Single-threaded poll loop**: All QUIC processing on one thread
 
 See [roadmap](roadmap.md) for planned improvements.
 

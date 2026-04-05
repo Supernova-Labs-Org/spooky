@@ -1137,35 +1137,52 @@ Unhealthy ─[cooldown expires + success_threshold succeeds]─&gt; Healthy
 }
 </code></pre>
 <h2 id="concurrency-model">Concurrency Model</h2>
-<h3 id="main-thread-synchronous">Main Thread (Synchronous)</h3>
+<h3 id="poll-thread-synchronous-non-blocking">Poll Thread (Synchronous, Non-Blocking)</h3>
+<p>The main poll thread never blocks on I/O:</p>
 <ul>
 <li>UDP socket polling with 50ms timeout</li>
 <li>QUIC packet processing via quiche</li>
-<li>HTTP/3 stream handling</li>
+<li>HTTP/3 stream event dispatch (<code>h3.poll</code>)</li>
 <li>Route matching and backend selection</li>
-<li>Synchronous backend calls via <code>run_blocking</code></li>
+<li>Non-blocking stream state advancement via <code>advance_streams_non_blocking</code></li>
 </ul>
+<p>All per-stream work follows a state machine driven by <code>try_recv</code> / <code>try_send</code>:</p>
+<pre><code>ReceivingRequest
+    │  (Event::Finished — body drained to channel, body_tx dropped)
+    ▼
+AwaitingUpstream
+    │  (upstream_result_rx.try_recv() returns Ok)
+    ▼
+SendingResponse       ← H3 response headers sent; body-pump task spawned
+    │  (response_chunk_rx.try_recv() drains Data/End/Error chunks)
+    ▼
+Completed / Failed    → stream removed from map
+</code></pre>
+<p><code>advance_streams_non_blocking</code> is called:
+1. After every packet-driven <code>handle_h3</code> pass.
+2. On every <code>handle_timeouts</code> tick — so streams progress even when no new
+   client packets arrive.</p>
 <h3 id="async-tasks-tokio-runtime">Async Tasks (Tokio Runtime)</h3>
 <ul>
 <li>Health check probes (one task per backend)</li>
+<li>H2 request forwarding (one task per in-flight stream)</li>
+<li>Response body pump (one task per in-flight stream, enforces <code>backend_timeout()</code>)</li>
 <li>Shutdown signal handling</li>
 </ul>
-<h3 id="blocking-operations">Blocking Operations</h3>
-<p>Backend forwarding temporarily enters Tokio runtime:</p>
-<pre><code class="language-rust">fn run_blocking&lt;F, T&gt;(f: F) -&gt; Result&lt;T&gt;
-where
-    F: FnOnce() -&gt; Future&lt;Output = T&gt;,
-{
-    if let Ok(handle) = Handle::try_current() {
-        // Within Tokio context
-        tokio::task::block_in_place(|| handle.block_on(f()))
-    } else {
-        // Outside Tokio context
-        let rt = Runtime::new()?;
-        rt.block_on(f())
-    }
-}
-</code></pre>
+<h3 id="why-no-blocking-calls">Why No Blocking Calls</h3>
+<p>The poll thread owns <code>quiche::Connection</code> and <code>quiche::h3::Connection</code>, both of
+which are <code>!Send</code>. Blocking the poll thread on async I/O would stall all QUIC
+connections sharing the thread. Instead:</p>
+<ul>
+<li><strong>Request body</strong> is streamed to the H2 task via <code>mpsc::channel</code> using
+  <code>try_send</code>; overflow chunks are buffered in <code>body_buf</code> and retried.</li>
+<li><strong>Upstream result</strong> is delivered via <code>oneshot::channel</code>; the poll thread
+  polls it with <code>try_recv</code> each maintenance pass.</li>
+<li><strong>Response body</strong> is pumped by an async task into a bounded
+  <code>mpsc::channel&lt;ResponseChunk&gt;</code>; the poll thread drains it with <code>try_recv</code>
+  and writes to H3 with <code>h3.send_body</code>. QUIC flow-control backpressure
+  (<code>StreamBlocked</code>) parks the current chunk in <code>pending_chunk</code> for retry.</li>
+</ul>
 <h2 id="configuration-system">Configuration System</h2>
 <h3 id="validation-pipeline">Validation Pipeline</h3>
 <pre><code>YAML file → Parse → Validate → Build runtime structures
@@ -1294,8 +1311,6 @@ where
 <h3 id="bottlenecks">Bottlenecks</h3>
 <p>Current architectural bottlenecks:</p>
 <ol>
-<li><strong>Synchronous backend calls</strong>: Block main thread during HTTP/2 roundtrip</li>
-<li><strong>Full body buffering</strong>: Materializes entire request/response in memory</li>
 <li><strong>Consistent hash ring</strong>: Rebuilds on every request</li>
 <li><strong>Single-threaded poll loop</strong>: All QUIC processing on one thread</li>
 </ol>
@@ -1771,10 +1786,10 @@ where
         </a>
         
         
-        <a href="#main-thread-synchronous"
+        <a href="#poll-thread-synchronous-non-blocking"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#main-thread-synchronous');">
-            Main Thread (Synchronous)
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#poll-thread-synchronous-non-blocking');">
+            Poll Thread (Synchronous, Non-Blocking)
         </a>
         
         <a href="#async-tasks-tokio-runtime"
@@ -1783,10 +1798,10 @@ where
             Async Tasks (Tokio Runtime)
         </a>
         
-        <a href="#blocking-operations"
+        <a href="#why-no-blocking-calls"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#blocking-operations');">
-            Blocking Operations
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#why-no-blocking-calls');">
+            Why No Blocking Calls
         </a>
         
         

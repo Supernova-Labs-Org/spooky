@@ -55,7 +55,10 @@ impl CidRadix {
 
         // Traverse/build trie path byte by byte
         for &byte in scid.iter() {
-            node = node.children.entry(byte).or_insert_with(CidTrieNode::default);
+            node = node
+                .children
+                .entry(byte)
+                .or_insert_with(CidTrieNode::default);
         }
 
         // Store the SCID at the leaf
@@ -278,10 +281,18 @@ mod tests {
         let scid = scid(&[1u8, 2, 3, 4, 5, 6, 7, 8]);
 
         radix.insert(scid.clone());
-        assert!(radix.longest_prefix_match(&[1u8, 2, 3, 4, 5, 6, 7, 8]).is_some());
+        assert!(
+            radix
+                .longest_prefix_match(&[1u8, 2, 3, 4, 5, 6, 7, 8])
+                .is_some()
+        );
 
         radix.remove(&[1u8, 2, 3, 4, 5, 6, 7, 8]);
-        assert!(radix.longest_prefix_match(&[1u8, 2, 3, 4, 5, 6, 7, 8]).is_none());
+        assert!(
+            radix
+                .longest_prefix_match(&[1u8, 2, 3, 4, 5, 6, 7, 8])
+                .is_none()
+        );
     }
 
     #[test]
@@ -294,7 +305,11 @@ mod tests {
         radix.remove(&[9u8, 8, 7, 6, 5, 4, 3, 2]);
 
         // Original should still be there
-        assert!(radix.longest_prefix_match(&[1u8, 2, 3, 4, 5, 6, 7, 8]).is_some());
+        assert!(
+            radix
+                .longest_prefix_match(&[1u8, 2, 3, 4, 5, 6, 7, 8])
+                .is_some()
+        );
     }
 
     #[test]
@@ -347,14 +362,18 @@ mod tests {
         // Simulate multiple connections with realistic 16-byte SCIDs
         let scid1 = scid(&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
         let scid2 = scid(&[1, 2, 3, 4, 5, 6, 7, 8, 20, 21, 22, 23, 24, 25, 26, 27]);
-        let scid3 = scid(&[30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45]);
+        let scid3 = scid(&[
+            30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+        ]);
 
         radix.insert(scid1.clone());
         radix.insert(scid2.clone());
         radix.insert(scid3.clone());
 
         // Client sends packet with DCID = SCID1 + extra bytes
-        let dcid1 = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 99, 100];
+        let dcid1 = [
+            1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 99, 100,
+        ];
         let result = radix.longest_prefix_match(&dcid1);
         assert_eq!(result.unwrap().len(), 16);
 

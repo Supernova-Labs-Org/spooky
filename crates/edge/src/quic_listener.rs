@@ -19,11 +19,13 @@ use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
+use tokio::sync::{mpsc, oneshot};
 
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
+    ResponseChunk, StreamPhase,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
@@ -645,6 +647,24 @@ impl QUICListener {
 
             if connection.quic.is_closed() {
                 to_remove.push(scid.clone());
+                continue;
+            }
+
+            // Advance in-flight streams independent of inbound packets.
+            if connection.h3.is_some() {
+                let mut h3 = connection.h3.take().unwrap();
+                if let Err(e) = Self::advance_streams_non_blocking(
+                    &mut connection.streams,
+                    &mut connection.quic,
+                    &mut h3,
+                    &self.upstream_pools,
+                    &self.routing_index,
+                    &self.metrics,
+                ) {
+                    error!("advance_streams_non_blocking in timeout path: {:?}", e);
+                }
+                connection.h3 = Some(h3);
+                Self::flush_send(&socket, &mut send_buf, connection);
             }
         }
 
@@ -719,11 +739,15 @@ impl QUICListener {
 
                     // Route lookup — needed to start the H2 request immediately.
                     let resolved = Self::resolve_backend(
-                        &method, &path, authority.as_deref(),
-                        upstream_pools, routing_index,
+                        &method,
+                        &path,
+                        authority.as_deref(),
+                        upstream_pools,
+                        routing_index,
                     );
 
-                    let (body_tx, response_rx, backend_addr, backend_index) = match resolved {
+                    let (body_tx, upstream_result_rx, backend_addr, backend_index) = match resolved
+                    {
                         Ok((addr, idx, _pool)) => {
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
@@ -734,11 +758,16 @@ impl QUICListener {
                             let req_method = method.clone();
                             let req_path = path.clone();
                             let fwd_addr = addr.clone();
-                            let handle: tokio::task::JoinHandle<ForwardResult> = {
-                                let fut = async move {
+                            let (result_tx, result_rx) = oneshot::channel::<ForwardResult>();
+                            let fut = async move {
+                                let result = async {
                                     let request = build_h2_request(
-                                        &fwd_addr, &req_method, &req_path,
-                                        &req_headers, boxed, None,
+                                        &fwd_addr,
+                                        &req_method,
+                                        &req_path,
+                                        &req_headers,
+                                        boxed,
+                                        None,
                                     )
                                     .map_err(ProxyError::Bridge)?;
 
@@ -751,13 +780,20 @@ impl QUICListener {
 
                                     let (parts, body) = response.into_parts();
                                     Ok((parts.status, parts.headers, body))
-                                };
-                                match Handle::try_current() {
-                                    Ok(handle) => handle.spawn(fut),
-                                    Err(_) => fallback_runtime().spawn(fut),
                                 }
+                                .await;
+                                // Ignore send error: receiver dropped means the stream was reset.
+                                let _ = result_tx.send(result);
                             };
-                            (Some(tx), Some(handle), Some(addr), Some(idx))
+                            match Handle::try_current() {
+                                Ok(handle) => {
+                                    handle.spawn(fut);
+                                }
+                                Err(_) => {
+                                    fallback_runtime().spawn(fut);
+                                }
+                            }
+                            (Some(tx), Some(result_rx), Some(addr), Some(idx))
                         }
                         Err(_) => (None, None, None, None),
                     };
@@ -771,12 +807,16 @@ impl QUICListener {
                             authority,
                             headers,
                             body_tx,
-                            response_rx,
                             body_buf: Vec::new(),
                             body_bytes_received: 0,
                             backend_addr,
                             backend_index,
                             start: Instant::now(),
+                            phase: StreamPhase::ReceivingRequest,
+                            request_fin_received: false,
+                            upstream_result_rx,
+                            response_chunk_rx: None,
+                            pending_chunk: None,
                         },
                     );
                 }
@@ -786,8 +826,7 @@ impl QUICListener {
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
                                 // Enforce cap on total bytes received for the stream,
                                 // including chunks already forwarded to the H2 body channel.
-                                let next_total =
-                                    req.body_bytes_received.saturating_add(read);
+                                let next_total = req.body_bytes_received.saturating_add(read);
                                 if next_total > MAX_REQUEST_BODY_BYTES {
                                     connection.streams.remove(&stream_id);
                                     Self::send_simple_response(
@@ -818,49 +857,30 @@ impl QUICListener {
                     }
                 },
                 Ok((stream_id, quiche::h3::Event::Finished)) => {
-                    if let Some(mut req) = connection.streams.remove(&stream_id) {
-                        // Drain any buffered chunks into the channel before
-                        // closing it, then drop the sender to signal end-of-body.
-                        if let Some(tx) = req.body_tx.take() {
+                    if let Some(req) = connection.streams.get_mut(&stream_id) {
+                        req.request_fin_received = true;
+
+                        // Non-blocking body flush: push buffered chunks into the
+                        // channel with try_send.  Any that don't fit stay in body_buf
+                        // and will be retried on the next poll iteration.
+                        if let Some(tx) = &req.body_tx {
                             let buf = std::mem::take(&mut req.body_buf);
-                            run_blocking(|| async move {
-                                for chunk in buf {
-                                    let _ = tx.send(chunk).await;
+                            let mut overflow = Vec::new();
+                            for chunk in buf {
+                                if tx.try_send(chunk.clone()).is_err() {
+                                    overflow.push(chunk);
                                 }
-                                // tx drops here, closing the channel
-                            })
-                            .ok();
+                            }
+                            req.body_buf = overflow;
                         }
-
-                        // Await the in-flight H2 task and route the result.
-                        let forward_result = match req.response_rx.take() {
-                            Some(handle) => run_blocking(|| async move {
-                                match tokio::time::timeout(backend_timeout(), handle).await {
-                                    Ok(Ok(r)) => r,
-                                    Ok(Err(_)) => Err(ProxyError::Transport(
-                                        "task panicked".into(),
-                                    )),
-                                    Err(_) => Err(ProxyError::Timeout),
-                                }
-                            })
-                            .unwrap_or(Err(ProxyError::Transport(
-                                "run_blocking failed".into(),
-                            ))),
-                            None => Err(ProxyError::Transport(
-                                "no backend resolved for request".into(),
-                            )),
-                        };
-
-                        Self::handle_forward_result(
-                            h3,
-                            &mut connection.quic,
-                            stream_id,
-                            &req,
-                            forward_result,
-                            upstream_pools,
-                            routing_index,
-                            metrics,
-                        )?;
+                        // If buffer is now empty, drop body_tx to signal end-of-body.
+                        if req.body_buf.is_empty() {
+                            req.body_tx = None;
+                        }
+                        // Request body fully handed off — now waiting on upstream.
+                        req.phase = StreamPhase::AwaitingUpstream;
+                        // Upstream polling and response dispatch are handled entirely
+                        // by advance_streams_non_blocking, called unconditionally below.
                     }
                 }
                 Ok((stream_id, quiche::h3::Event::Reset(_))) => {
@@ -870,6 +890,322 @@ impl QUICListener {
                 Ok((_stream_id, quiche::h3::Event::GoAway)) => {}
                 Err(quiche::h3::Error::Done) => break,
                 Err(e) => return Err(e),
+            }
+        }
+
+        Self::advance_streams_non_blocking(
+            &mut connection.streams,
+            &mut connection.quic,
+            h3,
+            upstream_pools,
+            routing_index,
+            metrics,
+        )?;
+
+        Ok(())
+    }
+
+    /// Advance all in-flight streams without blocking.
+    ///
+    /// Called after every packet-driven `handle_h3` pass and from
+    /// `handle_timeouts` so progress continues even when no new client
+    /// packets arrive.
+    ///
+    /// Per stream, in order:
+    /// 1. Drain request body buffer → body channel (`try_send`).
+    /// 2. Close body channel once FIN received and buffer empty.
+    /// 3. Poll `upstream_result_rx` (`try_recv`).
+    ///    - Error result  → send error response, mark terminal.
+    ///    - Ok result     → send H3 response headers, spawn body-pump task,
+    ///                      store `response_chunk_rx`, transition to SendingResponse.
+    /// 4. Flush `response_chunk_rx` chunks into H3 (`try_recv` loop).
+    ///    - `Data`  → `h3.send_body(..., false)`
+    ///    - `End`   → `h3.send_body(..., true)`, mark Completed
+    ///    - `Error` → send 502, mark Failed
+    /// 5. Remove streams in terminal phase (Completed / Failed).
+    #[allow(clippy::too_many_arguments)]
+    fn advance_streams_non_blocking(
+        streams: &mut HashMap<u64, RequestEnvelope>,
+        quic: &mut quiche::Connection,
+        h3: &mut quiche::h3::Connection,
+        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        routing_index: &RouteIndex,
+        metrics: &Metrics,
+    ) -> Result<(), quiche::h3::Error> {
+        let stream_ids: Vec<u64> = streams.keys().copied().collect();
+
+        for stream_id in stream_ids {
+            // ── 1 & 2: request body drain ────────────────────────────────────
+            if let Some(req) = streams.get_mut(&stream_id) {
+                if let Some(tx) = &req.body_tx {
+                    let buf = std::mem::take(&mut req.body_buf);
+                    let mut overflow = Vec::new();
+                    for chunk in buf {
+                        if tx.try_send(chunk.clone()).is_err() {
+                            overflow.push(chunk);
+                        }
+                    }
+                    req.body_buf = overflow;
+                }
+                if req.request_fin_received && req.body_buf.is_empty() {
+                    req.body_tx = None; // signals EOF to the upstream H2 task
+                }
+            }
+
+            // ── 3: poll upstream oneshot ──────────────────────────────────────
+            // Only transition to response handling once request-body ingestion is
+            // complete. This preserves request-size enforcement semantics:
+            // oversized requests must still be able to terminate with 413 even if
+            // upstream produced an early response.
+            let can_poll_upstream = streams.get(&stream_id).is_some_and(|req| {
+                req.phase == StreamPhase::AwaitingUpstream
+                    && req.request_fin_received
+                    && req.body_tx.is_none()
+                    && req.body_buf.is_empty()
+            });
+
+            // upstream_ready: Option<ForwardResult>
+            //   None          → oneshot not yet resolved (or not eligible), skip
+            //   Some(Ok(...)) → upstream responded successfully
+            //   Some(Err(.))  → upstream error (or sender dropped)
+            let upstream_ready: Option<ForwardResult> = if can_poll_upstream {
+                streams
+                    .get_mut(&stream_id)
+                    .and_then(|req| req.upstream_result_rx.as_mut())
+                    .and_then(|rx| match rx.try_recv() {
+                        Ok(result) => Some(result),
+                        Err(oneshot::error::TryRecvError::Empty) => None,
+                        Err(oneshot::error::TryRecvError::Closed) => Some(Err(
+                            ProxyError::Transport("upstream task dropped sender".into()),
+                        )),
+                    })
+            } else {
+                None
+            };
+
+            if let Some(forward_result) = upstream_ready {
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    req.upstream_result_rx = None;
+                }
+                match forward_result {
+                    Ok((status, resp_headers, body)) => {
+                        // Send H3 response headers immediately (non-blocking).
+                        let mut h3_headers = Vec::with_capacity(resp_headers.len() + 1);
+                        h3_headers.push(quiche::h3::Header::new(
+                            b":status",
+                            status.as_str().as_bytes(),
+                        ));
+                        for (name, value) in resp_headers.iter() {
+                            if is_hop_header(name.as_str()) || name == http::header::CONTENT_LENGTH
+                            {
+                                continue;
+                            }
+                            h3_headers.push(quiche::h3::Header::new(
+                                name.as_str().as_bytes(),
+                                value.as_bytes(),
+                            ));
+                        }
+                        h3.send_response(quic, stream_id, &h3_headers, false)?;
+
+                        // Spawn a task that pumps body frames into a ResponseChunk channel.
+                        // Enforces backend_timeout() so a slow upstream body does not
+                        // leave the stream open indefinitely.
+                        let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
+                        let deadline = tokio::time::Instant::now() + backend_timeout();
+                        let fut = async move {
+                            use http_body_util::BodyExt;
+                            let mut body: hyper::body::Incoming = body;
+                            loop {
+                                let frame_fut = BodyExt::frame(&mut body);
+                                let result = tokio::time::timeout_at(deadline, frame_fut).await;
+                                match result {
+                                    Err(_elapsed) => {
+                                        // Body read timed out — signal timeout to flush loop.
+                                        let _ = chunk_tx
+                                            .send(ResponseChunk::Error(ProxyError::Timeout))
+                                            .await;
+                                        return;
+                                    }
+                                    Ok(Some(Ok(f))) => {
+                                        if let Ok(data) = f.into_data() {
+                                            if chunk_tx
+                                                .send(ResponseChunk::Data(data))
+                                                .await
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                        // skip trailers / other frame types
+                                    }
+                                    Ok(Some(Err(_))) => {
+                                        let _ = chunk_tx
+                                            .send(ResponseChunk::Error(ProxyError::Transport(
+                                                "upstream body error".into(),
+                                            )))
+                                            .await;
+                                        return;
+                                    }
+                                    Ok(None) => {
+                                        let _ = chunk_tx.send(ResponseChunk::End).await;
+                                        return;
+                                    }
+                                }
+                            }
+                        };
+                        match Handle::try_current() {
+                            Ok(h) => {
+                                h.spawn(fut);
+                            }
+                            Err(_) => {
+                                fallback_runtime().spawn(fut);
+                            }
+                        }
+
+                        if let Some(req) = streams.get_mut(&stream_id) {
+                            req.response_chunk_rx = Some(chunk_rx);
+                            req.phase = StreamPhase::SendingResponse;
+                        }
+
+                        // Update health/metrics for successful upstream response.
+                        if let Some(req) = streams.get(&stream_id) {
+                            if let (Some(addr), Some(idx)) = (&req.backend_addr, req.backend_index)
+                            {
+                                let upstream_name =
+                                    routing_index.lookup(&req.path, req.authority.as_deref());
+                                if let Some(pool) =
+                                    upstream_name.and_then(|n| upstream_pools.get(n))
+                                {
+                                    let transition =
+                                        pool.lock().ok().and_then(
+                                            |mut p| match outcome_from_status(status) {
+                                                crate::HealthClassification::Success => {
+                                                    p.pool.mark_success(idx)
+                                                }
+                                                crate::HealthClassification::Failure => {
+                                                    p.pool.mark_failure(idx)
+                                                }
+                                                crate::HealthClassification::Neutral => None,
+                                            },
+                                        );
+                                    if let Some(t) = transition {
+                                        Self::log_health_transition(addr, t);
+                                    }
+                                }
+                            }
+                            metrics.inc_success();
+                            info!(
+                                "Upstream {} status {} latency_ms {}",
+                                req.backend_addr.as_deref().unwrap_or("?"),
+                                status,
+                                req.start.elapsed().as_millis()
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        // Send error response first, then remove the stream so
+                        // cleanup only happens after the response has been emitted.
+                        if let Some(req) = streams.get(&stream_id) {
+                            Self::handle_forward_result(
+                                h3,
+                                quic,
+                                stream_id,
+                                req,
+                                Err(err),
+                                upstream_pools,
+                                routing_index,
+                                metrics,
+                            )?;
+                        }
+                        streams.remove(&stream_id);
+                        continue;
+                    }
+                }
+            }
+
+            // ── 4: flush response chunks ──────────────────────────────────────
+            let mut terminal = false;
+            if let Some(req) = streams.get_mut(&stream_id) {
+                if let Some(rx) = &mut req.response_chunk_rx {
+                    // Drain as many chunks as quiche will accept this iteration.
+                    loop {
+                        // Retry any chunk that previously hit backpressure.
+                        let chunk = match req.pending_chunk.take() {
+                            Some(c) => c,
+                            None => match rx.try_recv() {
+                                Ok(c) => c,
+                                Err(_) => break, // Empty or closed — nothing to flush
+                            },
+                        };
+                        match chunk {
+                            ResponseChunk::Data(data) => {
+                                match h3.send_body(quic, stream_id, &data, false) {
+                                    Ok(_) => {}
+                                    Err(quiche::h3::Error::StreamBlocked) => {
+                                        // QUIC flow-control backpressure — retry next poll.
+                                        req.pending_chunk = Some(ResponseChunk::Data(data));
+                                        break;
+                                    }
+                                    Err(e) => return Err(e),
+                                }
+                            }
+                            ResponseChunk::End => {
+                                h3.send_body(quic, stream_id, b"", true)?;
+                                req.phase = StreamPhase::Completed;
+                                terminal = true;
+                                break;
+                            }
+                            ResponseChunk::Error(err) => {
+                                // Best-effort: close the stream.
+                                let _ = h3.send_body(quic, stream_id, b"", true);
+                                req.phase = StreamPhase::Failed;
+                                // Mirror the health/metrics updates from the old
+                                // send_backend_response timeout/error paths.
+                                let upstream_name =
+                                    routing_index.lookup(&req.path, req.authority.as_deref());
+                                if let (Some(idx), Some(pool)) = (
+                                    req.backend_index,
+                                    upstream_name.and_then(|n| upstream_pools.get(n)),
+                                ) {
+                                    if let Some(t) =
+                                        pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
+                                    {
+                                        if let Some(addr) = &req.backend_addr {
+                                            Self::log_health_transition(addr, t);
+                                        }
+                                    }
+                                }
+                                match err {
+                                    ProxyError::Timeout => {
+                                        metrics.inc_failure();
+                                        metrics.inc_timeout();
+                                        info!(
+                                            "Upstream {} body timeout latency_ms {}",
+                                            req.backend_addr.as_deref().unwrap_or("?"),
+                                            req.start.elapsed().as_millis()
+                                        );
+                                    }
+                                    _ => {
+                                        metrics.inc_failure();
+                                        metrics.inc_backend_error();
+                                        error!(
+                                            "Upstream {} body error: {:?}",
+                                            req.backend_addr.as_deref().unwrap_or("?"),
+                                            err
+                                        );
+                                    }
+                                }
+                                terminal = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── 5: remove terminal streams ────────────────────────────────────
+            if terminal {
+                streams.remove(&stream_id);
             }
         }
 
@@ -910,8 +1246,8 @@ impl QUICListener {
             let idx = pool.pick(key);
             (idx, lb_type)
         };
-        let backend_index = backend_index
-            .ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
+        let backend_index =
+            backend_index.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
 
         let backend_addr = {
             let pool = upstream_pool.lock().expect("upstream pool lock");
@@ -961,165 +1297,97 @@ impl QUICListener {
 
         // Re-acquire the upstream pool for health marking.
         let upstream_name = routing_index.lookup(&req.path, req.authority.as_deref());
-        let upstream_pool = upstream_name
-            .and_then(|n| upstream_pools.get(n))
-            .cloned();
+        let upstream_pool = upstream_name.and_then(|n| upstream_pools.get(n)).cloned();
 
         match result {
-            Ok((status, headers, body)) => {
-                if let Some(pool) = &upstream_pool {
-                    let transition = pool.lock().ok().and_then(|mut p| {
-                        match outcome_from_status(status) {
-                            crate::HealthClassification::Success => {
-                                p.pool.mark_success(backend_index)
-                            }
-                            crate::HealthClassification::Failure => {
-                                p.pool.mark_failure(backend_index)
-                            }
-                            crate::HealthClassification::Neutral => None,
-                        }
-                    });
-                    if let Some(t) = transition {
-                        Self::log_health_transition(backend_addr, t);
-                    }
-                }
-                metrics.inc_success();
-                info!(
-                    "Upstream {} status {} latency_ms {}",
-                    backend_addr, status, start.elapsed().as_millis()
-                );
-                Self::send_backend_response(h3, quic, stream_id, status, &headers, body)
-            }
+            // Ok variant is handled upstream by advance_streams_non_blocking;
+            // handle_forward_result is only called with Err variants.
+            Ok(_) => unreachable!("handle_forward_result called with Ok result"),
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
-                info!("Upstream {} status 400 latency_ms {}", backend_addr, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::BAD_REQUEST, b"invalid request\n")
+                info!(
+                    "Upstream {} status 400 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_REQUEST,
+                    b"invalid request\n",
+                )
             }
             Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
                 error!("Transport error");
                 if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool.lock().ok().and_then(|mut p| p.pool.mark_failure(backend_index)) {
+                    if let Some(t) = pool
+                        .lock()
+                        .ok()
+                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                    {
                         Self::log_health_transition(backend_addr, t);
                     }
                 }
                 metrics.inc_failure();
                 metrics.inc_backend_error();
-                info!("Upstream {} status 502 latency_ms {}", backend_addr, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::BAD_GATEWAY, b"upstream error\n")
+                info!(
+                    "Upstream {} status 502 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_GATEWAY,
+                    b"upstream error\n",
+                )
             }
             Err(ProxyError::Timeout) => {
                 error!("Server timeout");
                 if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool.lock().ok().and_then(|mut p| p.pool.mark_failure(backend_index)) {
+                    if let Some(t) = pool
+                        .lock()
+                        .ok()
+                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                    {
                         Self::log_health_transition(backend_addr, t);
                     }
                 }
                 metrics.inc_failure();
                 metrics.inc_timeout();
-                info!("Upstream {} status 503 latency_ms {}", backend_addr, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::SERVICE_UNAVAILABLE, b"upstream timeout\n")
+                info!(
+                    "Upstream {} status 503 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    b"upstream timeout\n",
+                )
             }
             Err(ProxyError::Tls(err)) => {
                 error!("TLS error: {}", err);
                 metrics.inc_failure();
-                info!("TLS error for stream {} latency_ms {}", stream_id, start.elapsed().as_millis());
-                Self::send_simple_response(h3, quic, stream_id, http::StatusCode::INTERNAL_SERVER_ERROR, b"internal server error\n")
+                info!(
+                    "TLS error for stream {} latency_ms {}",
+                    stream_id,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                    b"internal server error\n",
+                )
             }
         }
-    }
-
-    fn send_backend_response(
-        h3: &mut quiche::h3::Connection,
-        quic: &mut quiche::Connection,
-        stream_id: u64,
-        status: http::StatusCode,
-        headers: &http::HeaderMap,
-        body: hyper::body::Incoming,
-    ) -> Result<(), quiche::h3::Error> {
-        let mut resp_headers = Vec::with_capacity(headers.len() + 1);
-
-        resp_headers.push(quiche::h3::Header::new(
-            b":status",
-            status.as_str().as_bytes(),
-        ));
-
-        for (name, value) in headers.iter() {
-            if is_hop_header(name.as_str()) || name == http::header::CONTENT_LENGTH {
-                continue;
-            }
-            resp_headers.push(quiche::h3::Header::new(
-                name.as_str().as_bytes(),
-                value.as_bytes(),
-            ));
-        }
-
-        // Drive the response body one frame at a time.  Each call to
-        // run_blocking fetches exactly the next data frame from the backend
-        // and returns it to the sync side, where send_body is called
-        // immediately.  This avoids accumulating the full response in memory:
-        // at most one frame is held between run_blocking returning and
-        // send_body completing.
-        //
-        // Note: h3/quic are !Send so they cannot enter the async closure.
-        // run_blocking(block_in_place) keeps execution on the same OS thread,
-        // making the per-frame loop safe without locks.
-        let deadline = std::time::Instant::now() + backend_timeout();
-
-        // Wrap body in a Mutex so the async closure can borrow it across
-        // repeated run_blocking calls without moving it.
-        let body = std::sync::Mutex::new(body);
-
-        h3.send_response(quic, stream_id, &resp_headers, false)?;
-
-        let mut sent_any = false;
-        loop {
-            let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
-                Some(d) => d,
-                None => break, // timeout
-            };
-
-            // Fetch the next data frame from the backend.
-            let next: Option<Bytes> = match run_blocking(|| async {
-                tokio::time::timeout(remaining, async {
-                    let mut guard = body.lock().expect("body mutex");
-                    loop {
-                        match BodyExt::frame(&mut *guard).await {
-                            Some(Ok(f)) => {
-                                if let Ok(chunk) = f.into_data() {
-                                    return Some(chunk);
-                                }
-                                // trailers / other frames — skip
-                            }
-                            Some(Err(_)) | None => return None,
-                        }
-                    }
-                })
-                .await
-                .unwrap_or(None)
-            }) {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-
-            match next {
-                Some(chunk) => {
-                    h3.send_body(quic, stream_id, &chunk, false)?;
-                    sent_any = true;
-                }
-                None => {
-                    // Body exhausted — send final empty frame with fin=true.
-                    h3.send_body(quic, stream_id, b"", true)?;
-                    return Ok(());
-                }
-            }
-        }
-
-        // Timeout or error path: close stream.
-        let _ = sent_any;
-        h3.send_body(quic, stream_id, b"", true)?;
-
-        Ok(())
     }
 
     fn send_simple_response(
@@ -1261,17 +1529,6 @@ impl QUICListener {
                 }
             });
         }
-    }
-}
-
-fn run_blocking<F, Fut, T>(f: F) -> Result<T, String>
-where
-    F: FnOnce() -> Fut,
-    Fut: std::future::Future<Output = T>,
-{
-    match Handle::try_current() {
-        Ok(handle) => Ok(tokio::task::block_in_place(|| handle.block_on(f()))),
-        Err(_) => Ok(fallback_runtime().block_on(f())),
     }
 }
 

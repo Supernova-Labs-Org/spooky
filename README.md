@@ -201,7 +201,7 @@ See [roadmap](docs/roadmap.md) for known issues and planned improvements.
 
 ## Development
 
-See [contributing guide](docs/development/contributing.md) for development setup and guidelines.
+See [contributing guide](CONTRIBUTING.md) for development setup and guidelines.
 
 ```bash
 # Development build

@@ -10,7 +10,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use core::net::SocketAddr;
@@ -69,7 +69,7 @@ pub struct QUICListener {
     pub h2_pool: Arc<H2Pool>,
     pub upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
     pub(crate) routing_index: route_index::RouteIndex,
-    pub metrics: Metrics,
+    pub metrics: Arc<Metrics>,
     pub draining: bool,
     pub drain_start: Option<Instant>,
 
@@ -137,6 +137,7 @@ pub struct RequestEnvelope {
     /// Resolved backend address and index (for health marking on response).
     pub backend_addr: Option<String>,
     pub backend_index: Option<usize>,
+    pub upstream_name: Option<String>,
     pub start: Instant,
 
     /// Current lifecycle phase of this stream.
@@ -178,7 +179,32 @@ pub struct Metrics {
     pub requests_failure: AtomicU64,
     pub backend_timeouts: AtomicU64,
     pub backend_errors: AtomicU64,
+    pub overload_shed: AtomicU64,
     pub scid_rotations: AtomicU64,
+    route_stats: Mutex<HashMap<String, RouteStats>>,
+}
+
+const LATENCY_BUCKETS_MS: [u64; 14] = [
+    1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000,
+];
+
+#[derive(Default, Clone)]
+struct RouteStats {
+    requests_total: u64,
+    success: u64,
+    failure: u64,
+    timeout: u64,
+    backend_error: u64,
+    overload_shed: u64,
+    latency_buckets: [u64; LATENCY_BUCKETS_MS.len() + 1],
+}
+
+pub enum RouteOutcome {
+    Success,
+    Failure,
+    Timeout,
+    BackendError,
+    OverloadShed,
 }
 
 impl Metrics {
@@ -202,7 +228,205 @@ impl Metrics {
         self.backend_errors.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_overload_shed(&self) {
+        self.overload_shed.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn inc_scid_rotation(&self) {
         self.scid_rotations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
+        let mut guard = match self.route_stats.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        let entry = guard.entry(route.to_string()).or_default();
+        entry.requests_total = entry.requests_total.saturating_add(1);
+
+        match outcome {
+            RouteOutcome::Success => {
+                entry.success = entry.success.saturating_add(1);
+            }
+            RouteOutcome::Failure => {
+                entry.failure = entry.failure.saturating_add(1);
+            }
+            RouteOutcome::Timeout => {
+                entry.timeout = entry.timeout.saturating_add(1);
+            }
+            RouteOutcome::BackendError => {
+                entry.backend_error = entry.backend_error.saturating_add(1);
+            }
+            RouteOutcome::OverloadShed => {
+                entry.overload_shed = entry.overload_shed.saturating_add(1);
+            }
+        }
+
+        let latency_ms = latency.as_millis() as u64;
+        let bucket = LATENCY_BUCKETS_MS
+            .iter()
+            .position(|cutoff| latency_ms <= *cutoff)
+            .unwrap_or(LATENCY_BUCKETS_MS.len());
+        entry.latency_buckets[bucket] = entry.latency_buckets[bucket].saturating_add(1);
+    }
+
+    pub fn render_prometheus(&self) -> String {
+        let mut out = String::with_capacity(8 * 1024);
+        out.push_str("# HELP spooky_requests_total Total requests seen by spooky.\n");
+        out.push_str("# TYPE spooky_requests_total counter\n");
+        out.push_str(&format!(
+            "spooky_requests_total {}\n",
+            self.requests_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_requests_success Total successful upstream responses.\n");
+        out.push_str("# TYPE spooky_requests_success counter\n");
+        out.push_str(&format!(
+            "spooky_requests_success {}\n",
+            self.requests_success.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_requests_failure Total failed requests.\n");
+        out.push_str("# TYPE spooky_requests_failure counter\n");
+        out.push_str(&format!(
+            "spooky_requests_failure {}\n",
+            self.requests_failure.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_backend_timeouts Total backend timeout events.\n");
+        out.push_str("# TYPE spooky_backend_timeouts counter\n");
+        out.push_str(&format!(
+            "spooky_backend_timeouts {}\n",
+            self.backend_timeouts.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_backend_errors Total backend error events.\n");
+        out.push_str("# TYPE spooky_backend_errors counter\n");
+        out.push_str(&format!(
+            "spooky_backend_errors {}\n",
+            self.backend_errors.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_overload_shed Total requests dropped due to overload controls.\n");
+        out.push_str("# TYPE spooky_overload_shed counter\n");
+        out.push_str(&format!(
+            "spooky_overload_shed {}\n",
+            self.overload_shed.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_scid_rotations Total SCID rotations.\n");
+        out.push_str("# TYPE spooky_scid_rotations counter\n");
+        out.push_str(&format!(
+            "spooky_scid_rotations {}\n",
+            self.scid_rotations.load(Ordering::Relaxed)
+        ));
+
+        if let Ok(route_stats) = self.route_stats.lock() {
+            for (route, stats) in route_stats.iter() {
+                let route = escape_prometheus_label(route);
+                out.push_str(&format!(
+                    "spooky_route_requests_total{{route=\"{}\"}} {}\n",
+                    route, stats.requests_total
+                ));
+                out.push_str(&format!(
+                    "spooky_route_success_total{{route=\"{}\"}} {}\n",
+                    route, stats.success
+                ));
+                out.push_str(&format!(
+                    "spooky_route_failure_total{{route=\"{}\"}} {}\n",
+                    route, stats.failure
+                ));
+                out.push_str(&format!(
+                    "spooky_route_timeout_total{{route=\"{}\"}} {}\n",
+                    route, stats.timeout
+                ));
+                out.push_str(&format!(
+                    "spooky_route_backend_error_total{{route=\"{}\"}} {}\n",
+                    route, stats.backend_error
+                ));
+                out.push_str(&format!(
+                    "spooky_route_overload_shed_total{{route=\"{}\"}} {}\n",
+                    route, stats.overload_shed
+                ));
+                out.push_str(&format!(
+                    "spooky_route_latency_ms_p50{{route=\"{}\"}} {:.2}\n",
+                    route,
+                    percentile_ms(stats, 0.50)
+                ));
+                out.push_str(&format!(
+                    "spooky_route_latency_ms_p95{{route=\"{}\"}} {:.2}\n",
+                    route,
+                    percentile_ms(stats, 0.95)
+                ));
+                out.push_str(&format!(
+                    "spooky_route_latency_ms_p99{{route=\"{}\"}} {:.2}\n",
+                    route,
+                    percentile_ms(stats, 0.99)
+                ));
+            }
+        }
+
+        out
+    }
+}
+
+fn percentile_ms(stats: &RouteStats, quantile: f64) -> f64 {
+    if stats.requests_total == 0 {
+        return 0.0;
+    }
+
+    let target = ((stats.requests_total as f64) * quantile).ceil() as u64;
+    let mut running = 0u64;
+
+    for (idx, count) in stats.latency_buckets.iter().enumerate() {
+        running = running.saturating_add(*count);
+        if running >= target {
+            return if idx < LATENCY_BUCKETS_MS.len() {
+                LATENCY_BUCKETS_MS[idx] as f64
+            } else {
+                *LATENCY_BUCKETS_MS.last().unwrap_or(&60_000) as f64
+            };
+        }
+    }
+
+    *LATENCY_BUCKETS_MS.last().unwrap_or(&60_000) as f64
+}
+
+fn escape_prometheus_label(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\n', "\\n")
+        .replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_render_includes_route_percentiles() {
+        let metrics = Metrics::default();
+        metrics.record_route(
+            "api_pool",
+            Duration::from_millis(12),
+            RouteOutcome::Success,
+        );
+        metrics.record_route(
+            "api_pool",
+            Duration::from_millis(320),
+            RouteOutcome::Timeout,
+        );
+        metrics.record_route(
+            "api_pool",
+            Duration::from_millis(900),
+            RouteOutcome::BackendError,
+        );
+
+        let output = metrics.render_prometheus();
+        assert!(output.contains("spooky_route_requests_total{route=\"api_pool\"} 3"));
+        assert!(output.contains("spooky_route_latency_ms_p50{route=\"api_pool\"}"));
+        assert!(output.contains("spooky_route_latency_ms_p95{route=\"api_pool\"}"));
+        assert!(output.contains("spooky_route_latency_ms_p99{route=\"api_pool\"}"));
     }
 }

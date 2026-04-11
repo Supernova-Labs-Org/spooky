@@ -8,8 +8,13 @@ use std::{
 use core::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
+use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use log::{debug, error, info};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
@@ -25,7 +30,7 @@ use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
-    ResponseChunk, StreamPhase,
+    ResponseChunk, RouteOutcome, StreamPhase,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
@@ -118,9 +123,10 @@ impl QUICListener {
         }
         let routing_index = RouteIndex::from_upstreams(&config.upstream);
 
-        let metrics = Metrics::default();
+        let metrics = Arc::new(Metrics::default());
 
         Self::spawn_health_checks(upstream_pools.clone(), h2_pool.clone());
+        Self::spawn_metrics_endpoint(&config, Arc::clone(&metrics));
 
         Ok(Self {
             socket,
@@ -746,9 +752,9 @@ impl QUICListener {
                         routing_index,
                     );
 
-                    let (body_tx, upstream_result_rx, backend_addr, backend_index) = match resolved
-                    {
-                        Ok((addr, idx, _pool)) => {
+                    let (body_tx, upstream_result_rx, backend_addr, backend_index, upstream_name) =
+                        match resolved {
+                            Ok((upstream_name, addr, idx, _pool)) => {
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
                             let (tx, channel_body) = ChannelBody::channel(8);
@@ -793,10 +799,10 @@ impl QUICListener {
                                     fallback_runtime().spawn(fut);
                                 }
                             }
-                            (Some(tx), Some(result_rx), Some(addr), Some(idx))
+                                (Some(tx), Some(result_rx), Some(addr), Some(idx), Some(upstream_name))
                         }
-                        Err(_) => (None, None, None, None),
-                    };
+                            Err(_) => (None, None, None, None, None),
+                        };
 
                     metrics.inc_total();
                     connection.streams.insert(
@@ -811,6 +817,7 @@ impl QUICListener {
                             body_bytes_received: 0,
                             backend_addr,
                             backend_index,
+                            upstream_name,
                             start: Instant::now(),
                             phase: StreamPhase::ReceivingRequest,
                             request_fin_received: false,
@@ -1094,6 +1101,13 @@ impl QUICListener {
                                 }
                             }
                             metrics.inc_success();
+                            let route_label =
+                                req.upstream_name.as_deref().unwrap_or("unrouted");
+                            metrics.record_route(
+                                route_label,
+                                req.start.elapsed(),
+                                RouteOutcome::Success,
+                            );
                             info!(
                                 "Upstream {} status {} latency_ms {}",
                                 req.backend_addr.as_deref().unwrap_or("?"),
@@ -1179,6 +1193,13 @@ impl QUICListener {
                                     ProxyError::Timeout => {
                                         metrics.inc_failure();
                                         metrics.inc_timeout();
+                                        let route_label =
+                                            req.upstream_name.as_deref().unwrap_or("unrouted");
+                                        metrics.record_route(
+                                            route_label,
+                                            req.start.elapsed(),
+                                            RouteOutcome::Timeout,
+                                        );
                                         info!(
                                             "Upstream {} body timeout latency_ms {}",
                                             req.backend_addr.as_deref().unwrap_or("?"),
@@ -1188,6 +1209,13 @@ impl QUICListener {
                                     _ => {
                                         metrics.inc_failure();
                                         metrics.inc_backend_error();
+                                        let route_label =
+                                            req.upstream_name.as_deref().unwrap_or("unrouted");
+                                        metrics.record_route(
+                                            route_label,
+                                            req.start.elapsed(),
+                                            RouteOutcome::BackendError,
+                                        );
                                         error!(
                                             "Upstream {} body error: {:?}",
                                             req.backend_addr.as_deref().unwrap_or("?"),
@@ -1219,7 +1247,7 @@ impl QUICListener {
         authority: Option<&str>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
-    ) -> Result<(String, usize, Arc<Mutex<UpstreamPool>>), ProxyError> {
+    ) -> Result<(String, String, usize, Arc<Mutex<UpstreamPool>>), ProxyError> {
         if method.is_empty() || path.is_empty() {
             return Err(ProxyError::Transport("empty method or path".into()));
         }
@@ -1258,7 +1286,12 @@ impl QUICListener {
         };
 
         info!("Selected backend {} via {}", backend_addr, lb_type);
-        Ok((backend_addr, backend_index, upstream_pool))
+        Ok((
+            upstream_name.to_string(),
+            backend_addr,
+            backend_index,
+            upstream_pool,
+        ))
     }
 
     /// Handle an already-resolved `ForwardResult`, applying health transitions
@@ -1275,12 +1308,14 @@ impl QUICListener {
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
         let start = req.start;
+        let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
 
         // If routing failed at Headers time, return an appropriate error now.
         let (backend_addr, backend_index) = match (&req.backend_addr, req.backend_index) {
             (Some(a), Some(i)) => (a.as_str(), i),
             _ => {
                 metrics.inc_failure();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 return Self::send_simple_response(
                     h3,
                     quic,
@@ -1306,6 +1341,7 @@ impl QUICListener {
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 info!(
                     "Upstream {} status 400 latency_ms {}",
                     backend_addr,
@@ -1332,6 +1368,7 @@ impl QUICListener {
                 }
                 metrics.inc_failure();
                 metrics.inc_backend_error();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
                 info!(
                     "Upstream {} status 502 latency_ms {}",
                     backend_addr,
@@ -1358,6 +1395,7 @@ impl QUICListener {
                 }
                 metrics.inc_failure();
                 metrics.inc_timeout();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Timeout);
                 info!(
                     "Upstream {} status 503 latency_ms {}",
                     backend_addr,
@@ -1374,6 +1412,7 @@ impl QUICListener {
             Err(ProxyError::Tls(err)) => {
                 error!("TLS error: {}", err);
                 metrics.inc_failure();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 info!(
                     "TLS error for stream {} latency_ms {}",
                     stream_id,
@@ -1442,6 +1481,95 @@ impl QUICListener {
             HealthTransition::BecameUnhealthy => {
                 error!("Backend {} became unhealthy", addr);
             }
+        }
+    }
+
+    fn spawn_metrics_endpoint(config: &SpookyConfig, metrics: Arc<Metrics>) {
+        let endpoint = &config.observability.metrics;
+        if !endpoint.enabled {
+            return;
+        }
+
+        let bind = format!("{}:{}", endpoint.address, endpoint.port);
+        let metrics_path = endpoint.path.clone();
+
+        let handle = match Handle::try_current() {
+            Ok(h) => h,
+            Err(err) => {
+                error!("Metrics endpoint disabled (no Tokio runtime): {}", err);
+                return;
+            }
+        };
+
+        handle.spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(&bind).await {
+                Ok(l) => l,
+                Err(err) => {
+                    error!("Failed to bind metrics endpoint {}: {}", bind, err);
+                    return;
+                }
+            };
+            info!("Metrics endpoint listening on http://{}{}", bind, metrics_path);
+
+            loop {
+                let (stream, _peer) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        error!("Metrics endpoint accept failed: {}", err);
+                        continue;
+                    }
+                };
+
+                let io = TokioIo::new(stream);
+                let metrics = Arc::clone(&metrics);
+                let metrics_path = metrics_path.clone();
+
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let metrics = Arc::clone(&metrics);
+                        let metrics_path = metrics_path.clone();
+                        async move {
+                            Ok::<_, hyper::Error>(Self::handle_metrics_request(
+                                req,
+                                &metrics_path,
+                                metrics,
+                            ))
+                        }
+                    });
+
+                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        error!("Metrics endpoint connection failed: {}", err);
+                    }
+                });
+            }
+        });
+    }
+
+    fn handle_metrics_request(
+        req: Request<Incoming>,
+        metrics_path: &str,
+        metrics: Arc<Metrics>,
+    ) -> Response<Full<Bytes>> {
+        if req.uri().path() != metrics_path {
+            return match Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Full::new(Bytes::from_static(b"not found\n")))
+            {
+                Ok(resp) => resp,
+                Err(_) => Response::new(Full::new(Bytes::from_static(b"not found\n"))),
+            };
+        }
+
+        let body = metrics.render_prometheus();
+        match Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/plain; version=0.0.4")
+            .body(Full::new(Bytes::from(body)))
+        {
+            Ok(resp) => resp,
+            Err(_) => Response::new(Full::new(Bytes::from_static(
+                b"failed to render metrics\n",
+            ))),
         }
     }
 

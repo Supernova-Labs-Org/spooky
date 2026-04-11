@@ -93,6 +93,8 @@ fn make_config(port: u32, cert: String, key: String, backend_address: String) ->
             level: "info".to_string(),
             file: Default::default(),
         },
+        performance: spooky_config::config::Performance::default(),
+        observability: spooky_config::config::Observability::default(),
     }
 }
 

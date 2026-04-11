@@ -78,6 +78,64 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    // --- Validate performance controls ---
+    if config.performance.worker_threads == 0 {
+        error!("performance.worker_threads must be greater than 0");
+        return false;
+    }
+
+    if config.performance.global_inflight_limit == 0 {
+        error!("performance.global_inflight_limit must be greater than 0");
+        return false;
+    }
+
+    if config.performance.per_upstream_inflight_limit == 0 {
+        error!("performance.per_upstream_inflight_limit must be greater than 0");
+        return false;
+    }
+
+    if config.performance.backend_timeout_ms == 0 {
+        error!("performance.backend_timeout_ms must be greater than 0");
+        return false;
+    }
+
+    if config.performance.backend_body_idle_timeout_ms == 0 {
+        error!("performance.backend_body_idle_timeout_ms must be greater than 0");
+        return false;
+    }
+
+    if config.performance.backend_body_total_timeout_ms == 0 {
+        error!("performance.backend_body_total_timeout_ms must be greater than 0");
+        return false;
+    }
+
+    if config.performance.backend_body_total_timeout_ms
+        < config.performance.backend_body_idle_timeout_ms
+    {
+        error!(
+            "performance.backend_body_total_timeout_ms must be >= backend_body_idle_timeout_ms"
+        );
+        return false;
+    }
+
+    // --- Validate observability ---
+    if config.observability.metrics.enabled {
+        if config.observability.metrics.address.is_empty() {
+            error!("observability.metrics.address cannot be empty when metrics are enabled");
+            return false;
+        }
+
+        if config.observability.metrics.port == 0 {
+            error!("observability.metrics.port must be between 1 and 65535");
+            return false;
+        }
+
+        if !config.observability.metrics.path.starts_with('/') {
+            error!("observability.metrics.path must start with '/'");
+            return false;
+        }
+    }
+
     // --- Validate TLS certs ---
     if !std::path::Path::new(&config.listen.tls.cert).exists() {
         error!(

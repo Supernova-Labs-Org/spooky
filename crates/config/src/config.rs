@@ -7,6 +7,10 @@ use crate::default::{
     get_default_health_timeout, get_default_interval, get_default_load_balancing, get_default_log,
     get_default_log_file_path, get_default_log_level, get_default_path, get_default_port,
     get_default_protocol, get_default_success_threshold, get_default_version, get_default_weight,
+    observe_default_address, observe_default_metrics_path, observe_default_port,
+    perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
+    perf_default_backend_timeout_ms, perf_default_global_inflight_limit,
+    perf_default_per_upstream_inflight_limit, perf_default_worker_threads,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -23,6 +27,12 @@ pub struct Config {
 
     #[serde(default = "get_default_log")]
     pub log: Log,
+
+    #[serde(default)]
+    pub performance: Performance,
+
+    #[serde(default)]
+    pub observability: Observability,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -128,4 +138,70 @@ pub struct LogFile {
 
     #[serde(default = "get_default_log_file_path")]
     pub path: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Performance {
+    #[serde(default = "perf_default_worker_threads")]
+    pub worker_threads: usize,
+
+    #[serde(default = "perf_default_global_inflight_limit")]
+    pub global_inflight_limit: usize,
+
+    #[serde(default = "perf_default_per_upstream_inflight_limit")]
+    pub per_upstream_inflight_limit: usize,
+
+    #[serde(default = "perf_default_backend_timeout_ms")]
+    pub backend_timeout_ms: u64,
+
+    #[serde(default = "perf_default_backend_body_idle_timeout_ms")]
+    pub backend_body_idle_timeout_ms: u64,
+
+    #[serde(default = "perf_default_backend_body_total_timeout_ms")]
+    pub backend_body_total_timeout_ms: u64,
+}
+
+impl Default for Performance {
+    fn default() -> Self {
+        Self {
+            worker_threads: perf_default_worker_threads(),
+            global_inflight_limit: perf_default_global_inflight_limit(),
+            per_upstream_inflight_limit: perf_default_per_upstream_inflight_limit(),
+            backend_timeout_ms: perf_default_backend_timeout_ms(),
+            backend_body_idle_timeout_ms: perf_default_backend_body_idle_timeout_ms(),
+            backend_body_total_timeout_ms: perf_default_backend_body_total_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct Observability {
+    #[serde(default)]
+    pub metrics: MetricsEndpoint,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MetricsEndpoint {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "observe_default_address")]
+    pub address: String,
+
+    #[serde(default = "observe_default_port")]
+    pub port: u16,
+
+    #[serde(default = "observe_default_metrics_path")]
+    pub path: String,
+}
+
+impl Default for MetricsEndpoint {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            address: observe_default_address(),
+            port: observe_default_port(),
+            path: observe_default_metrics_path(),
+        }
+    }
 }

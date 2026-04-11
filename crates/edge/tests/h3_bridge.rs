@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
-    io::{Read, Write},
     net::SocketAddr,
     pin::Pin,
     sync::{
@@ -13,13 +12,16 @@ use std::{
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{
-    Request, Response,
+    Request, Response, Uri,
     body::{Body, Frame, Incoming},
     service::service_fn,
 };
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::{
+    client::legacy::{Client, connect::HttpConnector},
+    rt::{TokioExecutor, TokioIo},
+};
 use quiche::h3::NameValue;
 use rand::RngCore;
 use rcgen::{Certificate, CertificateParams, SanType};
@@ -338,39 +340,63 @@ fn find_free_tcp_port() -> u16 {
     listener.local_addr().expect("local addr").port()
 }
 
-fn scrape_metrics(port: u16, path: &str) -> Result<String, String> {
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-        path
-    );
+async fn scrape_metrics(port: u16, path: &str, timeout: Duration) -> Result<String, String> {
+    let start = Instant::now();
+    let client: Client<HttpConnector, Empty<Bytes>> =
+        Client::builder(TokioExecutor::new()).build_http();
+    let target: Uri = format!("http://127.0.0.1:{port}{path}")
+        .parse()
+        .map_err(|err| format!("invalid metrics uri: {err}"))?;
+    let mut last_error = String::new();
 
-    for _ in 0..100 {
-        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-            stream
-                .write_all(request.as_bytes())
-                .map_err(|e| format!("write request: {e}"))?;
-            let _ = stream.shutdown(std::net::Shutdown::Write);
-            let mut raw = String::new();
-            stream
-                .read_to_string(&mut raw)
-                .map_err(|e| format!("read response: {e}"))?;
-            if raw.is_empty() {
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
-            }
-            if let Some((_, body)) = raw.split_once("\r\n\r\n") {
-                if body.is_empty() {
-                    std::thread::sleep(Duration::from_millis(50));
+    while start.elapsed() < timeout {
+        match tokio::time::timeout(Duration::from_millis(500), client.get(target.clone())).await {
+            Ok(Ok(response)) => {
+                let status = response.status();
+                if !status.is_success() {
+                    last_error = format!("unexpected status: {status}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     continue;
                 }
-                return Ok(body.to_string());
+
+                let collected = match response.into_body().collect().await {
+                    Ok(body) => body.to_bytes(),
+                    Err(err) => {
+                        last_error = format!("read body: {err}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                if collected.is_empty() {
+                    last_error = "empty response body".to_string();
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+
+                match String::from_utf8(collected.to_vec()) {
+                    Ok(text) => return Ok(text),
+                    Err(err) => {
+                        last_error = format!("metrics payload not utf8: {err}");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                }
             }
-            return Ok(raw);
+            Ok(Err(err)) => {
+                last_error = format!("http request failed: {err}");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(_) => {
+                last_error = "request timeout".to_string();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
         }
-        std::thread::sleep(Duration::from_millis(50));
     }
 
-    Err("metrics endpoint not reachable".to_string())
+    Err(format!(
+        "metrics endpoint not reachable within {:?} ({})",
+        timeout, last_error
+    ))
 }
 
 fn run_h3_client_concurrent_get(
@@ -972,54 +998,49 @@ fn metrics_endpoint_exposes_route_slo_metrics() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
 
     let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
-    for _ in 0..5 {
-        let metrics_port = find_free_tcp_port();
-        let mut config = make_config(0, backend_addr.to_string(), cert.clone(), key.clone());
-        config.observability.metrics.enabled = true;
-        config.observability.metrics.address = "127.0.0.1".to_string();
-        config.observability.metrics.port = metrics_port;
-        config.observability.metrics.path = "/metrics".to_string();
+    let metrics_port = find_free_tcp_port();
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.observability.metrics.enabled = true;
+    config.observability.metrics.address = "127.0.0.1".to_string();
+    config.observability.metrics.port = metrics_port;
+    config.observability.metrics.path = "/metrics".to_string();
 
-        let _enter = rt.enter();
-        let listener = QUICListener::new(config).expect("failed to create listener");
-        drop(_enter);
-        let listen_addr = listener.socket.local_addr().unwrap();
-        let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+    let _enter = rt.enter();
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    drop(_enter);
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
 
-        let observations = rt
-            .block_on(async move {
-                tokio::task::spawn_blocking(move || {
-                    run_h3_client_concurrent_get(
-                        listen_addr,
-                        &["/fast", "/slow"],
-                        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
-                    )
-                })
-                .await
-                .expect("join concurrent client task")
+    let observations = rt
+        .block_on(async move {
+            tokio::task::spawn_blocking(move || {
+                run_h3_client_concurrent_get(
+                    listen_addr,
+                    &["/fast", "/slow"],
+                    Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+                )
             })
-            .expect("requests should succeed");
-        assert_eq!(observations.len(), 2);
+            .await
+            .expect("join concurrent client task")
+        })
+        .expect("requests should succeed");
+    assert_eq!(observations.len(), 2);
 
-        let metrics_result = rt.block_on(async move {
-            tokio::task::spawn_blocking(move || scrape_metrics(metrics_port, "/metrics"))
-                .await
-                .expect("join metrics scrape task")
-        });
-        if let Ok(metrics) = metrics_result {
-            assert!(
-                metrics.contains("spooky_requests_total"),
-                "unexpected metrics payload: {metrics}"
-            );
-            assert!(metrics.contains("spooky_route_requests_total{route=\"test_pool\"}"));
-            assert!(metrics.contains("spooky_route_latency_ms_p50{route=\"test_pool\"}"));
-            assert!(metrics.contains("spooky_route_latency_ms_p95{route=\"test_pool\"}"));
-            assert!(metrics.contains("spooky_route_latency_ms_p99{route=\"test_pool\"}"));
-            return;
-        }
-    }
-
-    panic!("metrics endpoint did not become reachable after multiple attempts");
+    let metrics = rt
+        .block_on(scrape_metrics(
+            metrics_port,
+            "/metrics",
+            Duration::from_secs(20),
+        ))
+        .expect("metrics endpoint should become reachable");
+    assert!(
+        metrics.contains("spooky_requests_total"),
+        "unexpected metrics payload: {metrics}"
+    );
+    assert!(metrics.contains("spooky_route_requests_total{route=\"test_pool\"}"));
+    assert!(metrics.contains("spooky_route_latency_ms_p50{route=\"test_pool\"}"));
+    assert!(metrics.contains("spooky_route_latency_ms_p95{route=\"test_pool\"}"));
+    assert!(metrics.contains("spooky_route_latency_ms_p99{route=\"test_pool\"}"));
 }
 
 #[test]

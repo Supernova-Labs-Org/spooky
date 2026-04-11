@@ -1688,14 +1688,33 @@ impl QUICListener {
             }
         };
 
+        // Bind synchronously so endpoint readiness does not race with task scheduling.
+        let std_listener = match std::net::TcpListener::bind(&bind) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!("Failed to bind metrics endpoint {}: {}", bind, err);
+                return;
+            }
+        };
+        if let Err(err) = std_listener.set_nonblocking(true) {
+            error!(
+                "Failed to set metrics endpoint listener nonblocking ({}): {}",
+                bind, err
+            );
+            return;
+        }
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!(
+                    "Failed to register metrics endpoint listener {}: {}",
+                    bind, err
+                );
+                return;
+            }
+        };
+
         handle.spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(&bind).await {
-                Ok(l) => l,
-                Err(err) => {
-                    error!("Failed to bind metrics endpoint {}: {}", bind, err);
-                    return;
-                }
-            };
             info!(
                 "Metrics endpoint listening on http://{}{}",
                 bind, metrics_path

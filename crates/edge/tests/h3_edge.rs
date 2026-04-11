@@ -412,6 +412,64 @@ fn run_h3_client_multiple_requests(
     Ok((max_spare_dcids, requests_done))
 }
 
+fn assert_cid_sync_invariants(listener: &QUICListener) {
+    for (primary_key, connection) in &listener.connections {
+        assert_eq!(
+            primary_key.as_ref(),
+            connection.primary_scid.as_ref(),
+            "connection map key must match connection.primary_scid"
+        );
+
+        for cid in &connection.routing_scids {
+            let matched = listener
+                .cid_radix
+                .longest_prefix_match(cid.as_ref())
+                .unwrap_or_else(|| panic!("missing CID in radix: {}", hex::encode(cid)));
+            assert_eq!(
+                matched.as_ref(),
+                cid.as_ref(),
+                "radix should return exact SCID for stored prefix"
+            );
+
+            if cid.as_ref() == connection.primary_scid.as_ref() {
+                assert!(
+                    listener.cid_routes.get(cid.as_ref()).is_none(),
+                    "primary SCID must not be present in alias map"
+                );
+            } else {
+                let mapped_primary = listener
+                    .cid_routes
+                    .get(cid.as_ref())
+                    .unwrap_or_else(|| panic!("alias CID missing mapping: {}", hex::encode(cid)));
+                assert_eq!(
+                    mapped_primary.as_ref(),
+                    connection.primary_scid.as_ref(),
+                    "alias must map to connection primary SCID"
+                );
+            }
+        }
+    }
+
+    for (alias, primary) in &listener.cid_routes {
+        assert_ne!(
+            alias.as_ref(),
+            primary.as_ref(),
+            "alias route must not map a primary to itself"
+        );
+        let connection = listener.connections.get(primary).unwrap_or_else(|| {
+            panic!(
+                "alias points to missing primary connection: alias={} primary={}",
+                hex::encode(alias),
+                hex::encode(primary)
+            )
+        });
+        assert!(
+            connection.routing_scids.contains(alias),
+            "alias must exist in the owning connection routing SCID set"
+        );
+    }
+}
+
 #[test]
 fn http3_request_is_accepted_and_parsed() {
     let dir = tempdir().expect("failed to create temp dir");
@@ -487,4 +545,5 @@ fn server_rotates_scids_for_active_connection() {
         "client did not complete any request"
     );
     assert!(rotations > 0, "server did not rotate any SCID");
+    assert_cid_sync_invariants(&listener_guard);
 }

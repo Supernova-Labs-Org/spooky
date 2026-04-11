@@ -1,8 +1,8 @@
 use bytes::Bytes;
-use smallvec::SmallVec;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
+    hash::{Hash, Hasher},
     net::UdpSocket,
     pin::Pin,
     sync::{
@@ -82,7 +82,7 @@ pub struct QUICListener {
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
 
     pub connections: HashMap<Arc<[u8]>, QuicConnection>, // KEY: SCID(server connection id)
-    pub cid_routes: HashMap<Vec<u8>, Vec<u8>>,           // KEY: alias SCID, VALUE: primary SCID
+    pub cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>>,       // KEY: alias SCID, VALUE: primary SCID
     pub peer_routes: HashMap<SocketAddr, Arc<[u8]>>,     // KEY: peer address, VALUE: primary SCID
     pub cid_radix: CidRadix,
 }
@@ -95,8 +95,8 @@ pub struct QuicConnection {
 
     pub peer_address: SocketAddr,
     pub last_activity: Instant,
-    pub primary_scid: Vec<u8>,
-    pub routing_scids: HashSet<Vec<u8>>,
+    pub primary_scid: Arc<[u8]>,
+    pub routing_scids: HashSet<Arc<[u8]>>,
     pub packets_since_rotation: u64,
     pub last_scid_rotation: Instant,
 }
@@ -132,11 +132,12 @@ pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
     pub authority: Option<String>,
-    pub headers: SmallVec<[(Vec<u8>, Vec<u8>); 16]>,
     /// Sender half of the body channel.  Dropping it signals end-of-body to hyper.
     pub body_tx: Option<mpsc::Sender<Bytes>>,
     /// Body chunks that arrived before the channel had capacity.
-    pub body_buf: Vec<Bytes>,
+    pub body_buf: VecDeque<Bytes>,
+    /// Current bytes held in `body_buf`.
+    pub body_buf_bytes: usize,
     /// Total body bytes received on this stream (buffered + already forwarded).
     pub body_bytes_received: usize,
     /// Resolved backend address and index (for health marking on response).
@@ -179,7 +180,6 @@ pub fn outcome_from_status(status: http::StatusCode) -> HealthClassification {
     }
 }
 
-#[derive(Default)]
 pub struct Metrics {
     pub requests_total: AtomicU64,
     pub requests_success: AtomicU64,
@@ -188,12 +188,13 @@ pub struct Metrics {
     pub backend_errors: AtomicU64,
     pub overload_shed: AtomicU64,
     pub scid_rotations: AtomicU64,
-    route_stats: Mutex<HashMap<String, RouteStats>>,
+    route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
 }
 
 const LATENCY_BUCKETS_MS: [u64; 14] = [
     1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000,
 ];
+const ROUTE_STATS_SHARDS: usize = 32;
 
 #[derive(Default, Clone)]
 struct RouteStats {
@@ -212,6 +213,25 @@ pub enum RouteOutcome {
     Timeout,
     BackendError,
     OverloadShed,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        let mut shards = Vec::with_capacity(ROUTE_STATS_SHARDS);
+        for _ in 0..ROUTE_STATS_SHARDS {
+            shards.push(Mutex::new(HashMap::new()));
+        }
+        Self {
+            requests_total: AtomicU64::new(0),
+            requests_success: AtomicU64::new(0),
+            requests_failure: AtomicU64::new(0),
+            backend_timeouts: AtomicU64::new(0),
+            backend_errors: AtomicU64::new(0),
+            overload_shed: AtomicU64::new(0),
+            scid_rotations: AtomicU64::new(0),
+            route_stats_shards: shards,
+        }
+    }
 }
 
 impl Metrics {
@@ -244,7 +264,12 @@ impl Metrics {
     }
 
     pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
-        let mut guard = match self.route_stats.lock() {
+        let shard_idx = route_stats_shard(route);
+        let shard = match self.route_stats_shards.get(shard_idx) {
+            Some(shard) => shard,
+            None => return,
+        };
+        let mut guard = match shard.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
@@ -331,53 +356,69 @@ impl Metrics {
             self.scid_rotations.load(Ordering::Relaxed)
         ));
 
-        if let Ok(route_stats) = self.route_stats.lock() {
-            for (route, stats) in route_stats.iter() {
-                let route = escape_prometheus_label(route);
-                out.push_str(&format!(
-                    "spooky_route_requests_total{{route=\"{}\"}} {}\n",
-                    route, stats.requests_total
-                ));
-                out.push_str(&format!(
-                    "spooky_route_success_total{{route=\"{}\"}} {}\n",
-                    route, stats.success
-                ));
-                out.push_str(&format!(
-                    "spooky_route_failure_total{{route=\"{}\"}} {}\n",
-                    route, stats.failure
-                ));
-                out.push_str(&format!(
-                    "spooky_route_timeout_total{{route=\"{}\"}} {}\n",
-                    route, stats.timeout
-                ));
-                out.push_str(&format!(
-                    "spooky_route_backend_error_total{{route=\"{}\"}} {}\n",
-                    route, stats.backend_error
-                ));
-                out.push_str(&format!(
-                    "spooky_route_overload_shed_total{{route=\"{}\"}} {}\n",
-                    route, stats.overload_shed
-                ));
-                out.push_str(&format!(
-                    "spooky_route_latency_ms_p50{{route=\"{}\"}} {:.2}\n",
-                    route,
-                    percentile_ms(stats, 0.50)
-                ));
-                out.push_str(&format!(
-                    "spooky_route_latency_ms_p95{{route=\"{}\"}} {:.2}\n",
-                    route,
-                    percentile_ms(stats, 0.95)
-                ));
-                out.push_str(&format!(
-                    "spooky_route_latency_ms_p99{{route=\"{}\"}} {:.2}\n",
-                    route,
-                    percentile_ms(stats, 0.99)
-                ));
+        let mut snapshot: Vec<(String, RouteStats)> = Vec::new();
+        for shard in &self.route_stats_shards {
+            if let Ok(route_stats) = shard.lock() {
+                snapshot.extend(
+                    route_stats
+                        .iter()
+                        .map(|(route, stats)| (route.clone(), stats.clone())),
+                );
             }
+        }
+        snapshot.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        for (route, stats) in snapshot {
+            let route = escape_prometheus_label(&route);
+            out.push_str(&format!(
+                "spooky_route_requests_total{{route=\"{}\"}} {}\n",
+                route, stats.requests_total
+            ));
+            out.push_str(&format!(
+                "spooky_route_success_total{{route=\"{}\"}} {}\n",
+                route, stats.success
+            ));
+            out.push_str(&format!(
+                "spooky_route_failure_total{{route=\"{}\"}} {}\n",
+                route, stats.failure
+            ));
+            out.push_str(&format!(
+                "spooky_route_timeout_total{{route=\"{}\"}} {}\n",
+                route, stats.timeout
+            ));
+            out.push_str(&format!(
+                "spooky_route_backend_error_total{{route=\"{}\"}} {}\n",
+                route, stats.backend_error
+            ));
+            out.push_str(&format!(
+                "spooky_route_overload_shed_total{{route=\"{}\"}} {}\n",
+                route, stats.overload_shed
+            ));
+            out.push_str(&format!(
+                "spooky_route_latency_ms_p50{{route=\"{}\"}} {:.2}\n",
+                route,
+                percentile_ms(&stats, 0.50)
+            ));
+            out.push_str(&format!(
+                "spooky_route_latency_ms_p95{{route=\"{}\"}} {:.2}\n",
+                route,
+                percentile_ms(&stats, 0.95)
+            ));
+            out.push_str(&format!(
+                "spooky_route_latency_ms_p99{{route=\"{}\"}} {:.2}\n",
+                route,
+                percentile_ms(&stats, 0.99)
+            ));
         }
 
         out
     }
+}
+
+fn route_stats_shard(route: &str) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    route.hash(&mut hasher);
+    (hasher.finish() as usize) % ROUTE_STATS_SHARDS
 }
 
 fn percentile_ms(stats: &RouteStats, quantile: f64) -> f64 {
@@ -433,5 +474,22 @@ mod tests {
         assert!(output.contains("spooky_route_latency_ms_p50{route=\"api_pool\"}"));
         assert!(output.contains("spooky_route_latency_ms_p95{route=\"api_pool\"}"));
         assert!(output.contains("spooky_route_latency_ms_p99{route=\"api_pool\"}"));
+    }
+
+    #[test]
+    fn metrics_render_collects_routes_from_multiple_shards() {
+        let metrics = Metrics::default();
+        for idx in 0..128 {
+            let route = format!("route-{idx:03}");
+            metrics.record_route(
+                &route,
+                Duration::from_millis(5 + idx as u64),
+                RouteOutcome::Success,
+            );
+        }
+
+        let output = metrics.render_prometheus();
+        assert!(output.contains("spooky_route_requests_total{route=\"route-000\"} 1"));
+        assert!(output.contains("spooky_route_requests_total{route=\"route-127\"} 1"));
     }
 }

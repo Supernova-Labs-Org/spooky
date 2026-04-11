@@ -2,6 +2,13 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
+/// Route precedence (deterministic):
+/// 1) Longest matching path_prefix wins.
+/// 2) On equal path length, host-specific routes win over host-agnostic routes.
+/// 3) On remaining ties, lexicographically smaller upstream name wins.
+///
+/// `order` stores the lexicographic rank of upstream name (smaller rank = smaller name),
+/// so trie updates are independent of HashMap insertion order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexedRoute {
     upstream_idx: usize,
@@ -73,6 +80,8 @@ impl RouteIndex {
         let mut default_trie = RouteTrie::default();
         let mut default_max_path_len = 0usize;
         let mut upstream_names = Vec::with_capacity(upstreams.len());
+        // Build a stable route list first. This keeps tie-breaking deterministic even if
+        // upstreams came from a map with non-deterministic iteration order.
         let mut ordered: Vec<(&String, &Upstream)> = upstreams.iter().collect();
         ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
 
@@ -300,6 +309,74 @@ mod tests {
             scan_lookup(&upstreams, "/api/users", Some("api.example.com")),
             Some("z-host")
         );
+    }
+
+    #[test]
+    fn lexical_tie_break_is_deterministic_for_default_routes() {
+        let mut upstreams = HashMap::new();
+        // Insert in reverse lexical order to prove insertion order does not matter.
+        upstreams.insert("zeta".to_string(), test_upstream(None, Some("/api")));
+        upstreams.insert("alpha".to_string(), test_upstream(None, Some("/api")));
+
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(index.lookup("/api/users", None), Some("alpha"));
+        assert_eq!(scan_lookup(&upstreams, "/api/users", None), Some("alpha"));
+    }
+
+    #[test]
+    fn lexical_tie_break_is_deterministic_for_host_routes() {
+        let mut upstreams = HashMap::new();
+        // Insert in reverse lexical order to prove insertion order does not matter.
+        upstreams.insert(
+            "zeta-host".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+        upstreams.insert(
+            "alpha-host".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(
+            index.lookup("/api/users", Some("api.example.com")),
+            Some("alpha-host")
+        );
+        assert_eq!(
+            scan_lookup(&upstreams, "/api/users", Some("api.example.com")),
+            Some("alpha-host")
+        );
+    }
+
+    #[test]
+    fn indexed_lookup_is_insertion_order_invariant() {
+        let mut upstreams_a = HashMap::new();
+        upstreams_a.insert("zeta".to_string(), test_upstream(None, Some("/")));
+        upstreams_a.insert(
+            "beta-host".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+        upstreams_a.insert("alpha".to_string(), test_upstream(None, Some("/api")));
+
+        let mut upstreams_b = HashMap::new();
+        upstreams_b.insert("alpha".to_string(), test_upstream(None, Some("/api")));
+        upstreams_b.insert("zeta".to_string(), test_upstream(None, Some("/")));
+        upstreams_b.insert(
+            "beta-host".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+
+        let index_a = RouteIndex::from_upstreams(&upstreams_a);
+        let index_b = RouteIndex::from_upstreams(&upstreams_b);
+        let queries = vec![
+            ("/api/users", None),
+            ("/api/users", Some("api.example.com")),
+            ("/", None),
+            ("/missing", Some("api.example.com")),
+        ];
+
+        for (path, host) in queries {
+            assert_eq!(index_a.lookup(path, host), index_b.lookup(path, host));
+        }
     }
 
     fn build_route_table(route_count: usize) -> HashMap<String, Upstream> {

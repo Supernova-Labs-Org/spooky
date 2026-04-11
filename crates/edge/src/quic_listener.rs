@@ -54,12 +54,20 @@ impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let socket_address = format!("{}:{}", &config.listen.address, &config.listen.port);
 
-        let socket = UdpSocket::bind(socket_address.as_str()).expect("Failed to bind UDP socker");
+        let socket = UdpSocket::bind(socket_address.as_str()).map_err(|err| {
+            ProxyError::Transport(format!(
+                "failed to bind UDP socket on '{}': {}",
+                socket_address, err
+            ))
+        })?;
         socket
             .set_read_timeout(Some(Duration::from_millis(UDP_READ_TIMEOUT_MS)))
-            .expect("Failed to set UDP read timeout");
+            .map_err(|err| {
+                ProxyError::Transport(format!("failed to set UDP read timeout: {}", err))
+            })?;
 
-        let mut quic_config = Config::new(quiche::PROTOCOL_VERSION).expect("REASON");
+        let mut quic_config = Config::new(quiche::PROTOCOL_VERSION)
+            .map_err(|err| ProxyError::Transport(format!("failed to create QUIC config: {err}")))?;
 
         match quic_config.load_cert_chain_from_pem_file(&config.listen.tls.cert) {
             Ok(_) => debug!("Certificate loaded successfully"),
@@ -83,7 +91,9 @@ impl QUICListener {
 
         quic_config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .unwrap();
+            .map_err(|err| {
+                ProxyError::Transport(format!("failed to set ALPN protocols: {:?}", err))
+            })?;
         quic_config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
         quic_config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
         quic_config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
@@ -101,8 +111,10 @@ impl QUICListener {
 
         debug!("Listening on {}", socket_address);
 
-        let h3_config =
-            Arc::new(quiche::h3::Config::new().expect("Failed to create HTTP/3 config"));
+        let h3_config = Arc::new(
+            quiche::h3::Config::new()
+                .map_err(|err| ProxyError::Transport(format!("failed to create h3 config: {err}")))?,
+        );
         let backend_addresses = config
             .upstream
             .values()
@@ -120,8 +132,12 @@ impl QUICListener {
         let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
         let global_inflight_limit = config.performance.global_inflight_limit.max(1);
         for (name, upstream) in &config.upstream {
-            let upstream_pool =
-                UpstreamPool::from_upstream(upstream).expect("Failed to create upstream pool");
+            let upstream_pool = UpstreamPool::from_upstream(upstream).map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to create upstream pool '{}': {}",
+                    name, err
+                ))
+            })?;
             upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
             upstream_inflight.insert(
                 name.clone(),
@@ -668,8 +684,7 @@ impl QUICListener {
             }
 
             // Advance in-flight streams independent of inbound packets.
-            if connection.h3.is_some() {
-                let mut h3 = connection.h3.take().unwrap();
+            if let Some(mut h3) = connection.h3.take() {
                 if let Err(e) = Self::advance_streams_non_blocking(
                     &mut connection.streams,
                     &mut connection.quic,
@@ -883,8 +898,15 @@ impl QUICListener {
                                 Ok(handle) => {
                                     handle.spawn(fut);
                                 }
-                                Err(_) => {
-                                    fallback_runtime().spawn(fut);
+                                Err(err) => {
+                                    if let Some(rt) = fallback_runtime() {
+                                        rt.spawn(fut);
+                                    } else {
+                                        error!(
+                                            "dropping upstream task: no runtime available ({})",
+                                            err
+                                        );
+                                    }
                                 }
                             }
                             (
@@ -1142,6 +1164,7 @@ impl QUICListener {
                         // Enforces backend_timeout() so a slow upstream body does not
                         // leave the stream open indefinitely.
                         let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
+                        let fail_tx = chunk_tx.clone();
                         let deadline = tokio::time::Instant::now() + backend_timeout();
                         let fut = async move {
                             use http_body_util::BodyExt;
@@ -1184,13 +1207,27 @@ impl QUICListener {
                                 }
                             }
                         };
+                        let mut spawned = true;
                         match Handle::try_current() {
                             Ok(h) => {
                                 h.spawn(fut);
                             }
-                            Err(_) => {
-                                fallback_runtime().spawn(fut);
+                            Err(err) => {
+                                if let Some(rt) = fallback_runtime() {
+                                    rt.spawn(fut);
+                                } else {
+                                    error!(
+                                        "dropping body pump task: no runtime available ({})",
+                                        err
+                                    );
+                                    spawned = false;
+                                }
                             }
+                        }
+                        if !spawned {
+                            let _ = fail_tx.try_send(ResponseChunk::Error(ProxyError::Transport(
+                                "runtime unavailable".into(),
+                            )));
                         }
 
                         if let Some(req) = streams.get_mut(&stream_id) {
@@ -1385,28 +1422,24 @@ impl QUICListener {
             .ok_or_else(|| ProxyError::Transport(format!("pool not found: {upstream_name}")))?
             .clone();
 
-        let upstream_len = upstream_pool.lock().map(|p| p.pool.len()).unwrap_or(0);
-        if upstream_len == 0 {
-            return Err(ProxyError::Transport("no servers in upstream".into()));
-        }
-
         let key: &str = authority.unwrap_or(if !path.is_empty() { path } else { method });
 
-        let (backend_index, lb_type) = {
-            let mut pool = upstream_pool.lock().expect("upstream pool lock");
+        let (backend_index, lb_type, backend_addr) = {
+            let mut pool = upstream_pool
+                .lock()
+                .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
+            if pool.pool.is_empty() {
+                return Err(ProxyError::Transport("no servers in upstream".into()));
+            }
             let lb_type = pool.lb_name();
             let idx = pool.pick(key);
-            (idx, lb_type)
-        };
-        let backend_index =
-            backend_index.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
-
-        let backend_addr = {
-            let pool = upstream_pool.lock().expect("upstream pool lock");
-            pool.pool
-                .address(backend_index)
-                .map(|a| a.to_string())
-                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?
+            let idx = idx.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
+            let backend_addr = pool
+                .pool
+                .address(idx)
+                .map(str::to_string)
+                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?;
+            (idx, lb_type, backend_addr)
         };
 
         info!("Selected backend {} via {}", backend_addr, lb_type);
@@ -1784,14 +1817,16 @@ impl QUICListener {
     }
 }
 
-fn fallback_runtime() -> &'static tokio::runtime::Runtime {
-    static FALLBACK_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    FALLBACK_RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(2)
-            .thread_name("spooky-edge-fallback-rt")
-            .build()
-            .expect("failed to create fallback tokio runtime")
-    })
+fn fallback_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static FALLBACK_RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    FALLBACK_RT
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_name("spooky-edge-fallback-rt")
+                .build()
+                .ok()
+        })
+        .as_ref()
 }

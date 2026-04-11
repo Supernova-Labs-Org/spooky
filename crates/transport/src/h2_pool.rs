@@ -50,7 +50,11 @@ impl H2Pool {
             .get(backend)
             .ok_or_else(|| PoolError::UnknownBackend(backend.to_string()))?;
 
-        let _permit = handle.inflight.acquire().await.expect("semaphore closed");
+        let _permit = handle
+            .inflight
+            .acquire()
+            .await
+            .map_err(|_| PoolError::InflightLimiterClosed)?;
         handle.client.send(req).await.map_err(PoolError::Send)
     }
 }

@@ -476,11 +476,11 @@ fn run_h3_client_concurrent_get(
                         }
                     }
                     Ok((stream_id, quiche::h3::Event::Finished)) => {
-                        if let Some(idx) = stream_to_observation.get(&stream_id).copied() {
-                            if observations[idx].finished_at.is_none() {
-                                observations[idx].finished_at = Some(start.elapsed());
-                                finished += 1;
-                            }
+                        if let Some(idx) = stream_to_observation.get(&stream_id).copied()
+                            && observations[idx].finished_at.is_none()
+                        {
+                            observations[idx].finished_at = Some(start.elapsed());
+                            finished += 1;
                         }
                     }
                     Ok((_stream_id, quiche::h3::Event::PriorityUpdate)) => {}

@@ -149,9 +149,12 @@ pub(crate) fn scan_lookup<'a>(
     path: &str,
     host: Option<&str>,
 ) -> Option<&'a str> {
-    let mut best_match: Option<(&str, usize)> = None;
+    let mut ordered: Vec<(&String, &Upstream)> = upstreams.iter().collect();
+    ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-    for (upstream_name, upstream) in upstreams {
+    let mut best_match: Option<(&str, usize, usize)> = None;
+
+    for (order, (upstream_name, upstream)) in ordered.into_iter().enumerate() {
         let has_host_match = match (&upstream.route.host, host) {
             (Some(route_host), Some(request_host)) => route_host == request_host,
             (None, _) => true,
@@ -164,14 +167,24 @@ pub(crate) fn scan_lookup<'a>(
             _ => continue,
         };
 
-        if has_host_match
-            && (best_match.is_none() || path_match_len > best_match.expect("checked").1)
-        {
-            best_match = Some((upstream_name.as_str(), path_match_len));
+        if !has_host_match {
+            continue;
+        }
+
+        match best_match {
+            Some((_, best_len, best_order)) => {
+                if path_match_len > best_len || (path_match_len == best_len && order < best_order)
+                {
+                    best_match = Some((upstream_name.as_str(), path_match_len, order));
+                }
+            }
+            None => {
+                best_match = Some((upstream_name.as_str(), path_match_len, order));
+            }
         }
     }
 
-    best_match.map(|(name, _)| name)
+    best_match.map(|(name, _, _)| name)
 }
 
 #[cfg(test)]

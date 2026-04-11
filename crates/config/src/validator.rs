@@ -112,9 +112,7 @@ pub fn validate(config: &Config) -> bool {
     if config.performance.backend_body_total_timeout_ms
         < config.performance.backend_body_idle_timeout_ms
     {
-        error!(
-            "performance.backend_body_total_timeout_ms must be >= backend_body_idle_timeout_ms"
-        );
+        error!("performance.backend_body_total_timeout_ms must be >= backend_body_idle_timeout_ms");
         return false;
     }
 

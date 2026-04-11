@@ -55,10 +55,7 @@ impl CidRadix {
 
         // Traverse/build trie path byte by byte
         for &byte in scid.iter() {
-            node = node
-                .children
-                .entry(byte)
-                .or_insert_with(CidTrieNode::default);
+            node = node.children.entry(byte).or_default();
         }
 
         // Store the SCID at the leaf

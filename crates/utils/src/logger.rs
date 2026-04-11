@@ -36,23 +36,19 @@ pub fn init_logger(log_level: &str, log_enabled: bool, log_file: &str) {
 
     // only write to file if enabled
     if log_enabled {
-        if let Some(parent) = Path::new(log_file).parent() {
-            if let Err(err) = create_dir_all(parent) {
-                eprintln!(
-                    "Failed to create log directory '{}': {}. Falling back to stderr logging.",
-                    parent.display(),
-                    err
-                );
-                builder.init();
-                return;
-            }
+        if let Some(parent) = Path::new(log_file).parent()
+            && let Err(err) = create_dir_all(parent)
+        {
+            eprintln!(
+                "Failed to create log directory '{}': {}. Falling back to stderr logging.",
+                parent.display(),
+                err
+            );
+            builder.init();
+            return;
         }
 
-        let file = match OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)
-        {
+        let file = match OpenOptions::new().create(true).append(true).open(log_file) {
             Ok(file) => file,
             Err(err) => {
                 eprintln!(

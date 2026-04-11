@@ -315,7 +315,9 @@ impl Metrics {
             self.backend_errors.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_overload_shed Total requests dropped due to overload controls.\n");
+        out.push_str(
+            "# HELP spooky_overload_shed Total requests dropped due to overload controls.\n",
+        );
         out.push_str("# TYPE spooky_overload_shed counter\n");
         out.push_str(&format!(
             "spooky_overload_shed {}\n",
@@ -414,11 +416,7 @@ mod tests {
     #[test]
     fn metrics_render_includes_route_percentiles() {
         let metrics = Metrics::default();
-        metrics.record_route(
-            "api_pool",
-            Duration::from_millis(12),
-            RouteOutcome::Success,
-        );
+        metrics.record_route("api_pool", Duration::from_millis(12), RouteOutcome::Success);
         metrics.record_route(
             "api_pool",
             Duration::from_millis(320),

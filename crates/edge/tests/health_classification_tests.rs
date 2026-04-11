@@ -5,7 +5,7 @@ use spooky_lb::{BackendPool, HealthTransition};
 
 /// Mock setup for backend pool testing
 fn create_test_backend_pool() -> BackendPool {
-    let backends = vec![Backend {
+    let backends = [Backend {
         id: "bk-1".to_string(),
         address: "127.0.0.1:8001".to_string(),
         weight: 1,

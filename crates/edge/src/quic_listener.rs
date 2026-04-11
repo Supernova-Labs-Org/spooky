@@ -10,11 +10,11 @@ use core::net::SocketAddr;
 use bytes::{Bytes, BytesMut};
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
-use log::{debug, error, info};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
+use log::{debug, error, info};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
@@ -49,6 +49,8 @@ fn is_hop_header(name: &str) -> bool {
         "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade"
     )
 }
+
+type ResolvedBackend = (String, String, usize, Arc<Mutex<UpstreamPool>>);
 
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
@@ -124,10 +126,10 @@ impl QUICListener {
             config.performance.backend_body_total_timeout_ms
         );
 
-        let h3_config = Arc::new(
-            quiche::h3::Config::new()
-                .map_err(|err| ProxyError::Transport(format!("failed to create h3 config: {err}")))?,
-        );
+        let h3_config =
+            Arc::new(quiche::h3::Config::new().map_err(|err| {
+                ProxyError::Transport(format!("failed to create h3 config: {err}"))
+            })?);
         let backend_addresses = config
             .upstream
             .values()
@@ -155,10 +157,7 @@ impl QUICListener {
                 ))
             })?;
             upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
-            upstream_inflight.insert(
-                name.clone(),
-                Arc::new(Semaphore::new(per_upstream_limit)),
-            );
+            upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
         }
         let routing_index = RouteIndex::from_upstreams(&config.upstream);
 
@@ -275,18 +274,19 @@ impl QUICListener {
 
         // For Short packets, try prefix match (client may append bytes to our SCID)
         // This handles cases where client uses longer DCIDs based on server's SCID
-        if header.ty == quiche::Type::Short && dcid_bytes.len() > MIN_SCID_LEN_BYTES {
-            if let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes) {
-                debug!(
-                    "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
-                    matched_cid, &dcid_bytes
-                );
-                let stored_cid_copy: Arc<[u8]> = Arc::clone(&matched_cid);
-                if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
-                    self.peer_routes.remove(&connection.peer_address);
-                    connection.peer_address = peer;
-                    return Some((connection, stored_cid_copy));
-                }
+        if header.ty == quiche::Type::Short
+            && dcid_bytes.len() > MIN_SCID_LEN_BYTES
+            && let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes)
+        {
+            debug!(
+                "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
+                matched_cid, &dcid_bytes
+            );
+            let stored_cid_copy: Arc<[u8]> = Arc::clone(&matched_cid);
+            if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
+                self.peer_routes.remove(&connection.peer_address);
+                connection.peer_address = peer;
+                return Some((connection, stored_cid_copy));
             }
         }
 
@@ -738,6 +738,7 @@ impl QUICListener {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_h3(
         connection: &mut QuicConnection,
         h2_pool: Arc<H2Pool>,
@@ -948,9 +949,10 @@ impl QUICListener {
                                 RouteOutcome::Failure,
                             );
                             let (status, body): (http::StatusCode, &[u8]) = match err {
-                                ProxyError::Transport(_) => {
-                                    (http::StatusCode::SERVICE_UNAVAILABLE, b"no upstream available\n")
-                                }
+                                ProxyError::Transport(_) => (
+                                    http::StatusCode::SERVICE_UNAVAILABLE,
+                                    b"no upstream available\n",
+                                ),
                                 ProxyError::Bridge(_) => {
                                     (http::StatusCode::BAD_REQUEST, b"invalid request\n")
                                 }
@@ -1093,7 +1095,7 @@ impl QUICListener {
     /// 3. Poll `upstream_result_rx` (`try_recv`).
     ///    - Error result  → send error response, mark terminal.
     ///    - Ok result     → send H3 response headers, spawn body-pump task,
-    ///                      store `response_chunk_rx`, transition to SendingResponse.
+    ///      store `response_chunk_rx`, transition to SendingResponse.
     /// 4. Flush `response_chunk_rx` chunks into H3 (`try_recv` loop).
     ///    - `Data`  → `h3.send_body(..., false)`
     ///    - `End`   → `h3.send_body(..., true)`, mark Completed
@@ -1190,7 +1192,8 @@ impl QUICListener {
                         // do not keep streams open indefinitely.
                         let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
                         let fail_tx = chunk_tx.clone();
-                        let total_deadline = tokio::time::Instant::now() + backend_body_total_timeout;
+                        let total_deadline =
+                            tokio::time::Instant::now() + backend_body_total_timeout;
                         let fut = async move {
                             use http_body_util::BodyExt;
                             let mut body: hyper::body::Incoming = body;
@@ -1215,14 +1218,13 @@ impl QUICListener {
                                         return;
                                     }
                                     Ok(Some(Ok(f))) => {
-                                        if let Ok(data) = f.into_data() {
-                                            if chunk_tx
+                                        if let Ok(data) = f.into_data()
+                                            && chunk_tx
                                                 .send(ResponseChunk::Data(data))
                                                 .await
                                                 .is_err()
-                                            {
-                                                return;
-                                            }
+                                        {
+                                            return;
                                         }
                                         // skip trailers / other frame types
                                     }
@@ -1296,8 +1298,7 @@ impl QUICListener {
                                 }
                             }
                             metrics.inc_success();
-                            let route_label =
-                                req.upstream_name.as_deref().unwrap_or("unrouted");
+                            let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
                             metrics.record_route(
                                 route_label,
                                 req.start.elapsed(),
@@ -1334,93 +1335,89 @@ impl QUICListener {
 
             // ── 4: flush response chunks ──────────────────────────────────────
             let mut terminal = false;
-            if let Some(req) = streams.get_mut(&stream_id) {
-                if let Some(rx) = &mut req.response_chunk_rx {
-                    // Drain as many chunks as quiche will accept this iteration.
-                    loop {
-                        // Retry any chunk that previously hit backpressure.
-                        let chunk = match req.pending_chunk.take() {
-                            Some(c) => c,
-                            None => match rx.try_recv() {
-                                Ok(c) => c,
-                                Err(_) => break, // Empty or closed — nothing to flush
-                            },
-                        };
-                        match chunk {
-                            ResponseChunk::Data(data) => {
-                                match h3.send_body(quic, stream_id, &data, false) {
-                                    Ok(_) => {}
-                                    Err(quiche::h3::Error::StreamBlocked) => {
-                                        // QUIC flow-control backpressure — retry next poll.
-                                        req.pending_chunk = Some(ResponseChunk::Data(data));
-                                        break;
-                                    }
-                                    Err(e) => return Err(e),
-                                }
-                            }
-                            ResponseChunk::End => {
-                                h3.send_body(quic, stream_id, b"", true)?;
-                                req.phase = StreamPhase::Completed;
-                                terminal = true;
+            if let Some(req) = streams.get_mut(&stream_id)
+                && let Some(rx) = &mut req.response_chunk_rx
+            {
+                // Drain as many chunks as quiche will accept this iteration.
+                loop {
+                    // Retry any chunk that previously hit backpressure.
+                    let chunk = match req.pending_chunk.take() {
+                        Some(c) => c,
+                        None => match rx.try_recv() {
+                            Ok(c) => c,
+                            Err(_) => break, // Empty or closed — nothing to flush
+                        },
+                    };
+                    match chunk {
+                        ResponseChunk::Data(data) => match h3.send_body(quic, stream_id, &data, false)
+                        {
+                            Ok(_) => {}
+                            Err(quiche::h3::Error::StreamBlocked) => {
+                                // QUIC flow-control backpressure — retry next poll.
+                                req.pending_chunk = Some(ResponseChunk::Data(data));
                                 break;
                             }
-                            ResponseChunk::Error(err) => {
-                                // Best-effort: close the stream.
-                                let _ = h3.send_body(quic, stream_id, b"", true);
-                                req.phase = StreamPhase::Failed;
-                                // Mirror the health/metrics updates from the old
-                                // send_backend_response timeout/error paths.
-                                let upstream_name =
-                                    routing_index.lookup(&req.path, req.authority.as_deref());
-                                if let (Some(idx), Some(pool)) = (
-                                    req.backend_index,
-                                    upstream_name.and_then(|n| upstream_pools.get(n)),
-                                ) {
-                                    if let Some(t) =
-                                        pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
-                                    {
-                                        if let Some(addr) = &req.backend_addr {
-                                            Self::log_health_transition(addr, t);
-                                        }
-                                    }
-                                }
-                                match err {
-                                    ProxyError::Timeout => {
-                                        metrics.inc_failure();
-                                        metrics.inc_timeout();
-                                        let route_label =
-                                            req.upstream_name.as_deref().unwrap_or("unrouted");
-                                        metrics.record_route(
-                                            route_label,
-                                            req.start.elapsed(),
-                                            RouteOutcome::Timeout,
-                                        );
-                                        info!(
-                                            "Upstream {} body timeout latency_ms {}",
-                                            req.backend_addr.as_deref().unwrap_or("?"),
-                                            req.start.elapsed().as_millis()
-                                        );
-                                    }
-                                    _ => {
-                                        metrics.inc_failure();
-                                        metrics.inc_backend_error();
-                                        let route_label =
-                                            req.upstream_name.as_deref().unwrap_or("unrouted");
-                                        metrics.record_route(
-                                            route_label,
-                                            req.start.elapsed(),
-                                            RouteOutcome::BackendError,
-                                        );
-                                        error!(
-                                            "Upstream {} body error: {:?}",
-                                            req.backend_addr.as_deref().unwrap_or("?"),
-                                            err
-                                        );
-                                    }
-                                }
-                                terminal = true;
-                                break;
+                            Err(e) => return Err(e),
+                        },
+                        ResponseChunk::End => {
+                            h3.send_body(quic, stream_id, b"", true)?;
+                            req.phase = StreamPhase::Completed;
+                            terminal = true;
+                            break;
+                        }
+                        ResponseChunk::Error(err) => {
+                            // Best-effort: close the stream.
+                            let _ = h3.send_body(quic, stream_id, b"", true);
+                            req.phase = StreamPhase::Failed;
+                            // Mirror the health/metrics updates from the old
+                            // send_backend_response timeout/error paths.
+                            let upstream_name =
+                                routing_index.lookup(&req.path, req.authority.as_deref());
+                            if let (Some(idx), Some(pool)) = (
+                                req.backend_index,
+                                upstream_name.and_then(|n| upstream_pools.get(n)),
+                            ) && let Some(t) =
+                                pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
+                                && let Some(addr) = &req.backend_addr
+                            {
+                                Self::log_health_transition(addr, t);
                             }
+                            match err {
+                                ProxyError::Timeout => {
+                                    metrics.inc_failure();
+                                    metrics.inc_timeout();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::Timeout,
+                                    );
+                                    info!(
+                                        "Upstream {} body timeout latency_ms {}",
+                                        req.backend_addr.as_deref().unwrap_or("?"),
+                                        req.start.elapsed().as_millis()
+                                    );
+                                }
+                                _ => {
+                                    metrics.inc_failure();
+                                    metrics.inc_backend_error();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::BackendError,
+                                    );
+                                    error!(
+                                        "Upstream {} body error: {:?}",
+                                        req.backend_addr.as_deref().unwrap_or("?"),
+                                        err
+                                    );
+                                }
+                            }
+                            terminal = true;
+                            break;
                         }
                     }
                 }
@@ -1442,7 +1439,7 @@ impl QUICListener {
         authority: Option<&str>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
-    ) -> Result<(String, String, usize, Arc<Mutex<UpstreamPool>>), ProxyError> {
+    ) -> Result<ResolvedBackend, ProxyError> {
         if method.is_empty() || path.is_empty() {
             return Err(ProxyError::Transport("empty method or path".into()));
         }
@@ -1548,14 +1545,13 @@ impl QUICListener {
             }
             Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
                 error!("Transport error");
-                if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool
+                if let Some(pool) = &upstream_pool
+                    && let Some(t) = pool
                         .lock()
                         .ok()
                         .and_then(|mut p| p.pool.mark_failure(backend_index))
-                    {
-                        Self::log_health_transition(backend_addr, t);
-                    }
+                {
+                    Self::log_health_transition(backend_addr, t);
                 }
                 metrics.inc_failure();
                 metrics.inc_backend_error();
@@ -1575,14 +1571,13 @@ impl QUICListener {
             }
             Err(ProxyError::Timeout) => {
                 error!("Server timeout");
-                if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool
+                if let Some(pool) = &upstream_pool
+                    && let Some(t) = pool
                         .lock()
                         .ok()
                         .and_then(|mut p| p.pool.mark_failure(backend_index))
-                    {
-                        Self::log_health_transition(backend_addr, t);
-                    }
+                {
+                    Self::log_health_transition(backend_addr, t);
                 }
                 metrics.inc_failure();
                 metrics.inc_timeout();
@@ -1700,7 +1695,10 @@ impl QUICListener {
                     return;
                 }
             };
-            info!("Metrics endpoint listening on http://{}{}", bind, metrics_path);
+            info!(
+                "Metrics endpoint listening on http://{}{}",
+                bind, metrics_path
+            );
 
             loop {
                 let (stream, _peer) = match listener.accept().await {
@@ -1758,9 +1756,7 @@ impl QUICListener {
             .body(Full::new(Bytes::from(body)))
         {
             Ok(resp) => resp,
-            Err(_) => Response::new(Full::new(Bytes::from_static(
-                b"failed to render metrics\n",
-            ))),
+            Err(_) => Response::new(Full::new(Bytes::from_static(b"failed to render metrics\n"))),
         }
     }
 

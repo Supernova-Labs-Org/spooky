@@ -57,6 +57,9 @@ log:
 
 performance:
     worker_threads: 1
+    control_plane_threads: 2
+    reuseport: true
+    pin_workers: false
     global_inflight_limit: 4096
     per_upstream_inflight_limit: 1024
     backend_timeout_ms: 2000

@@ -74,6 +74,18 @@ pub fn perf_default_worker_threads() -> usize {
     1
 }
 
+pub fn perf_default_control_plane_threads() -> usize {
+    2
+}
+
+pub fn perf_default_reuseport() -> bool {
+    true
+}
+
+pub fn perf_default_pin_workers() -> bool {
+    false
+}
+
 pub fn perf_default_global_inflight_limit() -> usize {
     4096
 }

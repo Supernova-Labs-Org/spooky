@@ -10,7 +10,8 @@ use crate::default::{
     observe_default_address, observe_default_metrics_path, observe_default_port,
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_timeout_ms, perf_default_global_inflight_limit,
-    perf_default_per_upstream_inflight_limit, perf_default_worker_threads,
+    perf_default_control_plane_threads, perf_default_per_upstream_inflight_limit,
+    perf_default_pin_workers, perf_default_reuseport, perf_default_worker_threads,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -145,6 +146,15 @@ pub struct Performance {
     #[serde(default = "perf_default_worker_threads")]
     pub worker_threads: usize,
 
+    #[serde(default = "perf_default_control_plane_threads")]
+    pub control_plane_threads: usize,
+
+    #[serde(default = "perf_default_reuseport")]
+    pub reuseport: bool,
+
+    #[serde(default = "perf_default_pin_workers")]
+    pub pin_workers: bool,
+
     #[serde(default = "perf_default_global_inflight_limit")]
     pub global_inflight_limit: usize,
 
@@ -165,6 +175,9 @@ impl Default for Performance {
     fn default() -> Self {
         Self {
             worker_threads: perf_default_worker_threads(),
+            control_plane_threads: perf_default_control_plane_threads(),
+            reuseport: perf_default_reuseport(),
+            pin_workers: perf_default_pin_workers(),
             global_inflight_limit: perf_default_global_inflight_limit(),
             per_upstream_inflight_limit: perf_default_per_upstream_inflight_limit(),
             backend_timeout_ms: perf_default_backend_timeout_ms(),

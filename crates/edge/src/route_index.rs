@@ -2,6 +2,13 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
+/// Route precedence (deterministic):
+/// 1) Longest matching path_prefix wins.
+/// 2) On equal path length, host-specific routes win over host-agnostic routes.
+/// 3) On remaining ties, lexicographically smaller upstream name wins.
+///
+/// `order` stores the lexicographic rank of upstream name (smaller rank = smaller name),
+/// so trie updates are independent of HashMap insertion order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexedRoute {
     upstream_idx: usize,
@@ -73,6 +80,8 @@ impl RouteIndex {
         let mut default_trie = RouteTrie::default();
         let mut default_max_path_len = 0usize;
         let mut upstream_names = Vec::with_capacity(upstreams.len());
+        // Build a stable route list first. This keeps tie-breaking deterministic even if
+        // upstreams came from a map with non-deterministic iteration order.
         let mut ordered: Vec<(&String, &Upstream)> = upstreams.iter().collect();
         ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
 

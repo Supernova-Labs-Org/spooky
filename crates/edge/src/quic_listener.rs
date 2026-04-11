@@ -40,10 +40,10 @@ use crate::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
         MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS,
         QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
-        QUIC_INITIAL_STREAM_DATA, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT,
-        REQUEST_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES,
-        RESPONSE_CHUNK_BYTES_LIMIT, RESPONSE_CHUNK_CHANNEL_CAPACITY,
-        SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS, drain_timeout, scid_rotation_interval,
+        QUIC_INITIAL_STREAM_DATA, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
+        REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
+        RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
+        drain_timeout, scid_rotation_interval,
     },
     outcome_from_status,
     route_index::RouteIndex,
@@ -669,7 +669,8 @@ impl QUICListener {
             );
             self.peer_routes
                 .insert(connection.peer_address, Arc::clone(&new_primary));
-            self.connections.insert(Arc::clone(&new_primary), connection);
+            self.connections
+                .insert(Arc::clone(&new_primary), connection);
         } else {
             self.remove_connection_routes(&connection);
             debug!("Connection closed, not storing");
@@ -1088,7 +1089,8 @@ impl QUICListener {
                                 }
                                 req.body_bytes_received = next_total;
 
-                                for chunk_slice in body_buf[..read].chunks(REQUEST_CHUNK_BYTES_LIMIT)
+                                for chunk_slice in
+                                    body_buf[..read].chunks(REQUEST_CHUNK_BYTES_LIMIT)
                                 {
                                     let chunk = Bytes::copy_from_slice(chunk_slice);
                                     if Self::enqueue_request_chunk(req, chunk).is_err() {
@@ -1102,7 +1104,8 @@ impl QUICListener {
                             {
                                 metrics.inc_failure();
                                 metrics.inc_overload_shed();
-                                let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
+                                let route_label =
+                                    req.upstream_name.as_deref().unwrap_or("unrouted");
                                 metrics.record_route(
                                     route_label,
                                     req.start.elapsed(),
@@ -1289,8 +1292,8 @@ impl QUICListener {
                                     }
                                     Ok(Some(Ok(f))) => {
                                         if let Ok(data) = f.into_data() {
-                                            for start in (0..data.len())
-                                                .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                            for start in
+                                                (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
                                             {
                                                 let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
                                                     .min(data.len());

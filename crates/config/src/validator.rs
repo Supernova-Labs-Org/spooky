@@ -313,3 +313,170 @@ pub fn validate(config: &Config) -> bool {
     info!("Configuration validation passed successfully\n");
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate;
+    use crate::config::{
+        Backend, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint, Observability,
+        Performance, RouteMatch, Tls, Upstream,
+    };
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    fn base_config(cert: &str, key: &str) -> Config {
+        let mut upstream = HashMap::new();
+        upstream.insert(
+            "test_upstream".to_string(),
+            Upstream {
+                load_balancing: LoadBalancing {
+                    lb_type: "round-robin".to_string(),
+                    key: None,
+                },
+                route: RouteMatch {
+                    host: None,
+                    path_prefix: Some("/".to_string()),
+                    method: None,
+                },
+                backends: vec![Backend {
+                    id: "backend-1".to_string(),
+                    address: "127.0.0.1:8080".to_string(),
+                    weight: 1,
+                    health_check: HealthCheck {
+                        path: "/health".to_string(),
+                        interval: 1000,
+                        timeout_ms: 1000,
+                        failure_threshold: 3,
+                        success_threshold: 1,
+                        cooldown_ms: 1000,
+                    },
+                }],
+            },
+        );
+
+        Config {
+            version: 1,
+            listen: Listen {
+                protocol: "http3".to_string(),
+                port: 9889,
+                address: "127.0.0.1".to_string(),
+                tls: Tls {
+                    cert: cert.to_string(),
+                    key: key.to_string(),
+                },
+            },
+            upstream,
+            load_balancing: Some(LoadBalancing {
+                lb_type: "random".to_string(),
+                key: None,
+            }),
+            log: Log {
+                level: "info".to_string(),
+                file: Default::default(),
+            },
+            performance: Performance::default(),
+            observability: Observability::default(),
+        }
+    }
+
+    #[test]
+    fn yaml_parse_applies_performance_and_observability_defaults() {
+        let dir = tempdir().expect("tempdir");
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, "cert").expect("write cert");
+        std::fs::write(&key, "key").expect("write key");
+
+        let yaml = format!(
+            r#"
+version: 1
+listen:
+  protocol: http3
+  address: "127.0.0.1"
+  port: 9889
+  tls:
+    cert: "{}"
+    key: "{}"
+upstream:
+  test_upstream:
+    load_balancing:
+      type: round-robin
+    route:
+      path_prefix: "/"
+    backends:
+      - id: "b1"
+        address: "127.0.0.1:8080"
+        weight: 1
+        health_check: {{}}
+"#,
+            cert.display(),
+            key.display()
+        );
+
+        let cfg: Config = serde_yaml::from_str(&yaml).expect("parse");
+        assert_eq!(cfg.performance.worker_threads, 1);
+        assert_eq!(cfg.performance.global_inflight_limit, 4096);
+        assert_eq!(cfg.performance.per_upstream_inflight_limit, 1024);
+        assert_eq!(cfg.performance.backend_timeout_ms, 2000);
+        assert_eq!(cfg.performance.backend_body_idle_timeout_ms, 2000);
+        assert_eq!(cfg.performance.backend_body_total_timeout_ms, 30000);
+        assert!(!cfg.observability.metrics.enabled);
+        assert_eq!(cfg.observability.metrics.path, "/metrics");
+    }
+
+    #[test]
+    fn rejects_invalid_performance_and_observability_values() {
+        let dir = tempdir().expect("tempdir");
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, "cert").expect("write cert");
+        std::fs::write(&key, "key").expect("write key");
+
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.worker_threads = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.backend_body_total_timeout_ms = 100;
+        cfg.performance.backend_body_idle_timeout_ms = 200;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability = Observability {
+            metrics: MetricsEndpoint {
+                enabled: true,
+                address: "127.0.0.1".to_string(),
+                port: 9901,
+                path: "metrics".to_string(),
+            },
+        };
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn accepts_valid_metrics_and_performance_configuration() {
+        let dir = tempdir().expect("tempdir");
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, "cert").expect("write cert");
+        std::fs::write(&key, "key").expect("write key");
+
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.worker_threads = 4;
+        cfg.performance.global_inflight_limit = 10_000;
+        cfg.performance.per_upstream_inflight_limit = 2_000;
+        cfg.performance.backend_timeout_ms = 1500;
+        cfg.performance.backend_body_idle_timeout_ms = 500;
+        cfg.performance.backend_body_total_timeout_ms = 10_000;
+        cfg.observability = Observability {
+            metrics: MetricsEndpoint {
+                enabled: true,
+                address: "127.0.0.1".to_string(),
+                port: 9901,
+                path: "/metrics".to_string(),
+            },
+        };
+
+        assert!(validate(&cfg));
+    }
+}

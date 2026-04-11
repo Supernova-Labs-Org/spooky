@@ -18,6 +18,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 tokio.workspace = true
+serial_test = "3"
 rand.workspace = true
 smallvec.workspace = true
 hmac = "0.12"

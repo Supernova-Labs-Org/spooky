@@ -173,8 +173,7 @@ pub(crate) fn scan_lookup<'a>(
 
         match best_match {
             Some((_, best_len, best_order)) => {
-                if path_match_len > best_len || (path_match_len == best_len && order < best_order)
-                {
+                if path_match_len > best_len || (path_match_len == best_len && order < best_order) {
                     best_match = Some((upstream_name.as_str(), path_match_len, order));
                 }
             }

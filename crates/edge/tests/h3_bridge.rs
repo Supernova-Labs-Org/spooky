@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     convert::Infallible,
+    io::{Read, Write},
     net::SocketAddr,
     pin::Pin,
     sync::{
@@ -330,6 +331,46 @@ fn observation_for<'a>(observations: &'a [StreamObservation], path: &str) -> &'a
         .iter()
         .find(|o| o.path == path)
         .unwrap_or_else(|| panic!("missing observation for path {path}"))
+}
+
+fn find_free_tcp_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+    listener.local_addr().expect("local addr").port()
+}
+
+fn scrape_metrics(port: u16, path: &str) -> Result<String, String> {
+    let request = format!(
+        "GET {} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+        path
+    );
+
+    for _ in 0..100 {
+        if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", port)) {
+            stream
+                .write_all(request.as_bytes())
+                .map_err(|e| format!("write request: {e}"))?;
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let mut raw = String::new();
+            stream
+                .read_to_string(&mut raw)
+                .map_err(|e| format!("read response: {e}"))?;
+            if raw.is_empty() {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            if let Some((_, body)) = raw.split_once("\r\n\r\n") {
+                if body.is_empty() {
+                    std::thread::sleep(Duration::from_millis(50));
+                    continue;
+                }
+                return Ok(body.to_string());
+            }
+            return Ok(raw);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    Err("metrics endpoint not reachable".to_string())
 }
 
 fn run_h3_client_concurrent_get(
@@ -920,5 +961,186 @@ fn error_status_mapping_parity_is_preserved() {
     assert!(
         String::from_utf8_lossy(&transport_obs.body).contains("upstream error"),
         "transport error body should indicate upstream error"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn metrics_endpoint_exposes_route_slo_metrics() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    for _ in 0..5 {
+        let metrics_port = find_free_tcp_port();
+        let mut config = make_config(0, backend_addr.to_string(), cert.clone(), key.clone());
+        config.observability.metrics.enabled = true;
+        config.observability.metrics.address = "127.0.0.1".to_string();
+        config.observability.metrics.port = metrics_port;
+        config.observability.metrics.path = "/metrics".to_string();
+
+        let _enter = rt.enter();
+        let listener = QUICListener::new(config).expect("failed to create listener");
+        drop(_enter);
+        let listen_addr = listener.socket.local_addr().unwrap();
+        let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+        let observations = rt
+            .block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    run_h3_client_concurrent_get(
+                        listen_addr,
+                        &["/fast", "/slow"],
+                        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+                    )
+                })
+                .await
+                .expect("join concurrent client task")
+            })
+            .expect("requests should succeed");
+        assert_eq!(observations.len(), 2);
+
+        let metrics_result = rt.block_on(async move {
+            tokio::task::spawn_blocking(move || scrape_metrics(metrics_port, "/metrics"))
+                .await
+                .expect("join metrics scrape task")
+        });
+        if let Ok(metrics) = metrics_result {
+            assert!(
+                metrics.contains("spooky_requests_total"),
+                "unexpected metrics payload: {metrics}"
+            );
+            assert!(metrics.contains("spooky_route_requests_total{route=\"test_pool\"}"));
+            assert!(metrics.contains("spooky_route_latency_ms_p50{route=\"test_pool\"}"));
+            assert!(metrics.contains("spooky_route_latency_ms_p95{route=\"test_pool\"}"));
+            assert!(metrics.contains("spooky_route_latency_ms_p99{route=\"test_pool\"}"));
+            return;
+        }
+    }
+
+    panic!("metrics endpoint did not become reachable after multiple attempts");
+}
+
+#[test]
+fn global_inflight_limit_sheds_excess_requests() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.global_inflight_limit = 1;
+    config.performance.per_upstream_inflight_limit = 64;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/slow", "/slow"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("concurrent requests should complete");
+
+    let mut status_200 = 0usize;
+    let mut status_503 = 0usize;
+    let mut shed_body = String::new();
+    for obs in &observations {
+        match obs.status.as_deref() {
+            Some("200") => status_200 += 1,
+            Some("503") => {
+                status_503 += 1;
+                shed_body = String::from_utf8_lossy(&obs.body).to_string();
+            }
+            other => panic!("unexpected status: {:?}", other),
+        }
+    }
+
+    assert_eq!(status_200, 1, "expected one successful request");
+    assert_eq!(status_503, 1, "expected one shed request");
+    assert!(
+        shed_body.contains("overloaded"),
+        "shed body should mention overload, got: {shed_body}"
+    );
+}
+
+#[test]
+fn upstream_inflight_limit_sheds_excess_requests() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.global_inflight_limit = 64;
+    config.performance.per_upstream_inflight_limit = 1;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/slow", "/slow"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("concurrent requests should complete");
+
+    let mut status_200 = 0usize;
+    let mut status_503 = 0usize;
+    let mut shed_body = String::new();
+    for obs in &observations {
+        match obs.status.as_deref() {
+            Some("200") => status_200 += 1,
+            Some("503") => {
+                status_503 += 1;
+                shed_body = String::from_utf8_lossy(&obs.body).to_string();
+            }
+            other => panic!("unexpected status: {:?}", other),
+        }
+    }
+
+    assert_eq!(status_200, 1, "expected one successful request");
+    assert_eq!(status_503, 1, "expected one shed request");
+    assert!(
+        shed_body.contains("upstream overloaded"),
+        "shed body should mention upstream overload, got: {shed_body}"
+    );
+}
+
+#[test]
+fn backend_timeout_respects_configured_performance_value() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.backend_timeout_ms = 150;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let start = Instant::now();
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/timeout"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("timeout request should complete");
+    let elapsed = start.elapsed();
+
+    let timeout_obs = observation_for(&observations, "/timeout");
+    assert_eq!(timeout_obs.status.as_deref(), Some("503"));
+    assert!(
+        String::from_utf8_lossy(&timeout_obs.body).contains("upstream timeout"),
+        "timeout body should indicate upstream timeout"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "configured backend timeout should fail fast, observed elapsed={elapsed:?}"
     );
 }

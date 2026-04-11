@@ -1349,16 +1349,17 @@ impl QUICListener {
                         },
                     };
                     match chunk {
-                        ResponseChunk::Data(data) => match h3.send_body(quic, stream_id, &data, false)
-                        {
-                            Ok(_) => {}
-                            Err(quiche::h3::Error::StreamBlocked) => {
-                                // QUIC flow-control backpressure — retry next poll.
-                                req.pending_chunk = Some(ResponseChunk::Data(data));
-                                break;
+                        ResponseChunk::Data(data) => {
+                            match h3.send_body(quic, stream_id, &data, false) {
+                                Ok(_) => {}
+                                Err(quiche::h3::Error::StreamBlocked) => {
+                                    // QUIC flow-control backpressure — retry next poll.
+                                    req.pending_chunk = Some(ResponseChunk::Data(data));
+                                    break;
+                                }
+                                Err(e) => return Err(e),
                             }
-                            Err(e) => return Err(e),
-                        },
+                        }
                         ResponseChunk::End => {
                             h3.send_body(quic, stream_id, b"", true)?;
                             req.phase = StreamPhase::Completed;

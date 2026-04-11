@@ -158,6 +158,7 @@ pub(crate) fn scan_lookup<'a>(
     path: &str,
     host: Option<&str>,
 ) -> Option<&'a str> {
+    let path_bytes = path.as_bytes();
     let mut best_match: Option<(&str, usize, bool)> = None;
 
     for (upstream_name, upstream) in upstreams {
@@ -168,9 +169,23 @@ pub(crate) fn scan_lookup<'a>(
         };
 
         let path_match_len = match &upstream.route.path_prefix {
-            Some(path_prefix) if path.starts_with(path_prefix) => path_prefix.len(),
+            Some(path_prefix) => {
+                let prefix = path_prefix.as_bytes();
+                if prefix.len() > path_bytes.len() {
+                    continue;
+                }
+                // Fast reject for same-length-ish prefixes before full starts_with.
+                if let Some((&last, idx)) = prefix.last().zip(prefix.len().checked_sub(1))
+                    && path_bytes[idx] != last
+                {
+                    continue;
+                }
+                if !path_bytes.starts_with(prefix) {
+                    continue;
+                }
+                prefix.len()
+            }
             None => 0,
-            _ => continue,
         };
 
         if !has_host_match {

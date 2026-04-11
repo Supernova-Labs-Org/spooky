@@ -10,6 +10,8 @@ use crate::constants::{
 };
 use crate::route_index::{RouteIndex, scan_lookup};
 
+type PrimaryCid = [u8; BENCH_CONN_PRIMARY_ID_LEN_BYTES];
+
 fn default_health_check() -> HealthCheck {
     HealthCheck {
         path: "/health".to_string(),
@@ -96,12 +98,15 @@ impl RouteLookupBench {
 }
 
 pub struct ConnectionLookupBench {
-    exact_routes: HashMap<Vec<u8>, SocketAddr>,
-    alias_routes: HashMap<Vec<u8>, Vec<u8>>,
-    peer_routes: HashMap<SocketAddr, Vec<u8>>,
-    hit_exact: Vec<u8>,
+    exact_routes: HashMap<PrimaryCid, SocketAddr>,
+    exact_ids: Vec<PrimaryCid>,
+    peers: Vec<SocketAddr>,
+    alias_routes: HashMap<Vec<u8>, PrimaryCid>,
+    peer_routes: HashMap<SocketAddr, PrimaryCid>,
+    hit_exact: PrimaryCid,
+    hit_peer: SocketAddr,
     hit_alias: Vec<u8>,
-    prefix_miss: Vec<u8>,
+    prefix_miss: [u8; BENCH_CONN_MISS_ID_LEN_BYTES],
     miss_peer: SocketAddr,
 }
 
@@ -109,11 +114,14 @@ impl ConnectionLookupBench {
     pub fn new(scale: usize) -> Self {
         let size = scale.max(1);
         let mut exact_routes = HashMap::with_capacity(size);
+        let mut exact_ids = Vec::with_capacity(size);
+        let mut peers = Vec::with_capacity(size);
         let mut alias_routes = HashMap::with_capacity(size);
         let mut peer_routes = HashMap::with_capacity(size);
+        let mut hit_peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
         for i in 0..size {
-            let mut primary = vec![0_u8; BENCH_CONN_PRIMARY_ID_LEN_BYTES];
+            let mut primary = [0_u8; BENCH_CONN_PRIMARY_ID_LEN_BYTES];
             primary[..BENCH_CONN_PRIMARY_ID_PREFIX_BYTES]
                 .copy_from_slice(&(i as u64).to_be_bytes());
             let peer = SocketAddr::new(
@@ -126,23 +134,29 @@ impl ConnectionLookupBench {
                 BENCH_CONN_PEER_BASE_PORT + (i % BENCH_CONN_PEER_PORT_SPAN) as u16,
             );
 
-            exact_routes.insert(primary.clone(), peer);
-            peer_routes.insert(peer, primary.clone());
+            if i == 0 {
+                hit_peer = peer;
+            }
 
-            let mut alias = primary.clone();
+            exact_routes.insert(primary, peer);
+            exact_ids.push(primary);
+            peers.push(peer);
+            peer_routes.insert(peer, primary);
+
+            let mut alias =
+                Vec::with_capacity(BENCH_CONN_PRIMARY_ID_LEN_BYTES + BENCH_CONN_ALIAS_SUFFIX.len());
+            alias.extend_from_slice(&primary);
             alias.extend_from_slice(&BENCH_CONN_ALIAS_SUFFIX);
             alias_routes.insert(alias, primary);
         }
 
-        let hit_exact: Vec<u8> = (0_u64)
-            .to_be_bytes()
-            .iter()
-            .copied()
-            .chain([0_u8; BENCH_CONN_PRIMARY_ID_PREFIX_BYTES])
-            .collect();
-        let mut hit_alias = hit_exact.clone();
+        let mut hit_exact = [0_u8; BENCH_CONN_PRIMARY_ID_LEN_BYTES];
+        hit_exact[..BENCH_CONN_PRIMARY_ID_PREFIX_BYTES].copy_from_slice(&0_u64.to_be_bytes());
+        let mut hit_alias =
+            Vec::with_capacity(BENCH_CONN_PRIMARY_ID_LEN_BYTES + BENCH_CONN_ALIAS_SUFFIX.len());
+        hit_alias.extend_from_slice(&hit_exact);
         hit_alias.extend_from_slice(&BENCH_CONN_ALIAS_SUFFIX);
-        let prefix_miss = vec![BENCH_CONN_MISS_ID_FILL; BENCH_CONN_MISS_ID_LEN_BYTES];
+        let prefix_miss = [BENCH_CONN_MISS_ID_FILL; BENCH_CONN_MISS_ID_LEN_BYTES];
         let miss_peer = SocketAddr::new(
             IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255)),
             BENCH_CONN_MISS_PORT,
@@ -150,9 +164,12 @@ impl ConnectionLookupBench {
 
         Self {
             exact_routes,
+            exact_ids,
+            peers,
             alias_routes,
             peer_routes,
             hit_exact,
+            hit_peer,
             hit_alias,
             prefix_miss,
             miss_peer,
@@ -171,30 +188,25 @@ impl ConnectionLookupBench {
     }
 
     pub fn prefix_scan_miss_lookup(&self) -> usize {
-        self.exact_routes
-            .keys()
-            .find(|cid| self.prefix_miss.starts_with(cid.as_slice()))
+        let miss_first = self.prefix_miss[0];
+        self.exact_ids
+            .iter()
+            .find(|cid| cid[0] == miss_first && self.prefix_miss.starts_with(cid.as_slice()))
             .map_or(0, |_| 1)
     }
 
     pub fn peer_scan_miss(&self) -> usize {
-        self.exact_routes
+        self.peers
             .iter()
-            .find_map(|(_cid, peer)| (*peer == self.miss_peer).then_some(1))
+            .find_map(|peer| (*peer == self.miss_peer).then_some(1))
             .unwrap_or(0)
     }
 
     pub fn peer_map_hit(&self) -> usize {
-        self.peer_routes
-            .get(
-                self.exact_routes
-                    .get(&self.hit_exact)
-                    .expect("seed peer exists"),
-            )
-            .map_or(0, |_| 1)
+        usize::from(self.peer_routes.contains_key(&self.hit_peer))
     }
 
     pub fn peer_map_miss(&self) -> usize {
-        self.peer_routes.get(&self.miss_peer).map_or(0, |_| 1)
+        usize::from(self.peer_routes.contains_key(&self.miss_peer))
     }
 }

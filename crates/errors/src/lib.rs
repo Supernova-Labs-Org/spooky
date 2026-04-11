@@ -24,6 +24,9 @@ pub enum PoolError {
 
     #[error("send failed: {0}")]
     Send(#[source] hyper_util::client::legacy::Error),
+
+    #[error("backend inflight limiter closed")]
+    InflightLimiterClosed,
 }
 
 /// Top-level proxy error type unifying bridge and transport errors

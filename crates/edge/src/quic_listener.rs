@@ -8,7 +8,12 @@ use std::{
 use core::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
+use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper_util::rt::TokioIo;
 use log::{debug, error, info};
 use quiche::Config;
 use quiche::h3::NameValue;
@@ -19,20 +24,20 @@ use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
-    ResponseChunk, StreamPhase,
+    ResponseChunk, RouteOutcome, StreamPhase,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
         MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS,
         QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
         QUIC_INITIAL_STREAM_DATA, RESET_TOKEN_LEN_BYTES, SCID_ROTATION_PACKET_THRESHOLD,
-        UDP_READ_TIMEOUT_MS, backend_timeout, drain_timeout, scid_rotation_interval,
+        UDP_READ_TIMEOUT_MS, drain_timeout, scid_rotation_interval,
     },
     outcome_from_status,
     route_index::RouteIndex,
@@ -45,16 +50,26 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
+type ResolvedBackend = (String, String, usize, Arc<Mutex<UpstreamPool>>);
+
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let socket_address = format!("{}:{}", &config.listen.address, &config.listen.port);
 
-        let socket = UdpSocket::bind(socket_address.as_str()).expect("Failed to bind UDP socker");
+        let socket = UdpSocket::bind(socket_address.as_str()).map_err(|err| {
+            ProxyError::Transport(format!(
+                "failed to bind UDP socket on '{}': {}",
+                socket_address, err
+            ))
+        })?;
         socket
             .set_read_timeout(Some(Duration::from_millis(UDP_READ_TIMEOUT_MS)))
-            .expect("Failed to set UDP read timeout");
+            .map_err(|err| {
+                ProxyError::Transport(format!("failed to set UDP read timeout: {}", err))
+            })?;
 
-        let mut quic_config = Config::new(quiche::PROTOCOL_VERSION).expect("REASON");
+        let mut quic_config = Config::new(quiche::PROTOCOL_VERSION)
+            .map_err(|err| ProxyError::Transport(format!("failed to create QUIC config: {err}")))?;
 
         match quic_config.load_cert_chain_from_pem_file(&config.listen.tls.cert) {
             Ok(_) => debug!("Certificate loaded successfully"),
@@ -78,7 +93,9 @@ impl QUICListener {
 
         quic_config
             .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
-            .unwrap();
+            .map_err(|err| {
+                ProxyError::Transport(format!("failed to set ALPN protocols: {:?}", err))
+            })?;
         quic_config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
         quic_config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
         quic_config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
@@ -95,9 +112,24 @@ impl QUICListener {
         // This prevents clients from attempting 0-RTT that we can't handle
 
         debug!("Listening on {}", socket_address);
+        let worker_threads = config.performance.worker_threads.max(1);
+        let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
+        let global_inflight_limit = config.performance.global_inflight_limit.max(1);
+        let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
+        info!(
+            "Performance profile: worker_threads={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={}",
+            worker_threads,
+            global_inflight_limit,
+            per_upstream_limit,
+            config.performance.backend_timeout_ms,
+            config.performance.backend_body_idle_timeout_ms,
+            config.performance.backend_body_total_timeout_ms
+        );
 
         let h3_config =
-            Arc::new(quiche::h3::Config::new().expect("Failed to create HTTP/3 config"));
+            Arc::new(quiche::h3::Config::new().map_err(|err| {
+                ProxyError::Transport(format!("failed to create h3 config: {err}"))
+            })?);
         let backend_addresses = config
             .upstream
             .values()
@@ -108,19 +140,31 @@ impl QUICListener {
                     .map(|backend| backend.address.clone())
             })
             .collect::<Vec<_>>();
-        let h2_pool = Arc::new(H2Pool::new(backend_addresses, MAX_INFLIGHT_PER_BACKEND));
+        let h2_pool = Arc::new(H2Pool::new(backend_addresses, max_inflight_per_backend));
 
         let mut upstream_pools = HashMap::new();
+        let mut upstream_inflight = HashMap::new();
+        let backend_timeout = Duration::from_millis(config.performance.backend_timeout_ms);
+        let backend_body_idle_timeout =
+            Duration::from_millis(config.performance.backend_body_idle_timeout_ms);
+        let backend_body_total_timeout =
+            Duration::from_millis(config.performance.backend_body_total_timeout_ms);
         for (name, upstream) in &config.upstream {
-            let upstream_pool =
-                UpstreamPool::from_upstream(upstream).expect("Failed to create upstream pool");
+            let upstream_pool = UpstreamPool::from_upstream(upstream).map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to create upstream pool '{}': {}",
+                    name, err
+                ))
+            })?;
             upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
+            upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
         }
         let routing_index = RouteIndex::from_upstreams(&config.upstream);
 
-        let metrics = Metrics::default();
+        let metrics = Arc::new(Metrics::default());
 
         Self::spawn_health_checks(upstream_pools.clone(), h2_pool.clone());
+        Self::spawn_metrics_endpoint(&config, Arc::clone(&metrics));
 
         Ok(Self {
             socket,
@@ -129,10 +173,15 @@ impl QUICListener {
             h3_config,
             h2_pool,
             upstream_pools,
+            upstream_inflight,
+            global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
             routing_index,
             metrics,
             draining: false,
             drain_start: None,
+            backend_timeout,
+            backend_body_idle_timeout,
+            backend_body_total_timeout,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -225,18 +274,19 @@ impl QUICListener {
 
         // For Short packets, try prefix match (client may append bytes to our SCID)
         // This handles cases where client uses longer DCIDs based on server's SCID
-        if header.ty == quiche::Type::Short && dcid_bytes.len() > MIN_SCID_LEN_BYTES {
-            if let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes) {
-                debug!(
-                    "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
-                    matched_cid, &dcid_bytes
-                );
-                let stored_cid_copy: Arc<[u8]> = Arc::clone(&matched_cid);
-                if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
-                    self.peer_routes.remove(&connection.peer_address);
-                    connection.peer_address = peer;
-                    return Some((connection, stored_cid_copy));
-                }
+        if header.ty == quiche::Type::Short
+            && dcid_bytes.len() > MIN_SCID_LEN_BYTES
+            && let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes)
+        {
+            debug!(
+                "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
+                matched_cid, &dcid_bytes
+            );
+            let stored_cid_copy: Arc<[u8]> = Arc::clone(&matched_cid);
+            if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
+                self.peer_routes.remove(&connection.peer_address);
+                connection.peer_address = peer;
+                return Some((connection, stored_cid_copy));
             }
         }
 
@@ -385,16 +435,10 @@ impl QUICListener {
             self.cid_routes.insert(cid.clone(), primary.clone());
         }
 
-        // Add new SCIDs to radix trie
+        // Index active SCIDs directly. The connection is currently removed from
+        // self.connections while being processed, so we cannot rely on key lookup.
         for cid in &active_scids {
-            // Get Arc<[u8]> reference from connections HashMap
-            if let Some(arc_cid) = self
-                .connections
-                .keys()
-                .find(|k| k.as_ref() == cid.as_slice())
-            {
-                self.cid_radix.insert(Arc::clone(arc_cid)); // NEW
-            }
+            self.cid_radix.insert(Arc::<[u8]>::from(cid.as_slice()));
         }
 
         connection.routing_scids = active_scids;
@@ -416,7 +460,7 @@ impl QUICListener {
             Err(_) => return,
         };
 
-        info!("Length of data recived: {}", len);
+        debug!("Received UDP datagram ({} bytes)", len);
 
         let local_addr = match self.socket.local_addr() {
             Ok(addr) => addr,
@@ -582,6 +626,11 @@ impl QUICListener {
                 &mut connection,
                 Arc::clone(&h2_pool),
                 &self.upstream_pools,
+                &self.upstream_inflight,
+                Arc::clone(&self.global_inflight),
+                self.backend_timeout,
+                self.backend_body_idle_timeout,
+                self.backend_body_total_timeout,
                 &self.routing_index,
                 &self.metrics,
             )
@@ -651,14 +700,15 @@ impl QUICListener {
             }
 
             // Advance in-flight streams independent of inbound packets.
-            if connection.h3.is_some() {
-                let mut h3 = connection.h3.take().unwrap();
+            if let Some(mut h3) = connection.h3.take() {
                 if let Err(e) = Self::advance_streams_non_blocking(
                     &mut connection.streams,
                     &mut connection.quic,
                     &mut h3,
                     &self.upstream_pools,
                     &self.routing_index,
+                    self.backend_body_idle_timeout,
+                    self.backend_body_total_timeout,
                     &self.metrics,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
@@ -688,10 +738,16 @@ impl QUICListener {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_h3(
         connection: &mut QuicConnection,
         h2_pool: Arc<H2Pool>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_inflight: &HashMap<String, Arc<Semaphore>>,
+        global_inflight: Arc<Semaphore>,
+        backend_timeout: Duration,
+        backend_body_idle_timeout: Duration,
+        backend_body_total_timeout: Duration,
         routing_index: &RouteIndex,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
@@ -737,6 +793,9 @@ impl QUICListener {
                         info!("HTTP/3 request {} {}", method, path);
                     }
 
+                    metrics.inc_total();
+                    let request_start = Instant::now();
+
                     // Route lookup — needed to start the H2 request immediately.
                     let resolved = Self::resolve_backend(
                         &method,
@@ -746,9 +805,81 @@ impl QUICListener {
                         routing_index,
                     );
 
-                    let (body_tx, upstream_result_rx, backend_addr, backend_index) = match resolved
-                    {
-                        Ok((addr, idx, _pool)) => {
+                    let (
+                        body_tx,
+                        upstream_result_rx,
+                        backend_addr,
+                        backend_index,
+                        upstream_name,
+                        global_inflight_permit,
+                        upstream_inflight_permit,
+                    ) = match resolved {
+                        Ok((upstream_name, addr, idx, _pool)) => {
+                            let global_permit =
+                                match Arc::clone(&global_inflight).try_acquire_owned() {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_simple_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            http::StatusCode::SERVICE_UNAVAILABLE,
+                                            b"overloaded, retry later\n",
+                                        )?;
+                                        continue;
+                                    }
+                                };
+
+                            let upstream_permit =
+                                match upstream_inflight.get(&upstream_name).cloned() {
+                                    Some(semaphore) => match semaphore.try_acquire_owned() {
+                                        Ok(permit) => permit,
+                                        Err(_) => {
+                                            drop(global_permit);
+                                            metrics.inc_failure();
+                                            metrics.inc_overload_shed();
+                                            metrics.record_route(
+                                                &upstream_name,
+                                                request_start.elapsed(),
+                                                RouteOutcome::OverloadShed,
+                                            );
+                                            Self::send_simple_response(
+                                                h3,
+                                                &mut connection.quic,
+                                                stream_id,
+                                                http::StatusCode::SERVICE_UNAVAILABLE,
+                                                b"upstream overloaded, retry later\n",
+                                            )?;
+                                            continue;
+                                        }
+                                    },
+                                    None => {
+                                        drop(global_permit);
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_simple_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            http::StatusCode::SERVICE_UNAVAILABLE,
+                                            b"no upstream throttle configured\n",
+                                        )?;
+                                        continue;
+                                    }
+                                };
+
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
                             let (tx, channel_body) = ChannelBody::channel(8);
@@ -772,7 +903,7 @@ impl QUICListener {
                                     .map_err(ProxyError::Bridge)?;
 
                                     let response = tokio::time::timeout(
-                                        backend_timeout(),
+                                        backend_timeout,
                                         h2.send(&fwd_addr, request),
                                     )
                                     .await
@@ -789,16 +920,58 @@ impl QUICListener {
                                 Ok(handle) => {
                                     handle.spawn(fut);
                                 }
-                                Err(_) => {
-                                    fallback_runtime().spawn(fut);
+                                Err(err) => {
+                                    if let Some(rt) = fallback_runtime() {
+                                        rt.spawn(fut);
+                                    } else {
+                                        error!(
+                                            "dropping upstream task: no runtime available ({})",
+                                            err
+                                        );
+                                    }
                                 }
                             }
-                            (Some(tx), Some(result_rx), Some(addr), Some(idx))
+                            (
+                                Some(tx),
+                                Some(result_rx),
+                                Some(addr),
+                                Some(idx),
+                                Some(upstream_name),
+                                Some(global_permit),
+                                Some(upstream_permit),
+                            )
                         }
-                        Err(_) => (None, None, None, None),
+                        Err(err) => {
+                            metrics.inc_failure();
+                            metrics.record_route(
+                                "unrouted",
+                                request_start.elapsed(),
+                                RouteOutcome::Failure,
+                            );
+                            let (status, body): (http::StatusCode, &[u8]) = match err {
+                                ProxyError::Transport(_) => (
+                                    http::StatusCode::SERVICE_UNAVAILABLE,
+                                    b"no upstream available\n",
+                                ),
+                                ProxyError::Bridge(_) => {
+                                    (http::StatusCode::BAD_REQUEST, b"invalid request\n")
+                                }
+                                _ => (
+                                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    b"internal proxy error\n",
+                                ),
+                            };
+                            Self::send_simple_response(
+                                h3,
+                                &mut connection.quic,
+                                stream_id,
+                                status,
+                                body,
+                            )?;
+                            continue;
+                        }
                     };
 
-                    metrics.inc_total();
                     connection.streams.insert(
                         stream_id,
                         RequestEnvelope {
@@ -811,7 +984,10 @@ impl QUICListener {
                             body_bytes_received: 0,
                             backend_addr,
                             backend_index,
-                            start: Instant::now(),
+                            upstream_name,
+                            global_inflight_permit,
+                            upstream_inflight_permit,
+                            start: request_start,
                             phase: StreamPhase::ReceivingRequest,
                             request_fin_received: false,
                             upstream_result_rx,
@@ -899,6 +1075,8 @@ impl QUICListener {
             h3,
             upstream_pools,
             routing_index,
+            backend_body_idle_timeout,
+            backend_body_total_timeout,
             metrics,
         )?;
 
@@ -917,7 +1095,7 @@ impl QUICListener {
     /// 3. Poll `upstream_result_rx` (`try_recv`).
     ///    - Error result  → send error response, mark terminal.
     ///    - Ok result     → send H3 response headers, spawn body-pump task,
-    ///                      store `response_chunk_rx`, transition to SendingResponse.
+    ///      store `response_chunk_rx`, transition to SendingResponse.
     /// 4. Flush `response_chunk_rx` chunks into H3 (`try_recv` loop).
     ///    - `Data`  → `h3.send_body(..., false)`
     ///    - `End`   → `h3.send_body(..., true)`, mark Completed
@@ -930,6 +1108,8 @@ impl QUICListener {
         h3: &mut quiche::h3::Connection,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
+        backend_body_idle_timeout: Duration,
+        backend_body_total_timeout: Duration,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
@@ -1008,33 +1188,43 @@ impl QUICListener {
                         h3.send_response(quic, stream_id, &h3_headers, false)?;
 
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
-                        // Enforces backend_timeout() so a slow upstream body does not
-                        // leave the stream open indefinitely.
+                        // Enforces both body idle and total deadlines so slow upstream bodies
+                        // do not keep streams open indefinitely.
                         let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
-                        let deadline = tokio::time::Instant::now() + backend_timeout();
+                        let fail_tx = chunk_tx.clone();
+                        let total_deadline =
+                            tokio::time::Instant::now() + backend_body_total_timeout;
                         let fut = async move {
                             use http_body_util::BodyExt;
                             let mut body: hyper::body::Incoming = body;
                             loop {
                                 let frame_fut = BodyExt::frame(&mut body);
-                                let result = tokio::time::timeout_at(deadline, frame_fut).await;
+                                let now = tokio::time::Instant::now();
+                                if now >= total_deadline {
+                                    let _ = chunk_tx
+                                        .send(ResponseChunk::Error(ProxyError::Timeout))
+                                        .await;
+                                    return;
+                                }
+                                let remaining_total = total_deadline.saturating_duration_since(now);
+                                let wait_timeout = remaining_total.min(backend_body_idle_timeout);
+                                let result = tokio::time::timeout(wait_timeout, frame_fut).await;
                                 match result {
                                     Err(_elapsed) => {
-                                        // Body read timed out — signal timeout to flush loop.
+                                        // Body read idle timeout — signal timeout to flush loop.
                                         let _ = chunk_tx
                                             .send(ResponseChunk::Error(ProxyError::Timeout))
                                             .await;
                                         return;
                                     }
                                     Ok(Some(Ok(f))) => {
-                                        if let Ok(data) = f.into_data() {
-                                            if chunk_tx
+                                        if let Ok(data) = f.into_data()
+                                            && chunk_tx
                                                 .send(ResponseChunk::Data(data))
                                                 .await
                                                 .is_err()
-                                            {
-                                                return;
-                                            }
+                                        {
+                                            return;
                                         }
                                         // skip trailers / other frame types
                                     }
@@ -1053,13 +1243,27 @@ impl QUICListener {
                                 }
                             }
                         };
+                        let mut spawned = true;
                         match Handle::try_current() {
                             Ok(h) => {
                                 h.spawn(fut);
                             }
-                            Err(_) => {
-                                fallback_runtime().spawn(fut);
+                            Err(err) => {
+                                if let Some(rt) = fallback_runtime() {
+                                    rt.spawn(fut);
+                                } else {
+                                    error!(
+                                        "dropping body pump task: no runtime available ({})",
+                                        err
+                                    );
+                                    spawned = false;
+                                }
                             }
+                        }
+                        if !spawned {
+                            let _ = fail_tx.try_send(ResponseChunk::Error(ProxyError::Transport(
+                                "runtime unavailable".into(),
+                            )));
                         }
 
                         if let Some(req) = streams.get_mut(&stream_id) {
@@ -1094,6 +1298,12 @@ impl QUICListener {
                                 }
                             }
                             metrics.inc_success();
+                            let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
+                            metrics.record_route(
+                                route_label,
+                                req.start.elapsed(),
+                                RouteOutcome::Success,
+                            );
                             info!(
                                 "Upstream {} status {} latency_ms {}",
                                 req.backend_addr.as_deref().unwrap_or("?"),
@@ -1125,79 +1335,90 @@ impl QUICListener {
 
             // ── 4: flush response chunks ──────────────────────────────────────
             let mut terminal = false;
-            if let Some(req) = streams.get_mut(&stream_id) {
-                if let Some(rx) = &mut req.response_chunk_rx {
-                    // Drain as many chunks as quiche will accept this iteration.
-                    loop {
-                        // Retry any chunk that previously hit backpressure.
-                        let chunk = match req.pending_chunk.take() {
-                            Some(c) => c,
-                            None => match rx.try_recv() {
-                                Ok(c) => c,
-                                Err(_) => break, // Empty or closed — nothing to flush
-                            },
-                        };
-                        match chunk {
-                            ResponseChunk::Data(data) => {
-                                match h3.send_body(quic, stream_id, &data, false) {
-                                    Ok(_) => {}
-                                    Err(quiche::h3::Error::StreamBlocked) => {
-                                        // QUIC flow-control backpressure — retry next poll.
-                                        req.pending_chunk = Some(ResponseChunk::Data(data));
-                                        break;
-                                    }
-                                    Err(e) => return Err(e),
+            if let Some(req) = streams.get_mut(&stream_id)
+                && let Some(rx) = &mut req.response_chunk_rx
+            {
+                // Drain as many chunks as quiche will accept this iteration.
+                loop {
+                    // Retry any chunk that previously hit backpressure.
+                    let chunk = match req.pending_chunk.take() {
+                        Some(c) => c,
+                        None => match rx.try_recv() {
+                            Ok(c) => c,
+                            Err(_) => break, // Empty or closed — nothing to flush
+                        },
+                    };
+                    match chunk {
+                        ResponseChunk::Data(data) => {
+                            match h3.send_body(quic, stream_id, &data, false) {
+                                Ok(_) => {}
+                                Err(quiche::h3::Error::StreamBlocked) => {
+                                    // QUIC flow-control backpressure — retry next poll.
+                                    req.pending_chunk = Some(ResponseChunk::Data(data));
+                                    break;
+                                }
+                                Err(e) => return Err(e),
+                            }
+                        }
+                        ResponseChunk::End => {
+                            h3.send_body(quic, stream_id, b"", true)?;
+                            req.phase = StreamPhase::Completed;
+                            terminal = true;
+                            break;
+                        }
+                        ResponseChunk::Error(err) => {
+                            // Best-effort: close the stream.
+                            let _ = h3.send_body(quic, stream_id, b"", true);
+                            req.phase = StreamPhase::Failed;
+                            // Mirror the health/metrics updates from the old
+                            // send_backend_response timeout/error paths.
+                            let upstream_name =
+                                routing_index.lookup(&req.path, req.authority.as_deref());
+                            if let (Some(idx), Some(pool)) = (
+                                req.backend_index,
+                                upstream_name.and_then(|n| upstream_pools.get(n)),
+                            ) && let Some(t) =
+                                pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
+                                && let Some(addr) = &req.backend_addr
+                            {
+                                Self::log_health_transition(addr, t);
+                            }
+                            match err {
+                                ProxyError::Timeout => {
+                                    metrics.inc_failure();
+                                    metrics.inc_timeout();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::Timeout,
+                                    );
+                                    info!(
+                                        "Upstream {} body timeout latency_ms {}",
+                                        req.backend_addr.as_deref().unwrap_or("?"),
+                                        req.start.elapsed().as_millis()
+                                    );
+                                }
+                                _ => {
+                                    metrics.inc_failure();
+                                    metrics.inc_backend_error();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::BackendError,
+                                    );
+                                    error!(
+                                        "Upstream {} body error: {:?}",
+                                        req.backend_addr.as_deref().unwrap_or("?"),
+                                        err
+                                    );
                                 }
                             }
-                            ResponseChunk::End => {
-                                h3.send_body(quic, stream_id, b"", true)?;
-                                req.phase = StreamPhase::Completed;
-                                terminal = true;
-                                break;
-                            }
-                            ResponseChunk::Error(err) => {
-                                // Best-effort: close the stream.
-                                let _ = h3.send_body(quic, stream_id, b"", true);
-                                req.phase = StreamPhase::Failed;
-                                // Mirror the health/metrics updates from the old
-                                // send_backend_response timeout/error paths.
-                                let upstream_name =
-                                    routing_index.lookup(&req.path, req.authority.as_deref());
-                                if let (Some(idx), Some(pool)) = (
-                                    req.backend_index,
-                                    upstream_name.and_then(|n| upstream_pools.get(n)),
-                                ) {
-                                    if let Some(t) =
-                                        pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
-                                    {
-                                        if let Some(addr) = &req.backend_addr {
-                                            Self::log_health_transition(addr, t);
-                                        }
-                                    }
-                                }
-                                match err {
-                                    ProxyError::Timeout => {
-                                        metrics.inc_failure();
-                                        metrics.inc_timeout();
-                                        info!(
-                                            "Upstream {} body timeout latency_ms {}",
-                                            req.backend_addr.as_deref().unwrap_or("?"),
-                                            req.start.elapsed().as_millis()
-                                        );
-                                    }
-                                    _ => {
-                                        metrics.inc_failure();
-                                        metrics.inc_backend_error();
-                                        error!(
-                                            "Upstream {} body error: {:?}",
-                                            req.backend_addr.as_deref().unwrap_or("?"),
-                                            err
-                                        );
-                                    }
-                                }
-                                terminal = true;
-                                break;
-                            }
+                            terminal = true;
+                            break;
                         }
                     }
                 }
@@ -1219,7 +1440,7 @@ impl QUICListener {
         authority: Option<&str>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
-    ) -> Result<(String, usize, Arc<Mutex<UpstreamPool>>), ProxyError> {
+    ) -> Result<ResolvedBackend, ProxyError> {
         if method.is_empty() || path.is_empty() {
             return Err(ProxyError::Transport("empty method or path".into()));
         }
@@ -1233,32 +1454,33 @@ impl QUICListener {
             .ok_or_else(|| ProxyError::Transport(format!("pool not found: {upstream_name}")))?
             .clone();
 
-        let upstream_len = upstream_pool.lock().map(|p| p.pool.len()).unwrap_or(0);
-        if upstream_len == 0 {
-            return Err(ProxyError::Transport("no servers in upstream".into()));
-        }
-
         let key: &str = authority.unwrap_or(if !path.is_empty() { path } else { method });
 
-        let (backend_index, lb_type) = {
-            let mut pool = upstream_pool.lock().expect("upstream pool lock");
+        let (backend_index, lb_type, backend_addr) = {
+            let mut pool = upstream_pool
+                .lock()
+                .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
+            if pool.pool.is_empty() {
+                return Err(ProxyError::Transport("no servers in upstream".into()));
+            }
             let lb_type = pool.lb_name();
             let idx = pool.pick(key);
-            (idx, lb_type)
-        };
-        let backend_index =
-            backend_index.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
-
-        let backend_addr = {
-            let pool = upstream_pool.lock().expect("upstream pool lock");
-            pool.pool
-                .address(backend_index)
-                .map(|a| a.to_string())
-                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?
+            let idx = idx.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
+            let backend_addr = pool
+                .pool
+                .address(idx)
+                .map(str::to_string)
+                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?;
+            (idx, lb_type, backend_addr)
         };
 
         info!("Selected backend {} via {}", backend_addr, lb_type);
-        Ok((backend_addr, backend_index, upstream_pool))
+        Ok((
+            upstream_name.to_string(),
+            backend_addr,
+            backend_index,
+            upstream_pool,
+        ))
     }
 
     /// Handle an already-resolved `ForwardResult`, applying health transitions
@@ -1275,12 +1497,14 @@ impl QUICListener {
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
         let start = req.start;
+        let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
 
         // If routing failed at Headers time, return an appropriate error now.
         let (backend_addr, backend_index) = match (&req.backend_addr, req.backend_index) {
             (Some(a), Some(i)) => (a.as_str(), i),
             _ => {
                 metrics.inc_failure();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 return Self::send_simple_response(
                     h3,
                     quic,
@@ -1306,6 +1530,7 @@ impl QUICListener {
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 info!(
                     "Upstream {} status 400 latency_ms {}",
                     backend_addr,
@@ -1321,17 +1546,17 @@ impl QUICListener {
             }
             Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
                 error!("Transport error");
-                if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool
+                if let Some(pool) = &upstream_pool
+                    && let Some(t) = pool
                         .lock()
                         .ok()
                         .and_then(|mut p| p.pool.mark_failure(backend_index))
-                    {
-                        Self::log_health_transition(backend_addr, t);
-                    }
+                {
+                    Self::log_health_transition(backend_addr, t);
                 }
                 metrics.inc_failure();
                 metrics.inc_backend_error();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
                 info!(
                     "Upstream {} status 502 latency_ms {}",
                     backend_addr,
@@ -1347,17 +1572,17 @@ impl QUICListener {
             }
             Err(ProxyError::Timeout) => {
                 error!("Server timeout");
-                if let Some(pool) = &upstream_pool {
-                    if let Some(t) = pool
+                if let Some(pool) = &upstream_pool
+                    && let Some(t) = pool
                         .lock()
                         .ok()
                         .and_then(|mut p| p.pool.mark_failure(backend_index))
-                    {
-                        Self::log_health_transition(backend_addr, t);
-                    }
+                {
+                    Self::log_health_transition(backend_addr, t);
                 }
                 metrics.inc_failure();
                 metrics.inc_timeout();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Timeout);
                 info!(
                     "Upstream {} status 503 latency_ms {}",
                     backend_addr,
@@ -1374,6 +1599,7 @@ impl QUICListener {
             Err(ProxyError::Tls(err)) => {
                 error!("TLS error: {}", err);
                 metrics.inc_failure();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 info!(
                     "TLS error for stream {} latency_ms {}",
                     stream_id,
@@ -1442,6 +1668,115 @@ impl QUICListener {
             HealthTransition::BecameUnhealthy => {
                 error!("Backend {} became unhealthy", addr);
             }
+        }
+    }
+
+    fn spawn_metrics_endpoint(config: &SpookyConfig, metrics: Arc<Metrics>) {
+        let endpoint = &config.observability.metrics;
+        if !endpoint.enabled {
+            return;
+        }
+
+        let bind = format!("{}:{}", endpoint.address, endpoint.port);
+        let metrics_path = endpoint.path.clone();
+
+        let handle = match Handle::try_current() {
+            Ok(h) => h,
+            Err(err) => {
+                error!("Metrics endpoint disabled (no Tokio runtime): {}", err);
+                return;
+            }
+        };
+
+        // Bind synchronously so endpoint readiness does not race with task scheduling.
+        let std_listener = match std::net::TcpListener::bind(&bind) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!("Failed to bind metrics endpoint {}: {}", bind, err);
+                return;
+            }
+        };
+        if let Err(err) = std_listener.set_nonblocking(true) {
+            error!(
+                "Failed to set metrics endpoint listener nonblocking ({}): {}",
+                bind, err
+            );
+            return;
+        }
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!(
+                    "Failed to register metrics endpoint listener {}: {}",
+                    bind, err
+                );
+                return;
+            }
+        };
+
+        handle.spawn(async move {
+            info!(
+                "Metrics endpoint listening on http://{}{}",
+                bind, metrics_path
+            );
+
+            loop {
+                let (stream, _peer) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        error!("Metrics endpoint accept failed: {}", err);
+                        continue;
+                    }
+                };
+
+                let io = TokioIo::new(stream);
+                let metrics = Arc::clone(&metrics);
+                let metrics_path = metrics_path.clone();
+
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let metrics = Arc::clone(&metrics);
+                        let metrics_path = metrics_path.clone();
+                        async move {
+                            Ok::<_, hyper::Error>(Self::handle_metrics_request(
+                                req,
+                                &metrics_path,
+                                metrics,
+                            ))
+                        }
+                    });
+
+                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
+                        error!("Metrics endpoint connection failed: {}", err);
+                    }
+                });
+            }
+        });
+    }
+
+    fn handle_metrics_request(
+        req: Request<Incoming>,
+        metrics_path: &str,
+        metrics: Arc<Metrics>,
+    ) -> Response<Full<Bytes>> {
+        if req.uri().path() != metrics_path {
+            return match Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Full::new(Bytes::from_static(b"not found\n")))
+            {
+                Ok(resp) => resp,
+                Err(_) => Response::new(Full::new(Bytes::from_static(b"not found\n"))),
+            };
+        }
+
+        let body = metrics.render_prometheus();
+        match Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/plain; version=0.0.4")
+            .body(Full::new(Bytes::from(body)))
+        {
+            Ok(resp) => resp,
+            Err(_) => Response::new(Full::new(Bytes::from_static(b"failed to render metrics\n"))),
         }
     }
 
@@ -1532,14 +1867,16 @@ impl QUICListener {
     }
 }
 
-fn fallback_runtime() -> &'static tokio::runtime::Runtime {
-    static FALLBACK_RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    FALLBACK_RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .worker_threads(2)
-            .thread_name("spooky-edge-fallback-rt")
-            .build()
-            .expect("failed to create fallback tokio runtime")
-    })
+fn fallback_runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static FALLBACK_RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+    FALLBACK_RT
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .thread_name("spooky-edge-fallback-rt")
+                .build()
+                .ok()
+        })
+        .as_ref()
 }

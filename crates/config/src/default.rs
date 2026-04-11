@@ -69,3 +69,39 @@ pub fn get_default_log() -> Log {
         },
     }
 }
+
+pub fn perf_default_worker_threads() -> usize {
+    1
+}
+
+pub fn perf_default_global_inflight_limit() -> usize {
+    4096
+}
+
+pub fn perf_default_per_upstream_inflight_limit() -> usize {
+    1024
+}
+
+pub fn perf_default_backend_timeout_ms() -> u64 {
+    2_000
+}
+
+pub fn perf_default_backend_body_idle_timeout_ms() -> u64 {
+    2_000
+}
+
+pub fn perf_default_backend_body_total_timeout_ms() -> u64 {
+    30_000
+}
+
+pub fn observe_default_address() -> String {
+    String::from("127.0.0.1")
+}
+
+pub fn observe_default_port() -> u16 {
+    9901
+}
+
+pub fn observe_default_metrics_path() -> String {
+    String::from("/metrics")
+}

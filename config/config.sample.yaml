@@ -54,3 +54,18 @@ log:
     file:
         enabled: true
         path: /var/log/spooky/spooky.log
+
+performance:
+    worker_threads: 1
+    global_inflight_limit: 4096
+    per_upstream_inflight_limit: 1024
+    backend_timeout_ms: 2000
+    backend_body_idle_timeout_ms: 2000
+    backend_body_total_timeout_ms: 30000
+
+observability:
+    metrics:
+        enabled: true
+        address: "127.0.0.1"
+        port: 9901
+        path: "/metrics"

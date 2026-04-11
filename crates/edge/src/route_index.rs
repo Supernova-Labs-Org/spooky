@@ -6,6 +6,7 @@ use spooky_config::config::Upstream;
 pub struct IndexedRoute {
     upstream_idx: usize,
     path_len: usize,
+    host_specific: bool,
     order: usize,
 }
 
@@ -17,15 +18,7 @@ pub struct TrieNode {
 
 impl TrieNode {
     fn update_route(&mut self, candidate: IndexedRoute) {
-        if let Some(current) = self.route {
-            if candidate.path_len > current.path_len
-                || (candidate.path_len == current.path_len && candidate.order < current.order)
-            {
-                self.route = Some(candidate);
-            }
-            return;
-        }
-        self.route = Some(candidate);
+        self.route = prefer_route(self.route, Some(candidate));
     }
 }
 
@@ -70,6 +63,7 @@ impl RouteTrie {
 pub(crate) struct RouteIndex {
     host_tries: HashMap<String, RouteTrie>,
     default_trie: RouteTrie,
+    default_max_path_len: usize,
     upstream_names: Vec<String>,
 }
 
@@ -77,20 +71,25 @@ impl RouteIndex {
     pub(crate) fn from_upstreams(upstreams: &HashMap<String, Upstream>) -> Self {
         let mut host_tries = HashMap::new();
         let mut default_trie = RouteTrie::default();
+        let mut default_max_path_len = 0usize;
         let mut upstream_names = Vec::with_capacity(upstreams.len());
+        let mut ordered: Vec<(&String, &Upstream)> = upstreams.iter().collect();
+        ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-        for (order, (name, upstream)) in upstreams.iter().enumerate() {
+        for (order, (name, upstream)) in ordered.into_iter().enumerate() {
             let upstream_idx = upstream_names.len();
             upstream_names.push(name.clone());
+            let path_len = upstream
+                .route
+                .path_prefix
+                .as_ref()
+                .map(|prefix| prefix.len())
+                .unwrap_or(0);
 
             let route = IndexedRoute {
                 upstream_idx,
-                path_len: upstream
-                    .route
-                    .path_prefix
-                    .as_ref()
-                    .map(|prefix| prefix.len())
-                    .unwrap_or(0),
+                path_len,
+                host_specific: upstream.route.host.is_some(),
                 order,
             };
 
@@ -99,26 +98,33 @@ impl RouteIndex {
                     .entry(host.to_string())
                     .or_insert_with(RouteTrie::default)
                     .insert(upstream.route.path_prefix.as_deref(), route),
-                None => default_trie.insert(upstream.route.path_prefix.as_deref(), route),
+                None => {
+                    default_max_path_len = default_max_path_len.max(path_len);
+                    default_trie.insert(upstream.route.path_prefix.as_deref(), route);
+                }
             }
         }
 
         Self {
             host_tries,
             default_trie,
+            default_max_path_len,
             upstream_names,
         }
     }
 
     pub(crate) fn lookup<'a>(&'a self, path: &str, host: Option<&str>) -> Option<&'a str> {
-        let mut best = self.default_trie.longest_prefix(path);
+        let host_best = host
+            .and_then(|host_name| self.host_tries.get(host_name))
+            .and_then(|host_trie| host_trie.longest_prefix(path));
 
-        if let Some(host) = host
-            && let Some(host_trie) = self.host_tries.get(host)
+        if let Some(best) = host_best
+            && best.path_len >= self.default_max_path_len
         {
-            best = prefer_route(best, host_trie.longest_prefix(path));
+            return Some(self.upstream_names[best.upstream_idx].as_str());
         }
 
+        let best = prefer_route(self.default_trie.longest_prefix(path), host_best);
         best.map(|route| self.upstream_names[route.upstream_idx].as_str())
     }
 }
@@ -132,7 +138,12 @@ fn prefer_route(
         (Some(route), None) | (None, Some(route)) => Some(route),
         (Some(current), Some(candidate)) => {
             if candidate.path_len > current.path_len
-                || (candidate.path_len == current.path_len && candidate.order < current.order)
+                || (candidate.path_len == current.path_len
+                    && candidate.host_specific
+                    && !current.host_specific)
+                || (candidate.path_len == current.path_len
+                    && candidate.host_specific == current.host_specific
+                    && candidate.order < current.order)
             {
                 Some(candidate)
             } else {
@@ -147,7 +158,8 @@ pub(crate) fn scan_lookup<'a>(
     path: &str,
     host: Option<&str>,
 ) -> Option<&'a str> {
-    let mut best_match: Option<(&str, usize)> = None;
+    let path_bytes = path.as_bytes();
+    let mut best_match: Option<(&str, usize, bool)> = None;
 
     for (upstream_name, upstream) in upstreams {
         let has_host_match = match (&upstream.route.host, host) {
@@ -157,19 +169,48 @@ pub(crate) fn scan_lookup<'a>(
         };
 
         let path_match_len = match &upstream.route.path_prefix {
-            Some(path_prefix) if path.starts_with(path_prefix) => path_prefix.len(),
+            Some(path_prefix) => {
+                let prefix = path_prefix.as_bytes();
+                if prefix.len() > path_bytes.len() {
+                    continue;
+                }
+                // Fast reject for same-length-ish prefixes before full starts_with.
+                if let Some((&last, idx)) = prefix.last().zip(prefix.len().checked_sub(1))
+                    && path_bytes[idx] != last
+                {
+                    continue;
+                }
+                if !path_bytes.starts_with(prefix) {
+                    continue;
+                }
+                prefix.len()
+            }
             None => 0,
-            _ => continue,
         };
 
-        if has_host_match
-            && (best_match.is_none() || path_match_len > best_match.expect("checked").1)
-        {
-            best_match = Some((upstream_name.as_str(), path_match_len));
+        if !has_host_match {
+            continue;
+        }
+        let host_specific = upstream.route.host.is_some();
+
+        match best_match {
+            Some((best_name, best_len, best_host_specific)) => {
+                if path_match_len > best_len
+                    || (path_match_len == best_len && host_specific && !best_host_specific)
+                    || (path_match_len == best_len
+                        && host_specific == best_host_specific
+                        && upstream_name.as_str() < best_name)
+                {
+                    best_match = Some((upstream_name.as_str(), path_match_len, host_specific));
+                }
+            }
+            None => {
+                best_match = Some((upstream_name.as_str(), path_match_len, host_specific));
+            }
         }
     }
 
-    best_match.map(|(name, _)| name)
+    best_match.map(|(name, _, _)| name)
 }
 
 #[cfg(test)]
@@ -239,6 +280,26 @@ mod tests {
                 scan_lookup(&upstreams, path, host)
             );
         }
+    }
+
+    #[test]
+    fn host_specific_route_wins_on_tie() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert("a-default".to_string(), test_upstream(None, Some("/api")));
+        upstreams.insert(
+            "z-host".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(
+            index.lookup("/api/users", Some("api.example.com")),
+            Some("z-host")
+        );
+        assert_eq!(
+            scan_lookup(&upstreams, "/api/users", Some("api.example.com")),
+            Some("z-host")
+        );
     }
 
     fn build_route_table(route_count: usize) -> HashMap<String, Upstream> {

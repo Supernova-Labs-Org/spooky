@@ -49,10 +49,10 @@ pub fn build_h2_request(
         builder = builder.header(http::header::HOST, backend);
     }
 
-    if let Some(len) = content_length {
-        if len > 0 {
-            builder = builder.header(http::header::CONTENT_LENGTH, len);
-        }
+    if let Some(len) = content_length
+        && len > 0
+    {
+        builder = builder.header(http::header::CONTENT_LENGTH, len);
     }
 
     builder.body(body).map_err(BridgeError::Build)

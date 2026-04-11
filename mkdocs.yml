@@ -31,31 +31,31 @@ plugins:
 nav:
   - Home: README.md
   - Getting Started:
-    - Overview: getting-started/overview.md
-    - Installation: getting-started/installation.md
-    - Quick Start: tutorials/quickstart.md
+      - Overview: getting-started/overview.md
+      - Installation: getting-started/installation.md
+      - Quick Start: tutorials/quickstart.md
   - Configuration:
-    - Reference: configuration/reference.md
-    - TLS Setup: configuration/tls.md
+      - Reference: configuration/reference.md
+      - TLS Setup: configuration/tls.md
   - User Guide:
-    - Basics: user-guide/basics.md
-    - Load Balancing: user-guide/load-balancing.md
+      - Basics: user-guide/basics.md
+      - Load Balancing: user-guide/load-balancing.md
   - Architecture:
-    - Overview: architecture.md
-    - High-Level Design: architecture/overview.md
-    - Components: architecture/components.md
+      - Overview: architecture.md
+      - High-Level Design: architecture/overview.md
+      - Components: architecture/components.md
   - Deployment:
-    - Production: deployment/production.md
-    - Troubleshooting: troubleshooting/common-issues.md
+      - Production: deployment/production.md
+      - Troubleshooting: troubleshooting/common-issues.md
   - Development:
-    - Contributing: development/contributing.md
-    - Benchmarks: benchmarks.md
-    - Changelog: changelog.md
+      - Contributing: development/contributing.md
+      - Benchmarks: benchmarks.md
+      - Changelog: changelog.md
   - Protocols:
-    - HTTP/3: protocols/http3.md
-    - QUIC: protocols/quic.md
+      - HTTP/3: protocols/http3.md
+      - QUIC: protocols/quic.md
   - API:
-    - Overview: api/overview.md
+      - Overview: api/overview.md
   - References: references.md
   - Roadmap: roadmap.md
 

@@ -74,6 +74,9 @@ pub struct QUICListener {
     pub metrics: Arc<Metrics>,
     pub draining: bool,
     pub drain_start: Option<Instant>,
+    pub backend_timeout: Duration,
+    pub backend_body_idle_timeout: Duration,
+    pub backend_body_total_timeout: Duration,
 
     pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],

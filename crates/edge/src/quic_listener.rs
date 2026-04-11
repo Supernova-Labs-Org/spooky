@@ -37,7 +37,7 @@ use crate::{
         MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS,
         QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
         QUIC_INITIAL_STREAM_DATA, RESET_TOKEN_LEN_BYTES, SCID_ROTATION_PACKET_THRESHOLD,
-        UDP_READ_TIMEOUT_MS, backend_timeout, drain_timeout, scid_rotation_interval,
+        UDP_READ_TIMEOUT_MS, drain_timeout, scid_rotation_interval,
     },
     outcome_from_status,
     route_index::RouteIndex,
@@ -110,6 +110,19 @@ impl QUICListener {
         // This prevents clients from attempting 0-RTT that we can't handle
 
         debug!("Listening on {}", socket_address);
+        let worker_threads = config.performance.worker_threads.max(1);
+        let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
+        let global_inflight_limit = config.performance.global_inflight_limit.max(1);
+        let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
+        info!(
+            "Performance profile: worker_threads={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={}",
+            worker_threads,
+            global_inflight_limit,
+            per_upstream_limit,
+            config.performance.backend_timeout_ms,
+            config.performance.backend_body_idle_timeout_ms,
+            config.performance.backend_body_total_timeout_ms
+        );
 
         let h3_config = Arc::new(
             quiche::h3::Config::new()
@@ -125,12 +138,15 @@ impl QUICListener {
                     .map(|backend| backend.address.clone())
             })
             .collect::<Vec<_>>();
-        let h2_pool = Arc::new(H2Pool::new(backend_addresses, MAX_INFLIGHT_PER_BACKEND));
+        let h2_pool = Arc::new(H2Pool::new(backend_addresses, max_inflight_per_backend));
 
         let mut upstream_pools = HashMap::new();
         let mut upstream_inflight = HashMap::new();
-        let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
-        let global_inflight_limit = config.performance.global_inflight_limit.max(1);
+        let backend_timeout = Duration::from_millis(config.performance.backend_timeout_ms);
+        let backend_body_idle_timeout =
+            Duration::from_millis(config.performance.backend_body_idle_timeout_ms);
+        let backend_body_total_timeout =
+            Duration::from_millis(config.performance.backend_body_total_timeout_ms);
         for (name, upstream) in &config.upstream {
             let upstream_pool = UpstreamPool::from_upstream(upstream).map_err(|err| {
                 ProxyError::Transport(format!(
@@ -164,6 +180,9 @@ impl QUICListener {
             metrics,
             draining: false,
             drain_start: None,
+            backend_timeout,
+            backend_body_idle_timeout,
+            backend_body_total_timeout,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -416,16 +435,10 @@ impl QUICListener {
             self.cid_routes.insert(cid.clone(), primary.clone());
         }
 
-        // Add new SCIDs to radix trie
+        // Index active SCIDs directly. The connection is currently removed from
+        // self.connections while being processed, so we cannot rely on key lookup.
         for cid in &active_scids {
-            // Get Arc<[u8]> reference from connections HashMap
-            if let Some(arc_cid) = self
-                .connections
-                .keys()
-                .find(|k| k.as_ref() == cid.as_slice())
-            {
-                self.cid_radix.insert(Arc::clone(arc_cid)); // NEW
-            }
+            self.cid_radix.insert(Arc::<[u8]>::from(cid.as_slice()));
         }
 
         connection.routing_scids = active_scids;
@@ -447,7 +460,7 @@ impl QUICListener {
             Err(_) => return,
         };
 
-        info!("Length of data recived: {}", len);
+        debug!("Received UDP datagram ({} bytes)", len);
 
         let local_addr = match self.socket.local_addr() {
             Ok(addr) => addr,
@@ -615,6 +628,9 @@ impl QUICListener {
                 &self.upstream_pools,
                 &self.upstream_inflight,
                 Arc::clone(&self.global_inflight),
+                self.backend_timeout,
+                self.backend_body_idle_timeout,
+                self.backend_body_total_timeout,
                 &self.routing_index,
                 &self.metrics,
             )
@@ -691,6 +707,8 @@ impl QUICListener {
                     &mut h3,
                     &self.upstream_pools,
                     &self.routing_index,
+                    self.backend_body_idle_timeout,
+                    self.backend_body_total_timeout,
                     &self.metrics,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
@@ -726,6 +744,9 @@ impl QUICListener {
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         upstream_inflight: &HashMap<String, Arc<Semaphore>>,
         global_inflight: Arc<Semaphore>,
+        backend_timeout: Duration,
+        backend_body_idle_timeout: Duration,
+        backend_body_total_timeout: Duration,
         routing_index: &RouteIndex,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
@@ -881,7 +902,7 @@ impl QUICListener {
                                     .map_err(ProxyError::Bridge)?;
 
                                     let response = tokio::time::timeout(
-                                        backend_timeout(),
+                                        backend_timeout,
                                         h2.send(&fwd_addr, request),
                                     )
                                     .await
@@ -1052,6 +1073,8 @@ impl QUICListener {
             h3,
             upstream_pools,
             routing_index,
+            backend_body_idle_timeout,
+            backend_body_total_timeout,
             metrics,
         )?;
 
@@ -1083,6 +1106,8 @@ impl QUICListener {
         h3: &mut quiche::h3::Connection,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
+        backend_body_idle_timeout: Duration,
+        backend_body_total_timeout: Duration,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
@@ -1161,20 +1186,29 @@ impl QUICListener {
                         h3.send_response(quic, stream_id, &h3_headers, false)?;
 
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
-                        // Enforces backend_timeout() so a slow upstream body does not
-                        // leave the stream open indefinitely.
+                        // Enforces both body idle and total deadlines so slow upstream bodies
+                        // do not keep streams open indefinitely.
                         let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
                         let fail_tx = chunk_tx.clone();
-                        let deadline = tokio::time::Instant::now() + backend_timeout();
+                        let total_deadline = tokio::time::Instant::now() + backend_body_total_timeout;
                         let fut = async move {
                             use http_body_util::BodyExt;
                             let mut body: hyper::body::Incoming = body;
                             loop {
                                 let frame_fut = BodyExt::frame(&mut body);
-                                let result = tokio::time::timeout_at(deadline, frame_fut).await;
+                                let now = tokio::time::Instant::now();
+                                if now >= total_deadline {
+                                    let _ = chunk_tx
+                                        .send(ResponseChunk::Error(ProxyError::Timeout))
+                                        .await;
+                                    return;
+                                }
+                                let remaining_total = total_deadline.saturating_duration_since(now);
+                                let wait_timeout = remaining_total.min(backend_body_idle_timeout);
+                                let result = tokio::time::timeout(wait_timeout, frame_fut).await;
                                 match result {
                                     Err(_elapsed) => {
-                                        // Body read timed out — signal timeout to flush loop.
+                                        // Body read idle timeout — signal timeout to flush loop.
                                         let _ = chunk_tx
                                             .send(ResponseChunk::Error(ProxyError::Timeout))
                                             .await;

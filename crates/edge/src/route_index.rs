@@ -78,8 +78,10 @@ impl RouteIndex {
         let mut host_tries = HashMap::new();
         let mut default_trie = RouteTrie::default();
         let mut upstream_names = Vec::with_capacity(upstreams.len());
+        let mut ordered: Vec<(&String, &Upstream)> = upstreams.iter().collect();
+        ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
 
-        for (order, (name, upstream)) in upstreams.iter().enumerate() {
+        for (order, (name, upstream)) in ordered.into_iter().enumerate() {
             let upstream_idx = upstream_names.len();
             upstream_names.push(name.clone());
 

@@ -82,7 +82,7 @@ pub struct QUICListener {
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
 
     pub connections: HashMap<Arc<[u8]>, QuicConnection>, // KEY: SCID(server connection id)
-    pub cid_routes: HashMap<Vec<u8>, Vec<u8>>,           // KEY: alias SCID, VALUE: primary SCID
+    pub cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>>,       // KEY: alias SCID, VALUE: primary SCID
     pub peer_routes: HashMap<SocketAddr, Arc<[u8]>>,     // KEY: peer address, VALUE: primary SCID
     pub cid_radix: CidRadix,
 }
@@ -95,8 +95,8 @@ pub struct QuicConnection {
 
     pub peer_address: SocketAddr,
     pub last_activity: Instant,
-    pub primary_scid: Vec<u8>,
-    pub routing_scids: HashSet<Vec<u8>>,
+    pub primary_scid: Arc<[u8]>,
+    pub routing_scids: HashSet<Arc<[u8]>>,
     pub packets_since_rotation: u64,
     pub last_scid_rotation: Instant,
 }

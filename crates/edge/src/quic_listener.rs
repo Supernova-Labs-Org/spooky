@@ -321,8 +321,8 @@ impl QUICListener {
             streams: HashMap::new(),
             peer_address: peer,
             last_activity: Instant::now(),
-            primary_scid: scid_bytes.to_vec(),
-            routing_scids: HashSet::from([scid_bytes.to_vec()]),
+            primary_scid: Arc::from(&scid_bytes[..]),
+            routing_scids: HashSet::from([Arc::from(&scid_bytes[..])]),
             packets_since_rotation: 0,
             last_scid_rotation: Instant::now(),
         };
@@ -389,60 +389,71 @@ impl QUICListener {
     }
 
     fn remove_connection_routes(&mut self, connection: &QuicConnection) {
-        self.cid_radix.remove(&connection.primary_scid);
-        self.cid_routes.remove(&connection.primary_scid);
+        self.cid_radix.remove(connection.primary_scid.as_ref());
+        self.cid_routes.remove(connection.primary_scid.as_ref());
         for cid in &connection.routing_scids {
-            self.cid_radix.remove(cid);
-            self.cid_routes.remove(cid);
+            self.cid_radix.remove(cid.as_ref());
+            self.cid_routes.remove(cid.as_ref());
         }
         self.peer_routes.remove(&connection.peer_address);
     }
 
-    fn sync_connection_routes(&mut self, connection: &mut QuicConnection) -> Vec<u8> {
-        let mut active_scids: HashSet<Vec<u8>> = connection
+    fn sync_connection_routes(&mut self, connection: &mut QuicConnection) -> Arc<[u8]> {
+        let mut active_scids: HashSet<Arc<[u8]>> = connection
             .quic
             .source_ids()
-            .map(|cid| cid.as_ref().to_vec())
+            .map(|cid| Arc::from(cid.as_ref()))
             .collect();
 
         if active_scids.is_empty() {
-            active_scids.insert(connection.primary_scid.clone());
+            active_scids.insert(Arc::clone(&connection.primary_scid));
         }
 
-        let active_source_id = connection.quic.source_id().as_ref().to_vec();
+        let active_source_id: Arc<[u8]> = Arc::from(connection.quic.source_id().as_ref());
         let primary = if active_scids.contains(&active_source_id) {
             active_source_id
         } else if active_scids.contains(&connection.primary_scid) {
-            connection.primary_scid.clone()
+            Arc::clone(&connection.primary_scid)
         } else {
             active_scids
                 .iter()
-                .next()
+                .min_by(|left, right| left.as_ref().cmp(right.as_ref()))
                 .cloned()
-                .unwrap_or_else(|| connection.primary_scid.clone())
+                .unwrap_or_else(|| Arc::clone(&connection.primary_scid))
         };
 
-        for retired in connection.routing_scids.difference(&active_scids) {
-            self.cid_radix.remove(retired);
-            self.cid_routes.remove(retired);
+        let retired_scids: Vec<Arc<[u8]>> = connection
+            .routing_scids
+            .difference(&active_scids)
+            .cloned()
+            .collect();
+
+        // Phase 1: make active SCIDs prefix-matchable before retirements.
+        for cid in &active_scids {
+            self.cid_radix.insert(Arc::clone(cid));
         }
 
-        self.cid_routes.remove(&primary);
+        // Phase 2: clear previous aliases for this connection.
+        for cid in &connection.routing_scids {
+            self.cid_routes.remove(cid.as_ref());
+        }
+
+        // Phase 3: install aliases for active non-primary SCIDs.
         for cid in &active_scids {
             if *cid == primary {
                 continue;
             }
-            self.cid_routes.insert(cid.clone(), primary.clone());
+            self.cid_routes
+                .insert(Arc::clone(cid), Arc::clone(&primary));
         }
 
-        // Index active SCIDs directly. The connection is currently removed from
-        // self.connections while being processed, so we cannot rely on key lookup.
-        for cid in &active_scids {
-            self.cid_radix.insert(Arc::<[u8]>::from(cid.as_slice()));
+        // Phase 4: retire stale SCIDs after active set is fully installed.
+        for retired in retired_scids {
+            self.cid_radix.remove(retired.as_ref());
         }
 
         connection.routing_scids = active_scids;
-        connection.primary_scid = primary.clone();
+        connection.primary_scid = Arc::clone(&primary);
         primary
     }
 
@@ -516,8 +527,7 @@ impl QUICListener {
                 conn.peer_address = peer;
                 debug!("Found existing connection for {}", peer);
                 (conn, lookup_key)
-            } else if let Some(primary_vec) = self.cid_routes.get(lookup_key.as_ref()).cloned() {
-                let primary: Arc<[u8]> = Arc::from(primary_vec.as_slice());
+            } else if let Some(primary) = self.cid_routes.get(lookup_key.as_ref()).cloned() {
                 if let Some(mut conn) = self.connections.remove(&primary) {
                     self.peer_routes.remove(&conn.peer_address);
                     conn.peer_address = peer;
@@ -646,15 +656,14 @@ impl QUICListener {
         Self::handle_timeout(&socket, &mut send_buf, &mut connection);
 
         if !connection.quic.is_closed() {
-            let new_primary_vec = self.sync_connection_routes(&mut connection);
-            let new_primary: Arc<[u8]> = Arc::from(new_primary_vec.as_slice());
+            let new_primary = self.sync_connection_routes(&mut connection);
             debug!(
                 "Storing connection with key: {:02x?} (previous: {:02x?})",
                 &new_primary, &current_primary
             );
             self.peer_routes
                 .insert(connection.peer_address, Arc::clone(&new_primary));
-            self.connections.insert(new_primary, connection);
+            self.connections.insert(Arc::clone(&new_primary), connection);
         } else {
             self.remove_connection_routes(&connection);
             debug!("Connection closed, not storing");

@@ -24,7 +24,7 @@ use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use spooky_config::config::Config as SpookyConfig;
 
@@ -116,10 +116,17 @@ impl QUICListener {
         let h2_pool = Arc::new(H2Pool::new(backend_addresses, MAX_INFLIGHT_PER_BACKEND));
 
         let mut upstream_pools = HashMap::new();
+        let mut upstream_inflight = HashMap::new();
+        let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
+        let global_inflight_limit = config.performance.global_inflight_limit.max(1);
         for (name, upstream) in &config.upstream {
             let upstream_pool =
                 UpstreamPool::from_upstream(upstream).expect("Failed to create upstream pool");
             upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
+            upstream_inflight.insert(
+                name.clone(),
+                Arc::new(Semaphore::new(per_upstream_limit)),
+            );
         }
         let routing_index = RouteIndex::from_upstreams(&config.upstream);
 
@@ -135,6 +142,8 @@ impl QUICListener {
             h3_config,
             h2_pool,
             upstream_pools,
+            upstream_inflight,
+            global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
             routing_index,
             metrics,
             draining: false,
@@ -588,6 +597,8 @@ impl QUICListener {
                 &mut connection,
                 Arc::clone(&h2_pool),
                 &self.upstream_pools,
+                &self.upstream_inflight,
+                Arc::clone(&self.global_inflight),
                 &self.routing_index,
                 &self.metrics,
             )
@@ -698,6 +709,8 @@ impl QUICListener {
         connection: &mut QuicConnection,
         h2_pool: Arc<H2Pool>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_inflight: &HashMap<String, Arc<Semaphore>>,
+        global_inflight: Arc<Semaphore>,
         routing_index: &RouteIndex,
         metrics: &Metrics,
     ) -> Result<(), quiche::h3::Error> {
@@ -743,6 +756,9 @@ impl QUICListener {
                         info!("HTTP/3 request {} {}", method, path);
                     }
 
+                    metrics.inc_total();
+                    let request_start = Instant::now();
+
                     // Route lookup — needed to start the H2 request immediately.
                     let resolved = Self::resolve_backend(
                         &method,
@@ -752,9 +768,81 @@ impl QUICListener {
                         routing_index,
                     );
 
-                    let (body_tx, upstream_result_rx, backend_addr, backend_index, upstream_name) =
-                        match resolved {
-                            Ok((upstream_name, addr, idx, _pool)) => {
+                    let (
+                        body_tx,
+                        upstream_result_rx,
+                        backend_addr,
+                        backend_index,
+                        upstream_name,
+                        global_inflight_permit,
+                        upstream_inflight_permit,
+                    ) = match resolved {
+                        Ok((upstream_name, addr, idx, _pool)) => {
+                            let global_permit =
+                                match Arc::clone(&global_inflight).try_acquire_owned() {
+                                    Ok(permit) => permit,
+                                    Err(_) => {
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_simple_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            http::StatusCode::SERVICE_UNAVAILABLE,
+                                            b"overloaded, retry later\n",
+                                        )?;
+                                        continue;
+                                    }
+                                };
+
+                            let upstream_permit =
+                                match upstream_inflight.get(&upstream_name).cloned() {
+                                    Some(semaphore) => match semaphore.try_acquire_owned() {
+                                        Ok(permit) => permit,
+                                        Err(_) => {
+                                            drop(global_permit);
+                                            metrics.inc_failure();
+                                            metrics.inc_overload_shed();
+                                            metrics.record_route(
+                                                &upstream_name,
+                                                request_start.elapsed(),
+                                                RouteOutcome::OverloadShed,
+                                            );
+                                            Self::send_simple_response(
+                                                h3,
+                                                &mut connection.quic,
+                                                stream_id,
+                                                http::StatusCode::SERVICE_UNAVAILABLE,
+                                                b"upstream overloaded, retry later\n",
+                                            )?;
+                                            continue;
+                                        }
+                                    },
+                                    None => {
+                                        drop(global_permit);
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_simple_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            http::StatusCode::SERVICE_UNAVAILABLE,
+                                            b"no upstream throttle configured\n",
+                                        )?;
+                                        continue;
+                                    }
+                                };
+
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
                             let (tx, channel_body) = ChannelBody::channel(8);
@@ -799,12 +887,46 @@ impl QUICListener {
                                     fallback_runtime().spawn(fut);
                                 }
                             }
-                                (Some(tx), Some(result_rx), Some(addr), Some(idx), Some(upstream_name))
+                            (
+                                Some(tx),
+                                Some(result_rx),
+                                Some(addr),
+                                Some(idx),
+                                Some(upstream_name),
+                                Some(global_permit),
+                                Some(upstream_permit),
+                            )
                         }
-                            Err(_) => (None, None, None, None, None),
-                        };
+                        Err(err) => {
+                            metrics.inc_failure();
+                            metrics.record_route(
+                                "unrouted",
+                                request_start.elapsed(),
+                                RouteOutcome::Failure,
+                            );
+                            let (status, body): (http::StatusCode, &[u8]) = match err {
+                                ProxyError::Transport(_) => {
+                                    (http::StatusCode::SERVICE_UNAVAILABLE, b"no upstream available\n")
+                                }
+                                ProxyError::Bridge(_) => {
+                                    (http::StatusCode::BAD_REQUEST, b"invalid request\n")
+                                }
+                                _ => (
+                                    http::StatusCode::INTERNAL_SERVER_ERROR,
+                                    b"internal proxy error\n",
+                                ),
+                            };
+                            Self::send_simple_response(
+                                h3,
+                                &mut connection.quic,
+                                stream_id,
+                                status,
+                                body,
+                            )?;
+                            continue;
+                        }
+                    };
 
-                    metrics.inc_total();
                     connection.streams.insert(
                         stream_id,
                         RequestEnvelope {
@@ -818,7 +940,9 @@ impl QUICListener {
                             backend_addr,
                             backend_index,
                             upstream_name,
-                            start: Instant::now(),
+                            global_inflight_permit,
+                            upstream_inflight_permit,
+                            start: request_start,
                             phase: StreamPhase::ReceivingRequest,
                             request_fin_received: false,
                             upstream_result_rx,

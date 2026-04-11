@@ -20,7 +20,7 @@ use spooky_config::config::Config;
 use spooky_errors::ProxyError;
 use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::cid_radix::CidRadix;
 use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
@@ -68,6 +68,8 @@ pub struct QUICListener {
     pub h3_config: Arc<quiche::h3::Config>,
     pub h2_pool: Arc<H2Pool>,
     pub upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub upstream_inflight: HashMap<String, Arc<Semaphore>>,
+    pub global_inflight: Arc<Semaphore>,
     pub(crate) routing_index: route_index::RouteIndex,
     pub metrics: Arc<Metrics>,
     pub draining: bool,
@@ -138,6 +140,8 @@ pub struct RequestEnvelope {
     pub backend_addr: Option<String>,
     pub backend_index: Option<usize>,
     pub upstream_name: Option<String>,
+    pub global_inflight_permit: Option<OwnedSemaphorePermit>,
+    pub upstream_inflight_permit: Option<OwnedSemaphorePermit>,
     pub start: Instant,
 
     /// Current lifecycle phase of this stream.

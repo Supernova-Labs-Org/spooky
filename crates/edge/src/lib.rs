@@ -1,7 +1,6 @@
 use bytes::Bytes;
-use smallvec::SmallVec;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     net::UdpSocket,
     pin::Pin,
@@ -132,11 +131,12 @@ pub struct RequestEnvelope {
     pub method: String,
     pub path: String,
     pub authority: Option<String>,
-    pub headers: SmallVec<[(Vec<u8>, Vec<u8>); 16]>,
     /// Sender half of the body channel.  Dropping it signals end-of-body to hyper.
     pub body_tx: Option<mpsc::Sender<Bytes>>,
     /// Body chunks that arrived before the channel had capacity.
-    pub body_buf: Vec<Bytes>,
+    pub body_buf: VecDeque<Bytes>,
+    /// Current bytes held in `body_buf`.
+    pub body_buf_bytes: usize,
     /// Total body bytes received on this stream (buffered + already forwarded).
     pub body_bytes_received: usize,
     /// Resolved backend address and index (for health marking on response).

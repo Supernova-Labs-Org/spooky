@@ -24,6 +24,13 @@ pub const DEFAULT_SCID_LEN_BYTES: usize = 16;
 pub const RESET_TOKEN_LEN_BYTES: usize = 16;
 pub const MIN_SCID_LEN_BYTES: usize = 8;
 
+// Queue/backpressure controls for streaming request/response bodies.
+pub const REQUEST_CHUNK_CHANNEL_CAPACITY: usize = 8;
+pub const REQUEST_CHUNK_BYTES_LIMIT: usize = 16 * 1024;
+pub const REQUEST_BUFFERED_CHUNK_BYTES_LIMIT: usize = MAX_REQUEST_BODY_BYTES;
+pub const RESPONSE_CHUNK_CHANNEL_CAPACITY: usize = 16;
+pub const RESPONSE_CHUNK_BYTES_LIMIT: usize = 16 * 1024;
+
 pub const SCID_ROTATION_INTERVAL_SECS: u64 = 60;
 pub const SCID_ROTATION_PACKET_THRESHOLD: u64 = 8;
 

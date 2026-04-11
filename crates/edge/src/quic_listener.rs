@@ -24,7 +24,11 @@ use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{
+    Semaphore, mpsc,
+    mpsc::error::{TryRecvError, TrySendError},
+    oneshot,
+};
 
 use spooky_config::config::Config as SpookyConfig;
 
@@ -36,8 +40,10 @@ use crate::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
         MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS,
         QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
-        QUIC_INITIAL_STREAM_DATA, RESET_TOKEN_LEN_BYTES, SCID_ROTATION_PACKET_THRESHOLD,
-        UDP_READ_TIMEOUT_MS, drain_timeout, scid_rotation_interval,
+        QUIC_INITIAL_STREAM_DATA, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT,
+        REQUEST_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES,
+        RESPONSE_CHUNK_BYTES_LIMIT, RESPONSE_CHUNK_CHANNEL_CAPACITY,
+        SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS, drain_timeout, scid_rotation_interval,
     },
     outcome_from_status,
     route_index::RouteIndex,
@@ -747,6 +753,61 @@ impl QUICListener {
         }
     }
 
+    fn push_request_chunk(req: &mut RequestEnvelope, chunk: Bytes) -> Result<(), ()> {
+        let next = req.body_buf_bytes.saturating_add(chunk.len());
+        if next > REQUEST_BUFFERED_CHUNK_BYTES_LIMIT {
+            return Err(());
+        }
+        req.body_buf_bytes = next;
+        req.body_buf.push_back(chunk);
+        Ok(())
+    }
+
+    fn enqueue_request_chunk(req: &mut RequestEnvelope, chunk: Bytes) -> Result<(), ()> {
+        if let Some(tx) = &req.body_tx {
+            match tx.try_send(chunk) {
+                Ok(()) => Ok(()),
+                Err(TrySendError::Full(chunk)) => Self::push_request_chunk(req, chunk),
+                Err(TrySendError::Closed(_chunk)) => {
+                    req.body_tx = None;
+                    req.body_buf.clear();
+                    req.body_buf_bytes = 0;
+                    Ok(())
+                }
+            }
+        } else {
+            Self::push_request_chunk(req, chunk)
+        }
+    }
+
+    fn flush_request_buffer(req: &mut RequestEnvelope) {
+        let Some(tx) = req.body_tx.as_ref() else {
+            return;
+        };
+
+        loop {
+            let Some(chunk) = req.body_buf.pop_front() else {
+                break;
+            };
+            let len = chunk.len();
+            match tx.try_send(chunk) {
+                Ok(()) => {
+                    req.body_buf_bytes = req.body_buf_bytes.saturating_sub(len);
+                }
+                Err(TrySendError::Full(chunk)) => {
+                    req.body_buf.push_front(chunk);
+                    break;
+                }
+                Err(TrySendError::Closed(_chunk)) => {
+                    req.body_buf.clear();
+                    req.body_buf_bytes = 0;
+                    req.body_tx = None;
+                    break;
+                }
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn handle_h3(
         connection: &mut QuicConnection,
@@ -891,13 +952,14 @@ impl QUICListener {
 
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
-                            let (tx, channel_body) = ChannelBody::channel(8);
+                            let (tx, channel_body) =
+                                ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
                             let boxed = channel_body.boxed();
                             let h2 = h2_pool.clone();
-                            let req_headers = headers.clone();
                             let req_method = method.clone();
                             let req_path = path.clone();
                             let fwd_addr = addr.clone();
+                            let request_headers = headers;
                             let (result_tx, result_rx) = oneshot::channel::<ForwardResult>();
                             let fut = async move {
                                 let result = async {
@@ -905,7 +967,7 @@ impl QUICListener {
                                         &fwd_addr,
                                         &req_method,
                                         &req_path,
-                                        &req_headers,
+                                        &request_headers,
                                         boxed,
                                         None,
                                     )
@@ -987,9 +1049,9 @@ impl QUICListener {
                             method,
                             path,
                             authority,
-                            headers,
                             body_tx,
-                            body_buf: Vec::new(),
+                            body_buf: std::collections::VecDeque::new(),
+                            body_buf_bytes: 0,
                             body_bytes_received: 0,
                             backend_addr,
                             backend_index,
@@ -1008,6 +1070,7 @@ impl QUICListener {
                 Ok((stream_id, quiche::h3::Event::Data)) => loop {
                     match h3.recv_body(&mut connection.quic, stream_id, &mut body_buf) {
                         Ok(read) => {
+                            let mut shed_due_to_buffer_pressure = false;
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
                                 // Enforce cap on total bytes received for the stream,
                                 // including chunks already forwarded to the H2 body channel.
@@ -1024,17 +1087,35 @@ impl QUICListener {
                                     break;
                                 }
                                 req.body_bytes_received = next_total;
-                                let chunk = Bytes::copy_from_slice(&body_buf[..read]);
-                                if let Some(tx) = &req.body_tx {
-                                    // Non-blocking send: if the channel is full, fall
-                                    // back to buffering so the poll loop is not stalled.
-                                    match tx.try_send(chunk.clone()) {
-                                        Ok(_) => {}
-                                        Err(_) => req.body_buf.push(chunk),
+
+                                for chunk_slice in body_buf[..read].chunks(REQUEST_CHUNK_BYTES_LIMIT)
+                                {
+                                    let chunk = Bytes::copy_from_slice(chunk_slice);
+                                    if Self::enqueue_request_chunk(req, chunk).is_err() {
+                                        shed_due_to_buffer_pressure = true;
+                                        break;
                                     }
-                                } else {
-                                    req.body_buf.push(chunk);
                                 }
+                            }
+                            if shed_due_to_buffer_pressure
+                                && let Some(req) = connection.streams.remove(&stream_id)
+                            {
+                                metrics.inc_failure();
+                                metrics.inc_overload_shed();
+                                let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
+                                metrics.record_route(
+                                    route_label,
+                                    req.start.elapsed(),
+                                    RouteOutcome::OverloadShed,
+                                );
+                                Self::send_simple_response(
+                                    h3,
+                                    &mut connection.quic,
+                                    stream_id,
+                                    http::StatusCode::SERVICE_UNAVAILABLE,
+                                    b"request body backpressure overload\n",
+                                )?;
+                                break;
                             }
                         }
                         Err(quiche::h3::Error::Done) => break,
@@ -1045,19 +1126,7 @@ impl QUICListener {
                     if let Some(req) = connection.streams.get_mut(&stream_id) {
                         req.request_fin_received = true;
 
-                        // Non-blocking body flush: push buffered chunks into the
-                        // channel with try_send.  Any that don't fit stay in body_buf
-                        // and will be retried on the next poll iteration.
-                        if let Some(tx) = &req.body_tx {
-                            let buf = std::mem::take(&mut req.body_buf);
-                            let mut overflow = Vec::new();
-                            for chunk in buf {
-                                if tx.try_send(chunk.clone()).is_err() {
-                                    overflow.push(chunk);
-                                }
-                            }
-                            req.body_buf = overflow;
-                        }
+                        Self::flush_request_buffer(req);
                         // If buffer is now empty, drop body_tx to signal end-of-body.
                         if req.body_buf.is_empty() {
                             req.body_tx = None;
@@ -1126,16 +1195,7 @@ impl QUICListener {
         for stream_id in stream_ids {
             // ── 1 & 2: request body drain ────────────────────────────────────
             if let Some(req) = streams.get_mut(&stream_id) {
-                if let Some(tx) = &req.body_tx {
-                    let buf = std::mem::take(&mut req.body_buf);
-                    let mut overflow = Vec::new();
-                    for chunk in buf {
-                        if tx.try_send(chunk.clone()).is_err() {
-                            overflow.push(chunk);
-                        }
-                    }
-                    req.body_buf = overflow;
-                }
+                Self::flush_request_buffer(req);
                 if req.request_fin_received && req.body_buf.is_empty() {
                     req.body_tx = None; // signals EOF to the upstream H2 task
                 }
@@ -1199,7 +1259,8 @@ impl QUICListener {
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
                         // Enforces both body idle and total deadlines so slow upstream bodies
                         // do not keep streams open indefinitely.
-                        let (chunk_tx, chunk_rx) = mpsc::channel::<ResponseChunk>(16);
+                        let (chunk_tx, chunk_rx) =
+                            mpsc::channel::<ResponseChunk>(RESPONSE_CHUNK_CHANNEL_CAPACITY);
                         let fail_tx = chunk_tx.clone();
                         let total_deadline =
                             tokio::time::Instant::now() + backend_body_total_timeout;
@@ -1227,13 +1288,22 @@ impl QUICListener {
                                         return;
                                     }
                                     Ok(Some(Ok(f))) => {
-                                        if let Ok(data) = f.into_data()
-                                            && chunk_tx
-                                                .send(ResponseChunk::Data(data))
-                                                .await
-                                                .is_err()
-                                        {
-                                            return;
+                                        if let Ok(data) = f.into_data() {
+                                            for start in (0..data.len())
+                                                .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                            {
+                                                let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                    .min(data.len());
+                                                if chunk_tx
+                                                    .send(ResponseChunk::Data(
+                                                        data.slice(start..end),
+                                                    ))
+                                                    .await
+                                                    .is_err()
+                                                {
+                                                    return;
+                                                }
+                                            }
                                         }
                                         // skip trailers / other frame types
                                     }
@@ -1354,7 +1424,12 @@ impl QUICListener {
                         Some(c) => c,
                         None => match rx.try_recv() {
                             Ok(c) => c,
-                            Err(_) => break, // Empty or closed — nothing to flush
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => {
+                                req.phase = StreamPhase::Failed;
+                                terminal = true;
+                                break;
+                            }
                         },
                     };
                     match chunk {

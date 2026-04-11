@@ -9,8 +9,8 @@ use crate::default::{
     get_default_protocol, get_default_success_threshold, get_default_version, get_default_weight,
     observe_default_address, observe_default_metrics_path, observe_default_port,
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
-    perf_default_backend_timeout_ms, perf_default_global_inflight_limit,
-    perf_default_control_plane_threads, perf_default_per_upstream_inflight_limit,
+    perf_default_backend_timeout_ms, perf_default_control_plane_threads,
+    perf_default_global_inflight_limit, perf_default_per_upstream_inflight_limit,
     perf_default_pin_workers, perf_default_reuseport, perf_default_worker_threads,
 };
 

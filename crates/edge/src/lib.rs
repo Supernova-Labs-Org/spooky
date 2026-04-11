@@ -61,6 +61,16 @@ pub mod constants;
 pub mod quic_listener;
 mod route_index;
 
+pub use quic_listener::configure_async_runtime;
+
+pub struct SharedRuntimeState {
+    pub(crate) h2_pool: Arc<H2Pool>,
+    pub(crate) upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub(crate) upstream_inflight: HashMap<String, Arc<Semaphore>>,
+    pub(crate) global_inflight: Arc<Semaphore>,
+    pub(crate) metrics: Arc<Metrics>,
+}
+
 pub struct QUICListener {
     pub socket: UdpSocket,
     pub config: Config,

@@ -1,7 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
-    net::UdpSocket,
-    sync::{Arc, Mutex, OnceLock},
+    future::Future,
+    net::{ToSocketAddrs, UdpSocket},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -14,11 +18,12 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
 use smallvec::SmallVec;
+use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::build_h2_request;
 use spooky_errors::ProxyError;
 use spooky_lb::{HealthTransition, UpstreamPool};
@@ -34,7 +39,7 @@ use spooky_config::config::Config as SpookyConfig;
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
-    ResponseChunk, RouteOutcome, StreamPhase,
+    ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
@@ -60,20 +65,196 @@ type ResolvedBackend = (String, String, usize, Arc<Mutex<UpstreamPool>>);
 
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
-        let socket_address = format!("{}:{}", &config.listen.address, &config.listen.port);
+        let shared_state = Arc::new(Self::build_shared_state(&config)?);
+        Self::spawn_control_plane_tasks(&config, &shared_state);
+        let socket = Self::bind_socket(&config, false)?;
+        Self::new_with_socket_and_shared_state(config, socket, shared_state)
+    }
 
-        let socket = UdpSocket::bind(socket_address.as_str()).map_err(|err| {
-            ProxyError::Transport(format!(
-                "failed to bind UDP socket on '{}': {}",
-                socket_address, err
-            ))
-        })?;
+    pub fn build_shared_state(config: &SpookyConfig) -> Result<SharedRuntimeState, ProxyError> {
+        let worker_threads = config.performance.worker_threads.max(1);
+        let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
+        let global_inflight_limit = config.performance.global_inflight_limit.max(1);
+        let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
+
+        info!(
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={}",
+            worker_threads,
+            config.performance.control_plane_threads.max(1),
+            config.performance.reuseport,
+            config.performance.pin_workers,
+            global_inflight_limit,
+            per_upstream_limit,
+            config.performance.backend_timeout_ms,
+            config.performance.backend_body_idle_timeout_ms,
+            config.performance.backend_body_total_timeout_ms
+        );
+
+        let backend_addresses = config
+            .upstream
+            .values()
+            .flat_map(|upstream| {
+                upstream
+                    .backends
+                    .iter()
+                    .map(|backend| backend.address.clone())
+            })
+            .collect::<Vec<_>>();
+
+        let h2_pool = Arc::new(H2Pool::new(backend_addresses, max_inflight_per_backend));
+        let mut upstream_pools = HashMap::new();
+        let mut upstream_inflight = HashMap::new();
+
+        for (name, upstream) in &config.upstream {
+            let upstream_pool = UpstreamPool::from_upstream(upstream).map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to create upstream pool '{}': {}",
+                    name, err
+                ))
+            })?;
+            upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
+            upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
+        }
+
+        Ok(SharedRuntimeState {
+            h2_pool,
+            upstream_pools,
+            upstream_inflight,
+            global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
+            metrics: Arc::new(Metrics::default()),
+        })
+    }
+
+    pub fn spawn_control_plane_tasks(config: &SpookyConfig, shared_state: &SharedRuntimeState) {
+        Self::spawn_health_checks(
+            shared_state.upstream_pools.clone(),
+            Arc::clone(&shared_state.h2_pool),
+        );
+        Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
+    }
+
+    pub fn bind_reuseport_sockets(
+        config: &SpookyConfig,
+        workers: usize,
+    ) -> Result<Vec<UdpSocket>, ProxyError> {
+        let workers = workers.max(1);
+        let mut sockets = Vec::with_capacity(workers);
+        for _ in 0..workers {
+            sockets.push(Self::bind_socket(config, true)?);
+        }
+        Ok(sockets)
+    }
+
+    pub fn bind_socket(config: &SpookyConfig, reuse_port: bool) -> Result<UdpSocket, ProxyError> {
+        let bind_addr = Self::resolve_bind_addr(config)?;
+        let socket = Self::create_udp_socket(bind_addr, reuse_port)?;
         socket
             .set_read_timeout(Some(Duration::from_millis(UDP_READ_TIMEOUT_MS)))
             .map_err(|err| {
                 ProxyError::Transport(format!("failed to set UDP read timeout: {}", err))
             })?;
 
+        Ok(socket)
+    }
+
+    pub fn new_with_socket_and_shared_state(
+        config: SpookyConfig,
+        socket: UdpSocket,
+        shared_state: Arc<SharedRuntimeState>,
+    ) -> Result<Self, ProxyError> {
+        let local_addr = socket.local_addr().map_err(|err| {
+            ProxyError::Transport(format!("failed to read UDP socket local address: {}", err))
+        })?;
+        debug!("Listening on {}", local_addr);
+
+        let quic_config = Self::build_quic_config(&config)?;
+        let h3_config =
+            Arc::new(quiche::h3::Config::new().map_err(|err| {
+                ProxyError::Transport(format!("failed to create h3 config: {err}"))
+            })?);
+        let routing_index = RouteIndex::from_upstreams(&config.upstream);
+        let backend_timeout = Duration::from_millis(config.performance.backend_timeout_ms);
+        let backend_body_idle_timeout =
+            Duration::from_millis(config.performance.backend_body_idle_timeout_ms);
+        let backend_body_total_timeout =
+            Duration::from_millis(config.performance.backend_body_total_timeout_ms);
+
+        Ok(Self {
+            socket,
+            config,
+            quic_config,
+            h3_config,
+            h2_pool: Arc::clone(&shared_state.h2_pool),
+            upstream_pools: shared_state.upstream_pools.clone(),
+            upstream_inflight: shared_state.upstream_inflight.clone(),
+            global_inflight: Arc::clone(&shared_state.global_inflight),
+            routing_index,
+            metrics: Arc::clone(&shared_state.metrics),
+            draining: false,
+            drain_start: None,
+            backend_timeout,
+            backend_body_idle_timeout,
+            backend_body_total_timeout,
+            recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
+            send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
+            connections: HashMap::new(),
+            cid_routes: HashMap::new(),
+            peer_routes: HashMap::new(),
+            cid_radix: CidRadix::new(),
+        })
+    }
+
+    fn resolve_bind_addr(config: &SpookyConfig) -> Result<SocketAddr, ProxyError> {
+        let socket_address = format!("{}:{}", config.listen.address, config.listen.port);
+        socket_address
+            .to_socket_addrs()
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to resolve listen address '{}': {}",
+                    socket_address, err
+                ))
+            })?
+            .next()
+            .ok_or_else(|| {
+                ProxyError::Transport(format!("no socket addresses found for '{socket_address}'"))
+            })
+    }
+
+    fn create_udp_socket(bind_addr: SocketAddr, reuse_port: bool) -> Result<UdpSocket, ProxyError> {
+        let domain = if bind_addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP)).map_err(|err| {
+            ProxyError::Transport(format!("failed to create UDP socket: {}", err))
+        })?;
+        socket
+            .set_reuse_address(true)
+            .map_err(|err| ProxyError::Transport(format!("failed to set SO_REUSEADDR: {}", err)))?;
+
+        #[cfg(all(
+            unix,
+            not(target_os = "solaris"),
+            not(target_os = "illumos"),
+            not(target_os = "cygwin")
+        ))]
+        {
+            socket.set_reuse_port(reuse_port).map_err(|err| {
+                ProxyError::Transport(format!("failed to set SO_REUSEPORT: {}", err))
+            })?;
+        }
+
+        socket.bind(&bind_addr.into()).map_err(|err| {
+            ProxyError::Transport(format!(
+                "failed to bind UDP socket on '{}': {}",
+                bind_addr, err
+            ))
+        })?;
+        Ok(socket.into())
+    }
+
+    fn build_quic_config(config: &SpookyConfig) -> Result<Config, ProxyError> {
         let mut quic_config = Config::new(quiche::PROTOCOL_VERSION)
             .map_err(|err| ProxyError::Transport(format!("failed to create QUIC config: {err}")))?;
 
@@ -114,87 +295,7 @@ impl QUICListener {
         quic_config.set_disable_active_migration(true);
         quic_config.verify_peer(false);
 
-        // CRITICAL FIX: Explicitly disable 0-RTT/early data
-        // This prevents clients from attempting 0-RTT that we can't handle
-
-        debug!("Listening on {}", socket_address);
-        let worker_threads = config.performance.worker_threads.max(1);
-        let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
-        let global_inflight_limit = config.performance.global_inflight_limit.max(1);
-        let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
-        info!(
-            "Performance profile: worker_threads={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={}",
-            worker_threads,
-            global_inflight_limit,
-            per_upstream_limit,
-            config.performance.backend_timeout_ms,
-            config.performance.backend_body_idle_timeout_ms,
-            config.performance.backend_body_total_timeout_ms
-        );
-
-        let h3_config =
-            Arc::new(quiche::h3::Config::new().map_err(|err| {
-                ProxyError::Transport(format!("failed to create h3 config: {err}"))
-            })?);
-        let backend_addresses = config
-            .upstream
-            .values()
-            .flat_map(|upstream| {
-                upstream
-                    .backends
-                    .iter()
-                    .map(|backend| backend.address.clone())
-            })
-            .collect::<Vec<_>>();
-        let h2_pool = Arc::new(H2Pool::new(backend_addresses, max_inflight_per_backend));
-
-        let mut upstream_pools = HashMap::new();
-        let mut upstream_inflight = HashMap::new();
-        let backend_timeout = Duration::from_millis(config.performance.backend_timeout_ms);
-        let backend_body_idle_timeout =
-            Duration::from_millis(config.performance.backend_body_idle_timeout_ms);
-        let backend_body_total_timeout =
-            Duration::from_millis(config.performance.backend_body_total_timeout_ms);
-        for (name, upstream) in &config.upstream {
-            let upstream_pool = UpstreamPool::from_upstream(upstream).map_err(|err| {
-                ProxyError::Transport(format!(
-                    "failed to create upstream pool '{}': {}",
-                    name, err
-                ))
-            })?;
-            upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
-            upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
-        }
-        let routing_index = RouteIndex::from_upstreams(&config.upstream);
-
-        let metrics = Arc::new(Metrics::default());
-
-        Self::spawn_health_checks(upstream_pools.clone(), h2_pool.clone());
-        Self::spawn_metrics_endpoint(&config, Arc::clone(&metrics));
-
-        Ok(Self {
-            socket,
-            config,
-            quic_config,
-            h3_config,
-            h2_pool,
-            upstream_pools,
-            upstream_inflight,
-            global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
-            routing_index,
-            metrics,
-            draining: false,
-            drain_start: None,
-            backend_timeout,
-            backend_body_idle_timeout,
-            backend_body_total_timeout,
-            recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
-            send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
-            connections: HashMap::new(),
-            cid_routes: HashMap::new(),
-            peer_routes: HashMap::new(),
-            cid_radix: CidRadix::new(),
-        })
+        Ok(quic_config)
     }
 
     pub fn start_draining(&mut self) {
@@ -226,18 +327,10 @@ impl QUICListener {
     }
 
     fn close_all(&mut self) {
-        let socket = match self.socket.try_clone() {
-            Ok(sock) => sock,
-            Err(e) => {
-                error!("Failed to clone UDP socket: {:?}", e);
-                return;
-            }
-        };
-
         let mut send_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
         for connection in self.connections.values_mut() {
             let _ = connection.quic.close(true, 0x0, b"draining");
-            Self::flush_send(&socket, &mut send_buf, connection);
+            Self::flush_send(&self.socket, &mut send_buf, connection);
         }
 
         self.connections.clear();
@@ -484,14 +577,6 @@ impl QUICListener {
             Err(_) => return,
         };
 
-        let socket = match self.socket.try_clone() {
-            Ok(sock) => sock,
-            Err(e) => {
-                error!("Failed to clone UDP socket: {:?}", e);
-                return;
-            }
-        };
-
         // let mut recv_data = self.recv_buf[..len].to_vec();
         let mut recv_data = BytesMut::from(&self.recv_buf[..len]);
 
@@ -513,7 +598,7 @@ impl QUICListener {
                     }
                 };
 
-            if let Err(e) = socket.send_to(&self.send_buf[..len], peer) {
+            if let Err(e) = self.socket.send_to(&self.send_buf[..len], peer) {
                 error!("Failed to send version negotiation: {:?}", e);
             }
             return;
@@ -658,8 +743,8 @@ impl QUICListener {
 
         let mut send_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
-        Self::flush_send(&socket, &mut send_buf, &mut connection);
-        Self::handle_timeout(&socket, &mut send_buf, &mut connection);
+        Self::flush_send(&self.socket, &mut send_buf, &mut connection);
+        Self::handle_timeout(&self.socket, &mut send_buf, &mut connection);
 
         if !connection.quic.is_closed() {
             let new_primary = self.sync_connection_routes(&mut connection);
@@ -682,14 +767,6 @@ impl QUICListener {
             return;
         }
 
-        let socket = match self.socket.try_clone() {
-            Ok(sock) => sock,
-            Err(e) => {
-                error!("Failed to clone UDP socket: {:?}", e);
-                return;
-            }
-        };
-
         let mut send_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
         let mut to_remove = Vec::new();
 
@@ -707,7 +784,7 @@ impl QUICListener {
             if connection.last_activity.elapsed() >= timeout {
                 connection.quic.on_timeout();
                 connection.last_activity = Instant::now();
-                Self::flush_send(&socket, &mut send_buf, connection);
+                Self::flush_send(&self.socket, &mut send_buf, connection);
             }
 
             if connection.quic.is_closed() {
@@ -730,7 +807,7 @@ impl QUICListener {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
                 }
                 connection.h3 = Some(h3);
-                Self::flush_send(&socket, &mut send_buf, connection);
+                Self::flush_send(&self.socket, &mut send_buf, connection);
             }
         }
 
@@ -988,20 +1065,8 @@ impl QUICListener {
                                 // Ignore send error: receiver dropped means the stream was reset.
                                 let _ = result_tx.send(result);
                             };
-                            match Handle::try_current() {
-                                Ok(handle) => {
-                                    handle.spawn(fut);
-                                }
-                                Err(err) => {
-                                    if let Some(rt) = fallback_runtime() {
-                                        rt.spawn(fut);
-                                    } else {
-                                        error!(
-                                            "dropping upstream task: no runtime available ({})",
-                                            err
-                                        );
-                                    }
-                                }
+                            if !spawn_async_task(fut, "upstream") {
+                                error!("dropping upstream task: no runtime available");
                             }
                             (
                                 Some(tx),
@@ -1325,23 +1390,7 @@ impl QUICListener {
                                 }
                             }
                         };
-                        let mut spawned = true;
-                        match Handle::try_current() {
-                            Ok(h) => {
-                                h.spawn(fut);
-                            }
-                            Err(err) => {
-                                if let Some(rt) = fallback_runtime() {
-                                    rt.spawn(fut);
-                                } else {
-                                    error!(
-                                        "dropping body pump task: no runtime available ({})",
-                                        err
-                                    );
-                                    spawned = false;
-                                }
-                            }
-                        }
+                        let spawned = spawn_async_task(fut, "body-pump");
                         if !spawned {
                             let _ = fail_tx.try_send(ResponseChunk::Error(ProxyError::Transport(
                                 "runtime unavailable".into(),
@@ -1767,10 +1816,10 @@ impl QUICListener {
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
         let metrics_path = endpoint.path.clone();
 
-        let handle = match Handle::try_current() {
-            Ok(h) => h,
-            Err(err) => {
-                error!("Metrics endpoint disabled (no Tokio runtime): {}", err);
+        let handle = match runtime_handle() {
+            Some(handle) => handle,
+            None => {
+                error!("Metrics endpoint disabled (no Tokio runtime available)");
                 return;
             }
         };
@@ -1894,9 +1943,9 @@ impl QUICListener {
             all_entries
         };
 
-        let handle = match Handle::try_current() {
-            Ok(handle) => handle,
-            Err(_) => {
+        let handle = match runtime_handle() {
+            Some(handle) => handle,
+            None => {
                 error!("Health checks disabled: no Tokio runtime available");
                 return;
             }
@@ -1954,16 +2003,50 @@ impl QUICListener {
     }
 }
 
+pub fn configure_async_runtime(worker_threads: usize) {
+    let threads = worker_threads.max(1);
+    if FALLBACK_RT.get().is_some() {
+        warn!(
+            "async runtime already initialized; ignoring new worker_threads={}",
+            threads
+        );
+        return;
+    }
+    FALLBACK_RT_THREADS.store(threads, Ordering::Relaxed);
+}
+
+fn runtime_handle() -> Option<Handle> {
+    if let Ok(handle) = Handle::try_current() {
+        return Some(handle);
+    }
+    fallback_runtime().map(|rt| rt.handle().clone())
+}
+
+fn spawn_async_task<F>(fut: F, _task_name: &str) -> bool
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    if let Some(handle) = runtime_handle() {
+        handle.spawn(fut);
+        true
+    } else {
+        false
+    }
+}
+
 fn fallback_runtime() -> Option<&'static tokio::runtime::Runtime> {
-    static FALLBACK_RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
     FALLBACK_RT
         .get_or_init(|| {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
-                .worker_threads(2)
+                .worker_threads(FALLBACK_RT_THREADS.load(Ordering::Relaxed))
                 .thread_name("spooky-edge-fallback-rt")
                 .build()
                 .ok()
         })
         .as_ref()
 }
+
+static FALLBACK_RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
+static FALLBACK_RT_THREADS: AtomicUsize = AtomicUsize::new(2);

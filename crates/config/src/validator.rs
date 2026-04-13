@@ -310,10 +310,10 @@ pub fn validate(config: &Config) -> bool {
             }
 
             // Validate weight
-            if backend.weight == 0 {
+            if backend.weight == 0 || backend.weight > 1000 {
                 error!(
-                    "Backend '{}' in upstream '{}' has invalid weight (0)",
-                    backend.id, upstream_name
+                    "Backend '{}' in upstream '{}' has invalid weight {} (must be 1–1000)",
+                    backend.id, upstream_name, backend.weight
                 );
                 return false;
             }

@@ -113,21 +113,31 @@ Spooky uses a modular architecture with clear separation of concerns:
 
 ```mermaid
 flowchart LR
-    client["HTTP/3<br/>Client"] -->|QUIC/TLS| quic
+    client["HTTP/3<br/>Clients"] -->|UDP/QUIC + TLS| ingress
 
-    subgraph edge["Spooky Edge"]
+    subgraph edge["Spooky Edge Runtime"]
         direction TB
-        quic["QUIC Listener<br/>(quiche)"] --> router["Router"] --> pool["HTTP/2 Pool"]
+        ingress["Ingress Sockets<br/>SO_REUSEPORT x N"]
+
+        subgraph data_plane["Data Plane"]
+            direction TB
+            workers["Worker Threads<br/>QUIC + HTTP/3 Stream Processing"] --> route["Route Index (Trie)<br/>Deterministic Tie-Breaking"]
+            route --> admission["Admission Control<br/>Global -> Upstream -> Backend"]
+            admission --> bridge["H3 -> H2 Bridge<br/>Copy-Light Header Path"]
+            bridge --> pool["HTTP/2 Pool<br/>Connection Reuse + Bounded Inflight"]
+        end
+
+        subgraph control_plane["Control Plane"]
+            direction TB
+            health["Active Health Checks"]
+            metrics["Metrics Endpoint<br/>Route SLOs (P50/P95/P99)"]
+        end
     end
 
-    pool -->|HTTP/2| backend["Backend<br/>Servers"]
-
-    quic -.- quic_note["Connection management<br/>Stream multiplexing<br/>Protocol bridging"]
-    router -.- router_note["Path/host matching<br/>Upstream selection<br/>Load balancing"]
-    pool -.- pool_note["Connection pooling<br/>Request forwarding<br/>Health checking"]
-
-    classDef note fill:#F8FAFC,stroke:#94A3B8,stroke-width:1px,stroke-dasharray: 5 3,color:#334155;
-    class quic_note,router_note,pool_note note;
+    ingress --> workers
+    pool -->|HTTP/2| backend["Backend Servers"]
+    health -. health state .-> pool
+    workers -. route/outcome metrics .-> metrics
 ```
 
 ### Components

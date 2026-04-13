@@ -22,14 +22,6 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    // Check user (only root allowed)
-    let uid = unsafe { libc::getuid() };
-
-    if uid != 0 {
-        eprintln!("This program must be run as root.");
-        std::process::exit(1);
-    }
-
     // Parse CLI arguments
     let cli = Cli::parse();
 
@@ -45,6 +37,16 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Require root only when binding a privileged port (< 1024).
+    let uid = unsafe { libc::getuid() };
+    if uid != 0 && config_yaml.listen.port < 1024 {
+        eprintln!(
+            "Binding port {} requires root privileges.",
+            config_yaml.listen.port
+        );
+        std::process::exit(1);
+    }
 
     // Initialize the Logger
     spooky_utils::logger::init_logger(

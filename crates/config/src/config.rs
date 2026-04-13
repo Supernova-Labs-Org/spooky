@@ -11,7 +11,8 @@ use crate::default::{
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_timeout_ms, perf_default_control_plane_threads,
     perf_default_global_inflight_limit, perf_default_per_upstream_inflight_limit,
-    perf_default_pin_workers, perf_default_reuseport, perf_default_worker_threads,
+    perf_default_pin_workers, perf_default_reuseport, perf_default_udp_recv_buffer_bytes,
+    perf_default_udp_send_buffer_bytes, perf_default_worker_threads,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -169,6 +170,12 @@ pub struct Performance {
 
     #[serde(default = "perf_default_backend_body_total_timeout_ms")]
     pub backend_body_total_timeout_ms: u64,
+
+    #[serde(default = "perf_default_udp_recv_buffer_bytes")]
+    pub udp_recv_buffer_bytes: usize,
+
+    #[serde(default = "perf_default_udp_send_buffer_bytes")]
+    pub udp_send_buffer_bytes: usize,
 }
 
 impl Default for Performance {
@@ -183,6 +190,8 @@ impl Default for Performance {
             backend_timeout_ms: perf_default_backend_timeout_ms(),
             backend_body_idle_timeout_ms: perf_default_backend_body_idle_timeout_ms(),
             backend_body_total_timeout_ms: perf_default_backend_body_total_timeout_ms(),
+            udp_recv_buffer_bytes: perf_default_udp_recv_buffer_bytes(),
+            udp_send_buffer_bytes: perf_default_udp_send_buffer_bytes(),
         }
     }
 }

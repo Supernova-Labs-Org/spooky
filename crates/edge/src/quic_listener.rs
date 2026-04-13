@@ -78,7 +78,7 @@ impl QUICListener {
         let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
 
         info!(
-            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={}",
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={}",
             worker_threads,
             config.performance.control_plane_threads.max(1),
             config.performance.reuseport,
@@ -87,7 +87,9 @@ impl QUICListener {
             per_upstream_limit,
             config.performance.backend_timeout_ms,
             config.performance.backend_body_idle_timeout_ms,
-            config.performance.backend_body_total_timeout_ms
+            config.performance.backend_body_total_timeout_ms,
+            config.performance.udp_recv_buffer_bytes,
+            config.performance.udp_send_buffer_bytes
         );
 
         let backend_addresses = config
@@ -147,7 +149,12 @@ impl QUICListener {
 
     pub fn bind_socket(config: &SpookyConfig, reuse_port: bool) -> Result<UdpSocket, ProxyError> {
         let bind_addr = Self::resolve_bind_addr(config)?;
-        let socket = Self::create_udp_socket(bind_addr, reuse_port)?;
+        let socket = Self::create_udp_socket(
+            bind_addr,
+            reuse_port,
+            config.performance.udp_recv_buffer_bytes,
+            config.performance.udp_send_buffer_bytes,
+        )?;
         socket
             .set_read_timeout(Some(Duration::from_millis(UDP_READ_TIMEOUT_MS)))
             .map_err(|err| {
@@ -220,7 +227,12 @@ impl QUICListener {
             })
     }
 
-    fn create_udp_socket(bind_addr: SocketAddr, reuse_port: bool) -> Result<UdpSocket, ProxyError> {
+    fn create_udp_socket(
+        bind_addr: SocketAddr,
+        reuse_port: bool,
+        udp_recv_buffer_bytes: usize,
+        udp_send_buffer_bytes: usize,
+    ) -> Result<UdpSocket, ProxyError> {
         let domain = if bind_addr.is_ipv4() {
             Domain::IPV4
         } else {
@@ -232,6 +244,22 @@ impl QUICListener {
         socket
             .set_reuse_address(true)
             .map_err(|err| ProxyError::Transport(format!("failed to set SO_REUSEADDR: {}", err)))?;
+        socket
+            .set_recv_buffer_size(udp_recv_buffer_bytes)
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to set UDP recv buffer size ({}): {}",
+                    udp_recv_buffer_bytes, err
+                ))
+            })?;
+        socket
+            .set_send_buffer_size(udp_send_buffer_bytes)
+            .map_err(|err| {
+                ProxyError::Transport(format!(
+                    "failed to set UDP send buffer size ({}): {}",
+                    udp_send_buffer_bytes, err
+                ))
+            })?;
 
         #[cfg(all(
             unix,
@@ -251,6 +279,27 @@ impl QUICListener {
                 bind_addr, err
             ))
         })?;
+
+        match (socket.recv_buffer_size(), socket.send_buffer_size()) {
+            (Ok(actual_recv), Ok(actual_send)) => {
+                debug!(
+                    "UDP socket buffers on {}: recv={} (requested={}) send={} (requested={}) reuseport={}",
+                    bind_addr,
+                    actual_recv,
+                    udp_recv_buffer_bytes,
+                    actual_send,
+                    udp_send_buffer_bytes,
+                    reuse_port
+                );
+            }
+            _ => {
+                debug!(
+                    "UDP socket bound on {} with requested buffers recv={} send={} reuseport={}",
+                    bind_addr, udp_recv_buffer_bytes, udp_send_buffer_bytes, reuse_port
+                );
+            }
+        }
+
         Ok(socket.into())
     }
 

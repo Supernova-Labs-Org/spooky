@@ -106,6 +106,14 @@ pub fn perf_default_backend_body_total_timeout_ms() -> u64 {
     30_000
 }
 
+pub fn perf_default_udp_recv_buffer_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+pub fn perf_default_udp_send_buffer_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
 pub fn observe_default_address() -> String {
     String::from("127.0.0.1")
 }

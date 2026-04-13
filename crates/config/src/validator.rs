@@ -119,6 +119,16 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.udp_recv_buffer_bytes == 0 {
+        error!("performance.udp_recv_buffer_bytes must be greater than 0");
+        return false;
+    }
+
+    if config.performance.udp_send_buffer_bytes == 0 {
+        error!("performance.udp_send_buffer_bytes must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_body_total_timeout_ms
         < config.performance.backend_body_idle_timeout_ms
     {
@@ -433,6 +443,8 @@ upstream:
         assert_eq!(cfg.performance.backend_timeout_ms, 2000);
         assert_eq!(cfg.performance.backend_body_idle_timeout_ms, 2000);
         assert_eq!(cfg.performance.backend_body_total_timeout_ms, 30000);
+        assert_eq!(cfg.performance.udp_recv_buffer_bytes, 8 * 1024 * 1024);
+        assert_eq!(cfg.performance.udp_send_buffer_bytes, 8 * 1024 * 1024);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
     }
@@ -457,6 +469,14 @@ upstream:
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.backend_body_total_timeout_ms = 100;
         cfg.performance.backend_body_idle_timeout_ms = 200;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.udp_recv_buffer_bytes = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.udp_send_buffer_bytes = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -489,6 +509,8 @@ upstream:
         cfg.performance.backend_timeout_ms = 1500;
         cfg.performance.backend_body_idle_timeout_ms = 500;
         cfg.performance.backend_body_total_timeout_ms = 10_000;
+        cfg.performance.udp_recv_buffer_bytes = 4 * 1024 * 1024;
+        cfg.performance.udp_send_buffer_bytes = 4 * 1024 * 1024;
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,

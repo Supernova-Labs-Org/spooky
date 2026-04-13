@@ -62,6 +62,19 @@ Current thresholds:
 
 Regression checks fail if benchmark metrics exceed thresholds versus baseline.
 
+## Linux Burst-Tolerance Tuning
+
+For high-burst UDP traffic tests, tune host kernel networking before benchmarking:
+
+```bash
+sudo ./scripts/sysctl-linux-network-tuning.sh
+```
+
+Recommended runtime config pairing in `performance`:
+
+- `udp_recv_buffer_bytes: 8388608`
+- `udp_send_buffer_bytes: 8388608`
+
 ## Memory Guardrail Policy
 
 All performance-related changes must include memory deltas in reports.

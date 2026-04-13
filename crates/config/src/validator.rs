@@ -257,13 +257,31 @@ pub fn validate(config: &Config) -> bool {
                 return false;
             }
 
-            // Basic address format validation (host:port)
-            if !backend.address.contains(':') {
-                error!(
-                    "Backend address '{}' in upstream '{}' must be in host:port format",
-                    backend.address, upstream_name
-                );
-                return false;
+            // Validate backend address: must be parseable as host:port with a
+            // numeric port in [1, 65535]. Rejects URLs (contain "://"), bare
+            // hostnames, non-numeric ports, and out-of-range port numbers.
+            {
+                let addr = &backend.address;
+                let valid = if addr.contains("://") {
+                    false
+                } else if let Some(colon) = addr.rfind(':') {
+                    let host = &addr[..colon];
+                    let port_str = &addr[colon + 1..];
+                    !host.is_empty()
+                        && !port_str.is_empty()
+                        && port_str.chars().all(|c| c.is_ascii_digit())
+                        && port_str.parse::<u16>().map_or(false, |p| p >= 1)
+                } else {
+                    false
+                };
+                if !valid {
+                    error!(
+                        "Backend address '{}' in upstream '{}' must be host:port \
+                         with a numeric port in 1-65535",
+                        addr, upstream_name
+                    );
+                    return false;
+                }
             }
 
             // Validate weight

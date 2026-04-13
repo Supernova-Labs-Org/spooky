@@ -923,6 +923,18 @@
 <li>Memory regression threshold: <code>20%</code></li>
 </ul>
 <p>Regression checks fail if benchmark metrics exceed thresholds versus baseline.</p>
+<h2 id="linux-burst-tolerance-tuning">Linux Burst-Tolerance Tuning</h2>
+<p>For high-burst UDP traffic tests, tune host kernel networking before benchmarking:</p>
+<pre><code class="language-bash">sudo ./scripts/sysctl-linux-network-tuning.sh
+</code></pre>
+<p>Recommended runtime config pairing in <code>performance</code>:</p>
+<ul>
+<li><code>udp_recv_buffer_bytes: 8388608</code></li>
+<li><code>udp_send_buffer_bytes: 8388608</code></li>
+<li><code>h2_pool_max_idle_per_backend: 256</code></li>
+<li><code>h2_pool_idle_timeout_ms: 90000</code></li>
+<li><code>per_backend_inflight_limit: 64</code> (reduce for stricter overload shedding)</li>
+</ul>
 <h2 id="memory-guardrail-policy">Memory Guardrail Policy</h2>
 <p>All performance-related changes must include memory deltas in reports.</p>
 <ul>
@@ -1235,6 +1247,14 @@
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
             data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#baseline-and-thresholds');">
             Baseline and Thresholds
+        </a>
+        
+
+        
+        <a href="#linux-burst-tolerance-tuning"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#linux-burst-tolerance-tuning');">
+            Linux Burst-Tolerance Tuning
         </a>
         
 

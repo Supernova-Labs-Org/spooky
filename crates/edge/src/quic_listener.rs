@@ -25,7 +25,7 @@ use rand::RngCore;
 use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::build_h2_request;
-use spooky_errors::ProxyError;
+use spooky_errors::{PoolError, ProxyError};
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
@@ -78,7 +78,7 @@ impl QUICListener {
         let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
 
         info!(
-            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={}",
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
             worker_threads,
             config.performance.control_plane_threads.max(1),
             config.performance.reuseport,
@@ -89,7 +89,9 @@ impl QUICListener {
             config.performance.backend_body_idle_timeout_ms,
             config.performance.backend_body_total_timeout_ms,
             config.performance.udp_recv_buffer_bytes,
-            config.performance.udp_send_buffer_bytes
+            config.performance.udp_send_buffer_bytes,
+            config.performance.h2_pool_max_idle_per_backend,
+            config.performance.h2_pool_idle_timeout_ms
         );
 
         let backend_addresses = config
@@ -103,7 +105,12 @@ impl QUICListener {
             })
             .collect::<Vec<_>>();
 
-        let h2_pool = Arc::new(H2Pool::new(backend_addresses, max_inflight_per_backend));
+        let h2_pool = Arc::new(H2Pool::new(
+            backend_addresses,
+            max_inflight_per_backend,
+            config.performance.h2_pool_max_idle_per_backend,
+            Duration::from_millis(config.performance.h2_pool_idle_timeout_ms),
+        ));
         let mut upstream_pools = HashMap::new();
         let mut upstream_inflight = HashMap::new();
 
@@ -1077,6 +1084,47 @@ impl QUICListener {
                                     }
                                 };
 
+                            match h2_pool.has_capacity(&addr) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    drop(upstream_permit);
+                                    drop(global_permit);
+                                    metrics.inc_failure();
+                                    metrics.inc_overload_shed();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::OverloadShed,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        b"backend overloaded, retry later\n",
+                                    )?;
+                                    continue;
+                                }
+                                Err(_) => {
+                                    drop(upstream_permit);
+                                    drop(global_permit);
+                                    metrics.inc_failure();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::Failure,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        b"no upstream available\n",
+                                    )?;
+                                    continue;
+                                }
+                            }
+
                             // Create a channel body so quiche Data chunks stream
                             // directly into the in-flight H2 request.
                             let (tx, channel_body) =
@@ -1729,7 +1777,28 @@ impl QUICListener {
                     b"invalid request\n",
                 )
             }
-            Err(ProxyError::Transport(_)) | Err(ProxyError::Pool(_)) => {
+            Err(ProxyError::Pool(PoolError::BackendOverloaded(_))) => {
+                info!("Backend overloaded");
+                metrics.inc_failure();
+                metrics.inc_overload_shed();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
+                info!(
+                    "Upstream {} status 503 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    b"backend overloaded, retry later\n",
+                )
+            }
+            Err(ProxyError::Transport(_))
+            | Err(ProxyError::Pool(PoolError::Send(_)))
+            | Err(ProxyError::Pool(PoolError::InflightLimiterClosed))
+            | Err(ProxyError::Pool(PoolError::UnknownBackend(_))) => {
                 error!("Transport error");
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool

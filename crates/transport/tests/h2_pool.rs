@@ -84,7 +84,12 @@ async fn pool_limits_inflight_per_backend() {
     let port = start_h2_server(tracker.clone()).await.unwrap();
     let backend = format!("127.0.0.1:{port}");
 
-    let pool = Arc::new(H2Pool::new(vec![backend.clone()], 1));
+    let pool = Arc::new(H2Pool::new(
+        vec![backend.clone()],
+        1,
+        64,
+        Duration::from_secs(30),
+    ));
     let req1 = Request::builder()
         .method("GET")
         .uri(format!("http://{backend}/"))
@@ -105,8 +110,17 @@ async fn pool_limits_inflight_per_backend() {
     let r2 = tokio::spawn(async move { pool2.send(&backend2, req2).await });
 
     let (r1, r2) = tokio::join!(r1, r2);
-    assert!(r1.unwrap().is_ok());
-    assert!(r2.unwrap().is_ok());
+    let r1 = r1.unwrap();
+    let r2 = r2.unwrap();
+    assert!(
+        r1.is_ok() || r2.is_ok(),
+        "at least one request should be admitted"
+    );
+    assert!(
+        matches!(r1, Err(PoolError::BackendOverloaded(_)))
+            || matches!(r2, Err(PoolError::BackendOverloaded(_))),
+        "one request should be rejected by backend inflight admission"
+    );
 
     let max = tracker.max.load(Ordering::SeqCst);
     assert_eq!(max, 1);
@@ -114,7 +128,12 @@ async fn pool_limits_inflight_per_backend() {
 
 #[tokio::test]
 async fn pool_rejects_unknown_backend() {
-    let pool = H2Pool::new(vec!["127.0.0.1:12345".to_string()], 1);
+    let pool = H2Pool::new(
+        vec!["127.0.0.1:12345".to_string()],
+        1,
+        64,
+        Duration::from_secs(30),
+    );
     let req = Request::builder()
         .method("GET")
         .uri("http://127.0.0.1:12345/")
@@ -126,4 +145,34 @@ async fn pool_rejects_unknown_backend() {
         PoolError::UnknownBackend(name) => assert_eq!(name, "127.0.0.1:9999"),
         _ => panic!("unexpected error"),
     }
+}
+
+#[tokio::test]
+async fn pool_capacity_probe_reflects_inflight_state() {
+    let tracker = Arc::new(ConcurrencyTracker::new());
+    let port = start_h2_server(tracker).await.unwrap();
+    let backend = format!("127.0.0.1:{port}");
+    let pool = Arc::new(H2Pool::new(
+        vec![backend.clone()],
+        1,
+        64,
+        Duration::from_secs(30),
+    ));
+
+    assert!(pool.has_capacity(&backend).unwrap());
+
+    let req = Request::builder()
+        .method("GET")
+        .uri(format!("http://{backend}/"))
+        .body(Full::new(Bytes::new()).boxed())
+        .unwrap();
+
+    let pool_task = Arc::clone(&pool);
+    let backend_task = backend.clone();
+    let handle = tokio::spawn(async move { pool_task.send(&backend_task, req).await });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    assert!(!pool.has_capacity(&backend).unwrap());
+
+    let _ = handle.await.expect("request task join");
 }

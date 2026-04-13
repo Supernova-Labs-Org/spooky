@@ -129,6 +129,16 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.h2_pool_max_idle_per_backend == 0 {
+        error!("performance.h2_pool_max_idle_per_backend must be greater than 0");
+        return false;
+    }
+
+    if config.performance.h2_pool_idle_timeout_ms == 0 {
+        error!("performance.h2_pool_idle_timeout_ms must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_body_total_timeout_ms
         < config.performance.backend_body_idle_timeout_ms
     {
@@ -445,6 +455,8 @@ upstream:
         assert_eq!(cfg.performance.backend_body_total_timeout_ms, 30000);
         assert_eq!(cfg.performance.udp_recv_buffer_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.performance.udp_send_buffer_bytes, 8 * 1024 * 1024);
+        assert_eq!(cfg.performance.h2_pool_max_idle_per_backend, 256);
+        assert_eq!(cfg.performance.h2_pool_idle_timeout_ms, 90_000);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
     }
@@ -480,6 +492,14 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.h2_pool_max_idle_per_backend = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.h2_pool_idle_timeout_ms = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,
@@ -511,6 +531,8 @@ upstream:
         cfg.performance.backend_body_total_timeout_ms = 10_000;
         cfg.performance.udp_recv_buffer_bytes = 4 * 1024 * 1024;
         cfg.performance.udp_send_buffer_bytes = 4 * 1024 * 1024;
+        cfg.performance.h2_pool_max_idle_per_backend = 128;
+        cfg.performance.h2_pool_idle_timeout_ms = 120_000;
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,

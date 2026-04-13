@@ -114,6 +114,14 @@ pub fn perf_default_udp_send_buffer_bytes() -> usize {
     8 * 1024 * 1024
 }
 
+pub fn perf_default_h2_pool_max_idle_per_backend() -> usize {
+    256
+}
+
+pub fn perf_default_h2_pool_idle_timeout_ms() -> u64 {
+    90_000
+}
+
 pub fn observe_default_address() -> String {
     String::from("127.0.0.1")
 }

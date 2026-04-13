@@ -20,7 +20,6 @@ hyper-util.workspace = true
 tokio.workspace = true
 serial_test = "3"
 rand.workspace = true
-smallvec.workspace = true
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"

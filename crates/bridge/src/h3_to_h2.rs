@@ -3,6 +3,7 @@ use std::convert::Infallible;
 use bytes::Bytes;
 use http::{HeaderName, HeaderValue, Method, Request, Uri};
 use http_body_util::combinators::BoxBody;
+use quiche::h3::NameValue;
 
 pub use spooky_errors::BridgeError;
 
@@ -13,7 +14,7 @@ pub fn build_h2_request(
     backend: &str,
     method: &str,
     path: &str,
-    headers: &[(Vec<u8>, Vec<u8>)],
+    headers: &[quiche::h3::Header],
     body: BoxBody<Bytes, Infallible>,
     content_length: Option<usize>,
 ) -> Result<Request<BoxBody<Bytes, Infallible>>, BridgeError> {
@@ -26,7 +27,8 @@ pub fn build_h2_request(
     let mut builder = Request::builder().method(method).uri(uri);
 
     let mut saw_host = false;
-    for (name, value) in headers {
+    for header in headers {
+        let name = header.name();
         if name.starts_with(b":") {
             continue;
         }
@@ -41,7 +43,7 @@ pub fn build_h2_request(
         }
 
         let header_value =
-            HeaderValue::from_bytes(value).map_err(|_| BridgeError::InvalidHeader)?;
+            HeaderValue::from_bytes(header.value()).map_err(|_| BridgeError::InvalidHeader)?;
         builder = builder.header(header_name, header_value);
     }
 

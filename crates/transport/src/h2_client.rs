@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::future::Future;
+use std::time::Duration;
 
 use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
@@ -24,11 +25,15 @@ where
 }
 
 impl H2Client {
-    pub fn new() -> Self {
+    pub fn new(max_idle_per_host: usize, pool_idle_timeout: Duration) -> Self {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
 
-        let client = Client::builder(TokioExecutor).http2_only(true).build(http);
+        let client = Client::builder(TokioExecutor)
+            .http2_only(true)
+            .pool_max_idle_per_host(max_idle_per_host)
+            .pool_idle_timeout(pool_idle_timeout)
+            .build(http);
 
         Self { client }
     }
@@ -43,6 +48,6 @@ impl H2Client {
 
 impl Default for H2Client {
     fn default() -> Self {
-        Self::new()
+        Self::new(64, Duration::from_secs(30))
     }
 }

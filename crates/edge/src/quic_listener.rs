@@ -22,7 +22,6 @@ use log::{debug, error, info, warn};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
-use smallvec::SmallVec;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::build_h2_request;
 use spooky_errors::{PoolError, ProxyError};
@@ -42,10 +41,10 @@ use crate::{
     ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase,
     cid_radix::CidRadix,
     constants::{
-        DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_INFLIGHT_PER_BACKEND,
-        MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS,
-        QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI,
-        QUIC_INITIAL_STREAM_DATA, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
+        DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
+        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
+        QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
+        REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
         drain_timeout, scid_rotation_interval,
@@ -75,16 +74,20 @@ impl QUICListener {
         let worker_threads = config.performance.worker_threads.max(1);
         let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
         let global_inflight_limit = config.performance.global_inflight_limit.max(1);
-        let max_inflight_per_backend = MAX_INFLIGHT_PER_BACKEND.saturating_mul(worker_threads);
+        let max_inflight_per_backend = config
+            .performance
+            .per_backend_inflight_limit
+            .saturating_mul(worker_threads);
 
         info!(
-            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
             worker_threads,
             config.performance.control_plane_threads.max(1),
             config.performance.reuseport,
             config.performance.pin_workers,
             global_inflight_limit,
             per_upstream_limit,
+            config.performance.per_backend_inflight_limit,
             config.performance.backend_timeout_ms,
             config.performance.backend_body_idle_timeout_ms,
             config.performance.backend_body_total_timeout_ms,
@@ -975,11 +978,8 @@ impl QUICListener {
                     let mut method = String::new();
                     let mut path = String::new();
                     let mut authority = None;
-                    let mut headers =
-                        SmallVec::<[(Vec<u8>, Vec<u8>); 16]>::with_capacity(list.len());
 
-                    for header in list {
-                        headers.push((header.name().to_vec(), header.value().to_vec()));
+                    for header in &list {
                         match header.name() {
                             b":method" => {
                                 method = String::from_utf8_lossy(header.value()).to_string()
@@ -1130,24 +1130,35 @@ impl QUICListener {
                             let (tx, channel_body) =
                                 ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
                             let boxed = channel_body.boxed();
+                            let request =
+                                match build_h2_request(&addr, &method, &path, &list, boxed, None) {
+                                    Ok(request) => request,
+                                    Err(err) => {
+                                        drop(upstream_permit);
+                                        drop(global_permit);
+                                        metrics.inc_failure();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::Failure,
+                                        );
+                                        Self::send_simple_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            http::StatusCode::BAD_REQUEST,
+                                            b"invalid request\n",
+                                        )?;
+                                        error!("failed to build upstream request: {}", err);
+                                        continue;
+                                    }
+                                };
+
                             let h2 = h2_pool.clone();
-                            let req_method = method.clone();
-                            let req_path = path.clone();
                             let fwd_addr = addr.clone();
-                            let request_headers = headers;
                             let (result_tx, result_rx) = oneshot::channel::<ForwardResult>();
                             let fut = async move {
                                 let result = async {
-                                    let request = build_h2_request(
-                                        &fwd_addr,
-                                        &req_method,
-                                        &req_path,
-                                        &request_headers,
-                                        boxed,
-                                        None,
-                                    )
-                                    .map_err(ProxyError::Bridge)?;
-
                                     let response = tokio::time::timeout(
                                         backend_timeout,
                                         h2.send(&fwd_addr, request),

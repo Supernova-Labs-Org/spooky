@@ -11,9 +11,10 @@ use crate::default::{
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_timeout_ms, perf_default_control_plane_threads,
     perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
-    perf_default_h2_pool_max_idle_per_backend, perf_default_per_upstream_inflight_limit,
-    perf_default_pin_workers, perf_default_reuseport, perf_default_udp_recv_buffer_bytes,
-    perf_default_udp_send_buffer_bytes, perf_default_worker_threads,
+    perf_default_h2_pool_max_idle_per_backend, perf_default_per_backend_inflight_limit,
+    perf_default_per_upstream_inflight_limit, perf_default_pin_workers, perf_default_reuseport,
+    perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
+    perf_default_worker_threads,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -183,6 +184,9 @@ pub struct Performance {
 
     #[serde(default = "perf_default_h2_pool_idle_timeout_ms")]
     pub h2_pool_idle_timeout_ms: u64,
+
+    #[serde(default = "perf_default_per_backend_inflight_limit")]
+    pub per_backend_inflight_limit: usize,
 }
 
 impl Default for Performance {
@@ -201,6 +205,7 @@ impl Default for Performance {
             udp_send_buffer_bytes: perf_default_udp_send_buffer_bytes(),
             h2_pool_max_idle_per_backend: perf_default_h2_pool_max_idle_per_backend(),
             h2_pool_idle_timeout_ms: perf_default_h2_pool_idle_timeout_ms(),
+            per_backend_inflight_limit: perf_default_per_backend_inflight_limit(),
         }
     }
 }

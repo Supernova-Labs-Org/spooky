@@ -122,6 +122,10 @@ pub fn perf_default_h2_pool_idle_timeout_ms() -> u64 {
     90_000
 }
 
+pub fn perf_default_per_backend_inflight_limit() -> usize {
+    64
+}
+
 pub fn observe_default_address() -> String {
     String::from("127.0.0.1")
 }

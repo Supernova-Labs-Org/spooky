@@ -1132,6 +1132,51 @@ fn upstream_inflight_limit_sheds_excess_requests() {
 }
 
 #[test]
+fn backend_pool_inflight_limit_sheds_excess_requests() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.global_inflight_limit = 64;
+    config.performance.per_upstream_inflight_limit = 64;
+    config.performance.per_backend_inflight_limit = 1;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/slow", "/slow"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("concurrent requests should complete");
+
+    let mut status_200 = 0usize;
+    let mut status_503 = 0usize;
+    let mut shed_body = String::new();
+    for obs in &observations {
+        match obs.status.as_deref() {
+            Some("200") => status_200 += 1,
+            Some("503") => {
+                status_503 += 1;
+                shed_body = String::from_utf8_lossy(&obs.body).to_string();
+            }
+            other => panic!("unexpected status: {:?}", other),
+        }
+    }
+
+    assert_eq!(status_200, 1, "expected one successful request");
+    assert_eq!(status_503, 1, "expected one shed request");
+    assert!(
+        shed_body.contains("backend overloaded"),
+        "shed body should mention backend overload, got: {shed_body}"
+    );
+}
+
+#[test]
 fn backend_timeout_respects_configured_performance_value() {
     let dir = tempdir().expect("failed to create temp dir");
     let (cert, key) = write_test_certs(&dir);

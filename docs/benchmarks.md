@@ -74,6 +74,9 @@ Recommended runtime config pairing in `performance`:
 
 - `udp_recv_buffer_bytes: 8388608`
 - `udp_send_buffer_bytes: 8388608`
+- `h2_pool_max_idle_per_backend: 256`
+- `h2_pool_idle_timeout_ms: 90000`
+- `per_backend_inflight_limit: 64` (reduce for stricter overload shedding)
 
 ## Memory Guardrail Policy
 

@@ -25,9 +25,14 @@ where
 }
 
 impl H2Client {
-    pub fn new(max_idle_per_host: usize, pool_idle_timeout: Duration) -> Self {
+    pub fn new(
+        max_idle_per_host: usize,
+        pool_idle_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Self {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
+        http.set_connect_timeout(Some(connect_timeout));
 
         let client = Client::builder(TokioExecutor)
             .http2_only(true)
@@ -48,6 +53,6 @@ impl H2Client {
 
 impl Default for H2Client {
     fn default() -> Self {
-        Self::new(64, Duration::from_secs(30))
+        Self::new(64, Duration::from_secs(30), Duration::from_secs(2))
     }
 }

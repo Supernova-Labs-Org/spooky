@@ -24,6 +24,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::cid_radix::CidRadix;
 use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
+use crate::resilience::{AdaptivePermit, RouteQueuePermit, RuntimeResilience};
 
 /// A streaming HTTP body backed by a tokio mpsc channel.
 /// The quiche Data handler sends chunks through the sender;
@@ -59,6 +60,7 @@ pub mod benchmark;
 pub mod cid_radix;
 pub mod constants;
 pub mod quic_listener;
+mod resilience;
 mod route_index;
 
 pub use quic_listener::configure_async_runtime;
@@ -69,6 +71,7 @@ pub struct SharedRuntimeState {
     pub(crate) upstream_inflight: HashMap<String, Arc<Semaphore>>,
     pub(crate) global_inflight: Arc<Semaphore>,
     pub(crate) metrics: Arc<Metrics>,
+    pub(crate) resilience: Arc<RuntimeResilience>,
 }
 
 pub struct QUICListener {
@@ -82,11 +85,13 @@ pub struct QUICListener {
     pub global_inflight: Arc<Semaphore>,
     pub(crate) routing_index: route_index::RouteIndex,
     pub metrics: Arc<Metrics>,
+    pub resilience: Arc<RuntimeResilience>,
     pub draining: bool,
     pub drain_start: Option<Instant>,
     pub backend_timeout: Duration,
     pub backend_body_idle_timeout: Duration,
     pub backend_body_total_timeout: Duration,
+    pub backend_total_request_timeout: Duration,
 
     pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
@@ -156,7 +161,11 @@ pub struct RequestEnvelope {
     pub upstream_name: Option<String>,
     pub global_inflight_permit: Option<OwnedSemaphorePermit>,
     pub upstream_inflight_permit: Option<OwnedSemaphorePermit>,
+    pub adaptive_admission_permit: Option<AdaptivePermit>,
+    pub route_queue_permit: Option<RouteQueuePermit>,
     pub start: Instant,
+    pub total_request_deadline: Instant,
+    pub bodyless_mode: bool,
 
     /// Current lifecycle phase of this stream.
     pub phase: StreamPhase,

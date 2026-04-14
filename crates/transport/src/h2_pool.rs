@@ -23,6 +23,7 @@ impl H2Pool {
         max_inflight: usize,
         max_idle_per_backend: usize,
         pool_idle_timeout: Duration,
+        connect_timeout: Duration,
     ) -> Self
     where
         I: IntoIterator<Item = String>,
@@ -34,7 +35,7 @@ impl H2Pool {
             map.insert(
                 backend,
                 BackendHandle {
-                    client: H2Client::new(max_idle_per_backend, pool_idle_timeout),
+                    client: H2Client::new(max_idle_per_backend, pool_idle_timeout, connect_timeout),
                     inflight: Arc::new(Semaphore::new(inflight)),
                 },
             );

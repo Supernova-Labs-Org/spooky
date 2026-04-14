@@ -107,6 +107,7 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
         },
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
+        resilience: spooky_config::config::Resilience::default(),
     }
 }
 

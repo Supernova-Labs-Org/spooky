@@ -89,6 +89,7 @@ async fn pool_limits_inflight_per_backend() {
         1,
         64,
         Duration::from_secs(30),
+        Duration::from_secs(2),
     ));
     let req1 = Request::builder()
         .method("GET")
@@ -133,6 +134,7 @@ async fn pool_rejects_unknown_backend() {
         1,
         64,
         Duration::from_secs(30),
+        Duration::from_secs(2),
     );
     let req = Request::builder()
         .method("GET")
@@ -157,6 +159,7 @@ async fn pool_capacity_probe_reflects_inflight_state() {
         1,
         64,
         Duration::from_secs(30),
+        Duration::from_secs(2),
     ));
 
     assert!(pool.has_capacity(&backend).unwrap());

@@ -98,12 +98,20 @@ pub fn perf_default_backend_timeout_ms() -> u64 {
     2_000
 }
 
+pub fn perf_default_backend_connect_timeout_ms() -> u64 {
+    500
+}
+
 pub fn perf_default_backend_body_idle_timeout_ms() -> u64 {
     2_000
 }
 
 pub fn perf_default_backend_body_total_timeout_ms() -> u64 {
     30_000
+}
+
+pub fn perf_default_backend_total_request_timeout_ms() -> u64 {
+    35_000
 }
 
 pub fn perf_default_udp_recv_buffer_bytes() -> usize {
@@ -124,6 +132,74 @@ pub fn perf_default_h2_pool_idle_timeout_ms() -> u64 {
 
 pub fn perf_default_per_backend_inflight_limit() -> usize {
     64
+}
+
+pub fn resilience_default_adaptive_enabled() -> bool {
+    true
+}
+
+pub fn resilience_default_adaptive_min_limit() -> usize {
+    64
+}
+
+pub fn resilience_default_adaptive_decrease_step() -> usize {
+    16
+}
+
+pub fn resilience_default_adaptive_increase_step() -> usize {
+    8
+}
+
+pub fn resilience_default_adaptive_high_latency_ms() -> u64 {
+    250
+}
+
+pub fn resilience_default_route_queue_default_cap() -> usize {
+    512
+}
+
+pub fn resilience_default_cb_enabled() -> bool {
+    true
+}
+
+pub fn resilience_default_cb_failure_threshold() -> u32 {
+    5
+}
+
+pub fn resilience_default_cb_open_ms() -> u64 {
+    10_000
+}
+
+pub fn resilience_default_cb_half_open_max_probes() -> u32 {
+    2
+}
+
+pub fn resilience_default_hedging_enabled() -> bool {
+    false
+}
+
+pub fn resilience_default_hedging_delay_ms() -> u64 {
+    75
+}
+
+pub fn resilience_default_retry_budget_enabled() -> bool {
+    true
+}
+
+pub fn resilience_default_retry_budget_ratio_percent() -> u8 {
+    20
+}
+
+pub fn resilience_default_brownout_enabled() -> bool {
+    true
+}
+
+pub fn resilience_default_brownout_trigger_inflight_percent() -> u8 {
+    90
+}
+
+pub fn resilience_default_brownout_recover_inflight_percent() -> u8 {
+    60
 }
 
 pub fn observe_default_address() -> String {

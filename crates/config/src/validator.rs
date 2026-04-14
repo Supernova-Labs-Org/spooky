@@ -109,6 +109,11 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.backend_connect_timeout_ms == 0 {
+        error!("performance.backend_connect_timeout_ms must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_body_idle_timeout_ms == 0 {
         error!("performance.backend_body_idle_timeout_ms must be greater than 0");
         return false;
@@ -116,6 +121,11 @@ pub fn validate(config: &Config) -> bool {
 
     if config.performance.backend_body_total_timeout_ms == 0 {
         error!("performance.backend_body_total_timeout_ms must be greater than 0");
+        return false;
+    }
+
+    if config.performance.backend_total_request_timeout_ms == 0 {
+        error!("performance.backend_total_request_timeout_ms must be greater than 0");
         return false;
     }
 
@@ -144,10 +154,105 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
-    if config.performance.backend_body_total_timeout_ms
-        < config.performance.backend_body_idle_timeout_ms
+    if config.performance.backend_connect_timeout_ms > config.performance.backend_timeout_ms {
+        error!("performance.backend_connect_timeout_ms must be <= backend_timeout_ms");
+        return false;
+    }
+
+    if config.performance.backend_timeout_ms > config.performance.backend_body_idle_timeout_ms {
+        error!("performance.backend_timeout_ms must be <= backend_body_idle_timeout_ms");
+        return false;
+    }
+
+    if config.performance.backend_body_idle_timeout_ms
+        > config.performance.backend_body_total_timeout_ms
     {
-        error!("performance.backend_body_total_timeout_ms must be >= backend_body_idle_timeout_ms");
+        error!("performance.backend_body_idle_timeout_ms must be <= backend_body_total_timeout_ms");
+        return false;
+    }
+
+    if config.performance.backend_body_total_timeout_ms
+        > config.performance.backend_total_request_timeout_ms
+    {
+        error!(
+            "performance.backend_body_total_timeout_ms must be <= backend_total_request_timeout_ms"
+        );
+        return false;
+    }
+
+    if config.resilience.adaptive_admission.min_limit == 0 {
+        error!("resilience.adaptive_admission.min_limit must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.adaptive_admission.decrease_step == 0 {
+        error!("resilience.adaptive_admission.decrease_step must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.adaptive_admission.increase_step == 0 {
+        error!("resilience.adaptive_admission.increase_step must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.route_queue.default_cap == 0 {
+        error!("resilience.route_queue.default_cap must be greater than 0");
+        return false;
+    }
+
+    if config
+        .resilience
+        .route_queue
+        .caps
+        .values()
+        .any(|cap| *cap == 0)
+    {
+        error!("resilience.route_queue.caps values must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.circuit_breaker.failure_threshold == 0 {
+        error!("resilience.circuit_breaker.failure_threshold must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.circuit_breaker.open_ms == 0 {
+        error!("resilience.circuit_breaker.open_ms must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.circuit_breaker.half_open_max_probes == 0 {
+        error!("resilience.circuit_breaker.half_open_max_probes must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.retry_budget.ratio_percent > 100 {
+        error!("resilience.retry_budget.ratio_percent must be <= 100");
+        return false;
+    }
+
+    if config
+        .resilience
+        .retry_budget
+        .per_route_ratio_percent
+        .values()
+        .any(|ratio| *ratio > 100)
+    {
+        error!("resilience.retry_budget.per_route_ratio_percent values must be <= 100");
+        return false;
+    }
+
+    if config.resilience.brownout.trigger_inflight_percent > 100
+        || config.resilience.brownout.recover_inflight_percent > 100
+    {
+        error!("resilience.brownout inflight percentages must be <= 100");
+        return false;
+    }
+
+    if config.resilience.brownout.recover_inflight_percent
+        >= config.resilience.brownout.trigger_inflight_percent
+    {
+        error!("resilience.brownout.recover_inflight_percent must be < trigger_inflight_percent");
         return false;
     }
 
@@ -372,7 +477,7 @@ mod tests {
     use super::validate;
     use crate::config::{
         Backend, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint, Observability,
-        Performance, RouteMatch, Tls, Upstream,
+        Performance, Resilience, RouteMatch, Tls, Upstream,
     };
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -429,6 +534,7 @@ mod tests {
             },
             performance: Performance::default(),
             observability: Observability::default(),
+            resilience: Resilience::default(),
         }
     }
 
@@ -474,8 +580,10 @@ upstream:
         assert_eq!(cfg.performance.global_inflight_limit, 4096);
         assert_eq!(cfg.performance.per_upstream_inflight_limit, 1024);
         assert_eq!(cfg.performance.backend_timeout_ms, 2000);
+        assert_eq!(cfg.performance.backend_connect_timeout_ms, 500);
         assert_eq!(cfg.performance.backend_body_idle_timeout_ms, 2000);
         assert_eq!(cfg.performance.backend_body_total_timeout_ms, 30000);
+        assert_eq!(cfg.performance.backend_total_request_timeout_ms, 35_000);
         assert_eq!(cfg.performance.udp_recv_buffer_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.performance.udp_send_buffer_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.performance.h2_pool_max_idle_per_backend, 256);
@@ -483,6 +591,8 @@ upstream:
         assert_eq!(cfg.performance.per_backend_inflight_limit, 64);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
+        assert!(cfg.resilience.adaptive_admission.enabled);
+        assert_eq!(cfg.resilience.route_queue.default_cap, 512);
     }
 
     #[test]
@@ -500,6 +610,16 @@ upstream:
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 4;
         cfg.performance.reuseport = false;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.backend_connect_timeout_ms = 2_001;
+        cfg.performance.backend_timeout_ms = 2_000;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.backend_total_request_timeout_ms = 5_000;
+        cfg.performance.backend_body_total_timeout_ms = 6_000;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -525,6 +645,19 @@ upstream:
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.per_backend_inflight_limit = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.route_queue.default_cap = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.retry_budget.ratio_percent = 101;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.brownout.trigger_inflight_percent = 50;
+        cfg.resilience.brownout.recover_inflight_percent = 50;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -554,14 +687,18 @@ upstream:
         cfg.performance.pin_workers = true;
         cfg.performance.global_inflight_limit = 10_000;
         cfg.performance.per_upstream_inflight_limit = 2_000;
+        cfg.performance.backend_connect_timeout_ms = 300;
         cfg.performance.backend_timeout_ms = 1500;
-        cfg.performance.backend_body_idle_timeout_ms = 500;
+        cfg.performance.backend_body_idle_timeout_ms = 2_500;
         cfg.performance.backend_body_total_timeout_ms = 10_000;
+        cfg.performance.backend_total_request_timeout_ms = 15_000;
         cfg.performance.udp_recv_buffer_bytes = 4 * 1024 * 1024;
         cfg.performance.udp_send_buffer_bytes = 4 * 1024 * 1024;
         cfg.performance.h2_pool_max_idle_per_backend = 128;
         cfg.performance.h2_pool_idle_timeout_ms = 120_000;
         cfg.performance.per_backend_inflight_limit = 32;
+        cfg.resilience.route_queue.default_cap = 256;
+        cfg.resilience.retry_budget.ratio_percent = 30;
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,

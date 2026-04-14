@@ -50,6 +50,7 @@ use crate::{
         drain_timeout, scid_rotation_interval,
     },
     outcome_from_status,
+    resilience::RuntimeResilience,
     route_index::RouteIndex,
 };
 
@@ -61,6 +62,18 @@ fn is_hop_header(name: &str) -> bool {
 }
 
 type ResolvedBackend = (String, String, usize, Arc<Mutex<UpstreamPool>>);
+
+fn request_content_length(headers: &[quiche::h3::Header]) -> Option<usize> {
+    for header in headers {
+        if !header.name().eq_ignore_ascii_case(b"content-length") {
+            continue;
+        }
+        let value = std::str::from_utf8(header.value()).ok()?;
+        let parsed = value.trim().parse::<usize>().ok()?;
+        return Some(parsed);
+    }
+    None
+}
 
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
@@ -80,7 +93,7 @@ impl QUICListener {
             .saturating_mul(worker_threads);
 
         info!(
-            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} backend_connect_timeout_ms={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} backend_total_request_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
             worker_threads,
             config.performance.control_plane_threads.max(1),
             config.performance.reuseport,
@@ -88,9 +101,11 @@ impl QUICListener {
             global_inflight_limit,
             per_upstream_limit,
             config.performance.per_backend_inflight_limit,
+            config.performance.backend_connect_timeout_ms,
             config.performance.backend_timeout_ms,
             config.performance.backend_body_idle_timeout_ms,
             config.performance.backend_body_total_timeout_ms,
+            config.performance.backend_total_request_timeout_ms,
             config.performance.udp_recv_buffer_bytes,
             config.performance.udp_send_buffer_bytes,
             config.performance.h2_pool_max_idle_per_backend,
@@ -113,6 +128,7 @@ impl QUICListener {
             max_inflight_per_backend,
             config.performance.h2_pool_max_idle_per_backend,
             Duration::from_millis(config.performance.h2_pool_idle_timeout_ms),
+            Duration::from_millis(config.performance.backend_connect_timeout_ms),
         ));
         let mut upstream_pools = HashMap::new();
         let mut upstream_inflight = HashMap::new();
@@ -128,12 +144,18 @@ impl QUICListener {
             upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
         }
 
+        let resilience = Arc::new(RuntimeResilience::from_config(
+            &config.resilience,
+            global_inflight_limit,
+        ));
+
         Ok(SharedRuntimeState {
             h2_pool,
             upstream_pools,
             upstream_inflight,
             global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
             metrics: Arc::new(Metrics::default()),
+            resilience,
         })
     }
 
@@ -195,6 +217,8 @@ impl QUICListener {
             Duration::from_millis(config.performance.backend_body_idle_timeout_ms);
         let backend_body_total_timeout =
             Duration::from_millis(config.performance.backend_body_total_timeout_ms);
+        let backend_total_request_timeout =
+            Duration::from_millis(config.performance.backend_total_request_timeout_ms);
 
         Ok(Self {
             socket,
@@ -207,11 +231,13 @@ impl QUICListener {
             global_inflight: Arc::clone(&shared_state.global_inflight),
             routing_index,
             metrics: Arc::clone(&shared_state.metrics),
+            resilience: Arc::clone(&shared_state.resilience),
             draining: false,
             drain_start: None,
             backend_timeout,
             backend_body_idle_timeout,
             backend_body_total_timeout,
+            backend_total_request_timeout,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -791,8 +817,10 @@ impl QUICListener {
                 self.backend_timeout,
                 self.backend_body_idle_timeout,
                 self.backend_body_total_timeout,
+                self.backend_total_request_timeout,
                 &self.routing_index,
                 &self.metrics,
+                &self.resilience,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -862,6 +890,8 @@ impl QUICListener {
                     self.backend_body_idle_timeout,
                     self.backend_body_total_timeout,
                     &self.metrics,
+                    self.backend_total_request_timeout,
+                    &self.resilience,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
                 }
@@ -955,8 +985,10 @@ impl QUICListener {
         backend_timeout: Duration,
         backend_body_idle_timeout: Duration,
         backend_body_total_timeout: Duration,
+        backend_total_request_timeout: Duration,
         routing_index: &RouteIndex,
         metrics: &Metrics,
+        resilience: &RuntimeResilience,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -1017,8 +1049,86 @@ impl QUICListener {
                         upstream_name,
                         global_inflight_permit,
                         upstream_inflight_permit,
+                        adaptive_admission_permit,
+                        route_queue_permit,
+                        request_fin_received,
+                        bodyless_mode,
                     ) = match resolved {
-                        Ok((upstream_name, addr, idx, _pool)) => {
+                        Ok((upstream_name, addr, idx, upstream_pool)) => {
+                            resilience.brownout.observe_admission_pressure(
+                                resilience.adaptive_admission.inflight_percent(),
+                            );
+                            if !resilience.brownout.route_allowed(&upstream_name) {
+                                metrics.inc_failure();
+                                metrics.inc_overload_shed();
+                                metrics.record_route(
+                                    &upstream_name,
+                                    request_start.elapsed(),
+                                    RouteOutcome::OverloadShed,
+                                );
+                                Self::send_simple_response(
+                                    h3,
+                                    &mut connection.quic,
+                                    stream_id,
+                                    http::StatusCode::SERVICE_UNAVAILABLE,
+                                    b"brownout active, non-core route shed\n",
+                                )?;
+                                resilience
+                                    .adaptive_admission
+                                    .observe(request_start.elapsed(), true);
+                                continue;
+                            }
+
+                            let adaptive_permit = match resilience.adaptive_admission.try_acquire()
+                            {
+                                Some(permit) => permit,
+                                None => {
+                                    metrics.inc_failure();
+                                    metrics.inc_overload_shed();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::OverloadShed,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        b"adaptive admission overload\n",
+                                    )?;
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
+                                    continue;
+                                }
+                            };
+
+                            let route_queue_permit =
+                                match resilience.route_queue.try_acquire(&upstream_name) {
+                                    Some(permit) => permit,
+                                    None => {
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_simple_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            http::StatusCode::SERVICE_UNAVAILABLE,
+                                            b"route queue cap exceeded\n",
+                                        )?;
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(request_start.elapsed(), true);
+                                        continue;
+                                    }
+                                };
+
                             let global_permit =
                                 match Arc::clone(&global_inflight).try_acquire_owned() {
                                     Ok(permit) => permit,
@@ -1037,6 +1147,9 @@ impl QUICListener {
                                             http::StatusCode::SERVICE_UNAVAILABLE,
                                             b"overloaded, retry later\n",
                                         )?;
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(request_start.elapsed(), true);
                                         continue;
                                     }
                                 };
@@ -1061,6 +1174,9 @@ impl QUICListener {
                                                 http::StatusCode::SERVICE_UNAVAILABLE,
                                                 b"upstream overloaded, retry later\n",
                                             )?;
+                                            resilience
+                                                .adaptive_admission
+                                                .observe(request_start.elapsed(), true);
                                             continue;
                                         }
                                     },
@@ -1080,6 +1196,9 @@ impl QUICListener {
                                             http::StatusCode::SERVICE_UNAVAILABLE,
                                             b"no upstream throttle configured\n",
                                         )?;
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(request_start.elapsed(), true);
                                         continue;
                                     }
                                 };
@@ -1103,6 +1222,9 @@ impl QUICListener {
                                         http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"backend overloaded, retry later\n",
                                     )?;
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
                                     continue;
                                 }
                                 Err(_) => {
@@ -1121,15 +1243,26 @@ impl QUICListener {
                                         http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"no upstream available\n",
                                     )?;
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
                                     continue;
                                 }
                             }
 
-                            // Create a channel body so quiche Data chunks stream
-                            // directly into the in-flight H2 request.
-                            let (tx, channel_body) =
-                                ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
-                            let boxed = channel_body.boxed();
+                            let content_length = request_content_length(&list);
+                            let bodyless_mode = content_length.unwrap_or(0) == 0
+                                && (method.eq_ignore_ascii_case("GET")
+                                    || method.eq_ignore_ascii_case("HEAD"));
+                            let (tx, boxed, request_fin_received) = if bodyless_mode {
+                                (None, BoxBody::new(Full::new(Bytes::new())), true)
+                            } else {
+                                // Create a channel body so quiche Data chunks stream
+                                // directly into the in-flight H2 request.
+                                let (tx, channel_body) =
+                                    ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
+                                (Some(tx), channel_body.boxed(), false)
+                            };
                             let request =
                                 match build_h2_request(&addr, &method, &path, &list, boxed, None) {
                                     Ok(request) => request,
@@ -1150,21 +1283,152 @@ impl QUICListener {
                                             b"invalid request\n",
                                         )?;
                                         error!("failed to build upstream request: {}", err);
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(request_start.elapsed(), true);
                                         continue;
                                     }
                                 };
 
                             let h2 = h2_pool.clone();
                             let fwd_addr = addr.clone();
+                            let cb = Arc::clone(&resilience.circuit_breakers);
+                            let retry_budget = Arc::clone(&resilience.retry_budget);
+                            let route_name = upstream_name.clone();
+                            let allow_hedge = bodyless_mode
+                                && resilience.hedging_allowed_for(&method, &upstream_name, true);
+                            let hedge_delay = resilience.hedging_delay;
+                            let alternate_backend =
+                                Self::pick_alternate_backend(&upstream_pool, idx);
+                            let method_owned = method.clone();
+                            let path_owned = path.clone();
+                            let headers_owned = list.clone();
                             let (result_tx, result_rx) = oneshot::channel::<ForwardResult>();
                             let fut = async move {
                                 let result = async {
-                                    let response = tokio::time::timeout(
-                                        backend_timeout,
-                                        h2.send(&fwd_addr, request),
-                                    )
-                                    .await
-                                    .map_err(|_| ProxyError::Timeout)??;
+                                    retry_budget.mark_primary(&route_name);
+
+                                    let send_once =
+                                        |backend: String,
+                                         req: http::Request<
+                                            BoxBody<Bytes, std::convert::Infallible>,
+                                        >,
+                                         cb: Arc<crate::resilience::CircuitBreakers>,
+                                         h2: Arc<H2Pool>| async move {
+                                            if !cb.allow_request(&backend) {
+                                                return Err(ProxyError::Pool(
+                                                    PoolError::CircuitOpen(backend),
+                                                ));
+                                            }
+                                            let send_result = tokio::time::timeout(
+                                                backend_timeout,
+                                                h2.send(&backend, req),
+                                            )
+                                            .await
+                                            .map_err(|_| ProxyError::Timeout);
+                                            match &send_result {
+                                                Ok(Ok(_)) => cb.record_success(&backend),
+                                                _ => cb.record_failure(&backend),
+                                            }
+                                            Ok(send_result??)
+                                        };
+
+                                    let response: Response<Incoming> = if allow_hedge {
+                                        let hedge_candidate = alternate_backend.clone().and_then(
+                                            |(backend, _idx)| {
+                                                build_h2_request(
+                                                    &backend,
+                                                    &method_owned,
+                                                    &path_owned,
+                                                    &headers_owned,
+                                                    BoxBody::new(Full::new(Bytes::new())),
+                                                    Some(0),
+                                                )
+                                                .ok()
+                                                .map(|req| (backend, req))
+                                            },
+                                        );
+
+                                        if let Some((hedge_backend, hedge_request)) =
+                                            hedge_candidate
+                                        {
+                                            let primary_backend = fwd_addr.clone();
+                                            let primary_fut = send_once(
+                                                primary_backend,
+                                                request,
+                                                Arc::clone(&cb),
+                                                Arc::clone(&h2),
+                                            );
+                                            tokio::pin!(primary_fut);
+                                            let hedge_sleep = tokio::time::sleep(hedge_delay);
+                                            tokio::pin!(hedge_sleep);
+
+                                            if let Some(result) = tokio::select! {
+                                                result = &mut primary_fut => Some(result),
+                                                _ = &mut hedge_sleep => None,
+                                            } {
+                                                result?
+                                            } else if retry_budget.allow_retry(&route_name) {
+                                                let hedge_fut = send_once(
+                                                    hedge_backend,
+                                                    hedge_request,
+                                                    Arc::clone(&cb),
+                                                    Arc::clone(&h2),
+                                                );
+                                                tokio::pin!(hedge_fut);
+                                                tokio::select! {
+                                                    result = &mut primary_fut => result?,
+                                                    result = &mut hedge_fut => result?,
+                                                }
+                                            } else {
+                                                primary_fut.await?
+                                            }
+                                        } else {
+                                            send_once(
+                                                fwd_addr.clone(),
+                                                request,
+                                                Arc::clone(&cb),
+                                                Arc::clone(&h2),
+                                            )
+                                            .await?
+                                        }
+                                    } else {
+                                        match send_once(
+                                            fwd_addr.clone(),
+                                            request,
+                                            Arc::clone(&cb),
+                                            Arc::clone(&h2),
+                                        )
+                                        .await
+                                        {
+                                            Ok(response) => response,
+                                            Err(primary_err) => {
+                                                if bodyless_mode
+                                                    && retry_budget.allow_retry(&route_name)
+                                                    && let Some((retry_backend, _)) =
+                                                        alternate_backend.clone()
+                                                    && let Ok(retry_request) = build_h2_request(
+                                                        &retry_backend,
+                                                        &method_owned,
+                                                        &path_owned,
+                                                        &headers_owned,
+                                                        BoxBody::new(Full::new(Bytes::new())),
+                                                        Some(0),
+                                                    )
+                                                {
+                                                    send_once(
+                                                        retry_backend,
+                                                        retry_request,
+                                                        Arc::clone(&cb),
+                                                        Arc::clone(&h2),
+                                                    )
+                                                    .await?
+                                                } else {
+                                                    return Err(primary_err);
+                                                }
+                                            }
+                                        }
+                                    };
 
                                     let (parts, body) = response.into_parts();
                                     Ok((parts.status, parts.headers, body))
@@ -1177,13 +1441,17 @@ impl QUICListener {
                                 error!("dropping upstream task: no runtime available");
                             }
                             (
-                                Some(tx),
+                                tx,
                                 Some(result_rx),
                                 Some(addr),
                                 Some(idx),
                                 Some(upstream_name),
                                 Some(global_permit),
                                 Some(upstream_permit),
+                                Some(adaptive_permit),
+                                Some(route_queue_permit),
+                                request_fin_received,
+                                bodyless_mode,
                             )
                         }
                         Err(err) => {
@@ -1213,6 +1481,9 @@ impl QUICListener {
                                 status,
                                 body,
                             )?;
+                            resilience
+                                .adaptive_admission
+                                .observe(request_start.elapsed(), true);
                             continue;
                         }
                     };
@@ -1232,9 +1503,13 @@ impl QUICListener {
                             upstream_name,
                             global_inflight_permit,
                             upstream_inflight_permit,
+                            adaptive_admission_permit,
+                            route_queue_permit,
                             start: request_start,
+                            total_request_deadline: request_start + backend_total_request_timeout,
+                            bodyless_mode,
                             phase: StreamPhase::ReceivingRequest,
-                            request_fin_received: false,
+                            request_fin_received,
                             upstream_result_rx,
                             response_chunk_rx: None,
                             pending_chunk: None,
@@ -1245,32 +1520,70 @@ impl QUICListener {
                     match h3.recv_body(&mut connection.quic, stream_id, &mut body_buf) {
                         Ok(read) => {
                             let mut shed_due_to_buffer_pressure = false;
+                            let mut reject_body_for_bodyless = None::<(String, Duration)>;
+                            let mut payload_too_large = None::<(String, Duration)>;
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
-                                // Enforce cap on total bytes received for the stream,
-                                // including chunks already forwarded to the H2 body channel.
-                                let next_total = req.body_bytes_received.saturating_add(read);
-                                if next_total > MAX_REQUEST_BODY_BYTES {
-                                    connection.streams.remove(&stream_id);
-                                    Self::send_simple_response(
-                                        h3,
-                                        &mut connection.quic,
-                                        stream_id,
-                                        http::StatusCode::PAYLOAD_TOO_LARGE,
-                                        b"request body too large\n",
-                                    )?;
-                                    break;
+                                if req.bodyless_mode && read > 0 {
+                                    reject_body_for_bodyless = Some((
+                                        req.upstream_name
+                                            .clone()
+                                            .unwrap_or_else(|| "unrouted".to_string()),
+                                        req.start.elapsed(),
+                                    ));
                                 }
-                                req.body_bytes_received = next_total;
+                                if reject_body_for_bodyless.is_none() {
+                                    // Enforce cap on total bytes received for the stream,
+                                    // including chunks already forwarded to the H2 body channel.
+                                    let next_total = req.body_bytes_received.saturating_add(read);
+                                    if next_total > MAX_REQUEST_BODY_BYTES {
+                                        payload_too_large = Some((
+                                            req.upstream_name
+                                                .clone()
+                                                .unwrap_or_else(|| "unrouted".to_string()),
+                                            req.start.elapsed(),
+                                        ));
+                                    } else {
+                                        req.body_bytes_received = next_total;
 
-                                for chunk_slice in
-                                    body_buf[..read].chunks(REQUEST_CHUNK_BYTES_LIMIT)
-                                {
-                                    let chunk = Bytes::copy_from_slice(chunk_slice);
-                                    if Self::enqueue_request_chunk(req, chunk).is_err() {
-                                        shed_due_to_buffer_pressure = true;
-                                        break;
+                                        for chunk_slice in
+                                            body_buf[..read].chunks(REQUEST_CHUNK_BYTES_LIMIT)
+                                        {
+                                            let chunk = Bytes::copy_from_slice(chunk_slice);
+                                            if Self::enqueue_request_chunk(req, chunk).is_err() {
+                                                shed_due_to_buffer_pressure = true;
+                                                break;
+                                            }
+                                        }
                                     }
                                 }
+                            }
+                            if let Some((route_label, elapsed)) = reject_body_for_bodyless {
+                                metrics.inc_failure();
+                                metrics.record_route(&route_label, elapsed, RouteOutcome::Failure);
+                                Self::send_simple_response(
+                                    h3,
+                                    &mut connection.quic,
+                                    stream_id,
+                                    http::StatusCode::BAD_REQUEST,
+                                    b"request body not allowed for this request\n",
+                                )?;
+                                connection.streams.remove(&stream_id);
+                                resilience.adaptive_admission.observe(elapsed, true);
+                                break;
+                            }
+                            if let Some((route_label, elapsed)) = payload_too_large {
+                                metrics.inc_failure();
+                                metrics.record_route(&route_label, elapsed, RouteOutcome::Failure);
+                                Self::send_simple_response(
+                                    h3,
+                                    &mut connection.quic,
+                                    stream_id,
+                                    http::StatusCode::PAYLOAD_TOO_LARGE,
+                                    b"request body too large\n",
+                                )?;
+                                connection.streams.remove(&stream_id);
+                                resilience.adaptive_admission.observe(elapsed, true);
+                                break;
                             }
                             if shed_due_to_buffer_pressure
                                 && let Some(req) = connection.streams.remove(&stream_id)
@@ -1291,6 +1604,9 @@ impl QUICListener {
                                     http::StatusCode::SERVICE_UNAVAILABLE,
                                     b"request body backpressure overload\n",
                                 )?;
+                                resilience
+                                    .adaptive_admission
+                                    .observe(req.start.elapsed(), true);
                                 break;
                             }
                         }
@@ -1332,6 +1648,8 @@ impl QUICListener {
             backend_body_idle_timeout,
             backend_body_total_timeout,
             metrics,
+            backend_total_request_timeout,
+            resilience,
         )?;
 
         Ok(())
@@ -1365,10 +1683,32 @@ impl QUICListener {
         backend_body_idle_timeout: Duration,
         backend_body_total_timeout: Duration,
         metrics: &Metrics,
+        _backend_total_request_timeout: Duration,
+        resilience: &RuntimeResilience,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
 
         for stream_id in stream_ids {
+            if let Some(req) = streams.get(&stream_id)
+                && Instant::now() >= req.total_request_deadline
+            {
+                Self::handle_forward_result(
+                    h3,
+                    quic,
+                    stream_id,
+                    req,
+                    Err(ProxyError::Timeout),
+                    upstream_pools,
+                    routing_index,
+                    metrics,
+                )?;
+                resilience
+                    .adaptive_admission
+                    .observe(req.start.elapsed(), true);
+                streams.remove(&stream_id);
+                continue;
+            }
+
             // ── 1 & 2: request body drain ────────────────────────────────────
             if let Some(req) = streams.get_mut(&stream_id) {
                 Self::flush_request_buffer(req);
@@ -1543,6 +1883,9 @@ impl QUICListener {
                                 req.start.elapsed(),
                                 RouteOutcome::Success,
                             );
+                            resilience
+                                .adaptive_admission
+                                .observe(req.start.elapsed(), false);
                             info!(
                                 "Upstream {} status {} latency_ms {}",
                                 req.backend_addr.as_deref().unwrap_or("?"),
@@ -1565,6 +1908,9 @@ impl QUICListener {
                                 routing_index,
                                 metrics,
                             )?;
+                            resilience
+                                .adaptive_admission
+                                .observe(req.start.elapsed(), true);
                         }
                         streams.remove(&stream_id);
                         continue;
@@ -1638,6 +1984,9 @@ impl QUICListener {
                                         req.start.elapsed(),
                                         RouteOutcome::Timeout,
                                     );
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
                                     info!(
                                         "Upstream {} body timeout latency_ms {}",
                                         req.backend_addr.as_deref().unwrap_or("?"),
@@ -1654,6 +2003,9 @@ impl QUICListener {
                                         req.start.elapsed(),
                                         RouteOutcome::BackendError,
                                     );
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
                                     error!(
                                         "Upstream {} body error: {:?}",
                                         req.backend_addr.as_deref().unwrap_or("?"),
@@ -1725,6 +2077,23 @@ impl QUICListener {
             backend_index,
             upstream_pool,
         ))
+    }
+
+    fn pick_alternate_backend(
+        upstream_pool: &Arc<Mutex<UpstreamPool>>,
+        primary_index: usize,
+    ) -> Option<(String, usize)> {
+        let pool = upstream_pool.lock().ok()?;
+        let healthy = pool.pool.healthy_indices();
+        for index in healthy {
+            if index == primary_index {
+                continue;
+            }
+            if let Some(address) = pool.pool.address(index) {
+                return Some((address.to_string(), index));
+            }
+        }
+        None
     }
 
     /// Handle an already-resolved `ForwardResult`, applying health transitions
@@ -1804,6 +2173,24 @@ impl QUICListener {
                     stream_id,
                     http::StatusCode::SERVICE_UNAVAILABLE,
                     b"backend overloaded, retry later\n",
+                )
+            }
+            Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
+                info!("Backend circuit open");
+                metrics.inc_failure();
+                metrics.inc_overload_shed();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
+                info!(
+                    "Upstream {} status 503 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::SERVICE_UNAVAILABLE,
+                    b"backend circuit open, retry later\n",
                 )
             }
             Err(ProxyError::Transport(_))

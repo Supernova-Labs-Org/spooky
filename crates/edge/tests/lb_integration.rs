@@ -115,6 +115,7 @@ fn make_config(
         },
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
+        resilience: spooky_config::config::Resilience::default(),
     }
 }
 

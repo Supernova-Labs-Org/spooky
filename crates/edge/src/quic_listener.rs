@@ -52,6 +52,7 @@ use crate::{
     outcome_from_status,
     resilience::RuntimeResilience,
     route_index::RouteIndex,
+    watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
 
 fn is_hop_header(name: &str) -> bool {
@@ -78,7 +79,7 @@ fn request_content_length(headers: &[quiche::h3::Header]) -> Option<usize> {
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let shared_state = Arc::new(Self::build_shared_state(&config)?);
-        Self::spawn_control_plane_tasks(&config, &shared_state);
+        Self::spawn_control_plane_tasks(&config, &shared_state, 1);
         let socket = Self::bind_socket(&config, false)?;
         Self::new_with_socket_and_shared_state(config, socket, shared_state)
     }
@@ -148,6 +149,7 @@ impl QUICListener {
             &config.resilience,
             global_inflight_limit,
         ));
+        let watchdog = Arc::new(WatchdogCoordinator::new(&config.resilience.watchdog));
 
         Ok(SharedRuntimeState {
             h2_pool,
@@ -156,15 +158,27 @@ impl QUICListener {
             global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
             metrics: Arc::new(Metrics::default()),
             resilience,
+            watchdog,
         })
     }
 
-    pub fn spawn_control_plane_tasks(config: &SpookyConfig, shared_state: &SharedRuntimeState) {
+    pub fn spawn_control_plane_tasks(
+        config: &SpookyConfig,
+        shared_state: &SharedRuntimeState,
+        worker_count: usize,
+    ) {
+        shared_state.watchdog.set_expected_workers(worker_count.max(1));
         Self::spawn_health_checks(
             shared_state.upstream_pools.clone(),
             Arc::clone(&shared_state.h2_pool),
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
+        Self::spawn_watchdog(
+            config,
+            Arc::clone(&shared_state.metrics),
+            Arc::clone(&shared_state.resilience),
+            Arc::clone(&shared_state.watchdog),
+        );
     }
 
     pub fn bind_reuseport_sockets(
@@ -232,8 +246,10 @@ impl QUICListener {
             routing_index,
             metrics: Arc::clone(&shared_state.metrics),
             resilience: Arc::clone(&shared_state.resilience),
+            watchdog: Arc::clone(&shared_state.watchdog),
             draining: false,
             drain_start: None,
+            watchdog_worker_drained: false,
             backend_timeout,
             backend_body_idle_timeout,
             backend_body_total_timeout,
@@ -642,6 +658,22 @@ impl QUICListener {
     }
 
     pub fn poll(&mut self) {
+        self.watchdog.mark_poll_progress();
+        if !self.watchdog.restart_requested() {
+            self.watchdog_worker_drained = false;
+        }
+        if self.watchdog.restart_requested() && !self.draining {
+            warn!("Watchdog requested restart; entering draining mode");
+            self.start_draining();
+        }
+        if self.draining && self.drain_complete() {
+            if self.watchdog.restart_requested() && !self.watchdog_worker_drained {
+                self.watchdog.mark_worker_drained();
+                self.watchdog_worker_drained = true;
+            }
+            return;
+        }
+
         // Read a UDP datagram and feed it into quiche.
         let (len, peer) = match self.socket.recv_from(&mut self.recv_buf) {
             Ok(v) => v,
@@ -2430,6 +2462,165 @@ impl QUICListener {
             Ok(resp) => resp,
             Err(_) => Response::new(Full::new(Bytes::from_static(b"failed to render metrics\n"))),
         }
+    }
+
+    fn spawn_watchdog(
+        config: &SpookyConfig,
+        metrics: Arc<Metrics>,
+        resilience: Arc<RuntimeResilience>,
+        watchdog: Arc<WatchdogCoordinator>,
+    ) {
+        let watchdog_config = WatchdogRuntimeConfig::from(&config.resilience.watchdog);
+        if !watchdog_config.enabled || !watchdog.enabled() {
+            return;
+        }
+
+        let handle = match runtime_handle() {
+            Some(handle) => handle,
+            None => {
+                error!("Watchdog disabled: no Tokio runtime available");
+                return;
+            }
+        };
+
+        handle.spawn(async move {
+            info!(
+                "Watchdog enabled: check_interval_ms={} poll_stall_timeout_ms={} timeout_error_rate_percent={} overload_inflight_percent={} unhealthy_windows={} drain_grace_ms={} restart_cooldown_ms={}",
+                watchdog_config.check_interval_ms,
+                watchdog_config.poll_stall_timeout_ms,
+                watchdog_config.timeout_error_rate_percent,
+                watchdog_config.overload_inflight_percent,
+                watchdog_config.unhealthy_consecutive_windows,
+                watchdog_config.drain_grace_ms,
+                watchdog_config.restart_cooldown_ms,
+            );
+
+            let mut interval =
+                tokio::time::interval(Duration::from_millis(watchdog_config.check_interval_ms));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let has_restart_hook = watchdog_config
+                .restart_hook
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|value| !value.is_empty());
+
+            let mut previous_requests = metrics.requests_total.load(Ordering::Relaxed);
+            let mut previous_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
+            let mut degraded_windows = 0u32;
+
+            loop {
+                interval.tick().await;
+                let now = now_millis();
+                let stalled = now.saturating_sub(watchdog.last_poll_progress_ms())
+                    > watchdog_config.poll_stall_timeout_ms;
+
+                let current_requests = metrics.requests_total.load(Ordering::Relaxed);
+                let current_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
+                let request_delta = current_requests.saturating_sub(previous_requests);
+                let timeout_delta = current_timeouts.saturating_sub(previous_timeouts);
+                previous_requests = current_requests;
+                previous_timeouts = current_timeouts;
+
+                let timeout_rate_percent = if request_delta == 0 {
+                    0
+                } else {
+                    timeout_delta.saturating_mul(100) / request_delta
+                };
+
+                let timeout_pressure = request_delta >= watchdog_config.min_requests_per_window
+                    && timeout_rate_percent >= watchdog_config.timeout_error_rate_percent as u64;
+                let overload_pressure = resilience.adaptive_admission.inflight_percent()
+                    >= watchdog_config.overload_inflight_percent;
+
+                if stalled || timeout_pressure || overload_pressure {
+                    degraded_windows = degraded_windows.saturating_add(1);
+                    watchdog.set_degraded(true);
+                    metrics.inc_watchdog_degraded_window();
+                } else {
+                    degraded_windows = 0;
+                    watchdog.set_degraded(false);
+                }
+
+                if degraded_windows >= watchdog_config.unhealthy_consecutive_windows {
+                    if !has_restart_hook {
+                        warn!(
+                            "Watchdog detected unhealthy runtime state, but restart_hook is not configured"
+                        );
+                        degraded_windows = 0;
+                        continue;
+                    }
+                    let mut reasons = Vec::new();
+                    if stalled {
+                        reasons.push("poll_stall");
+                    }
+                    if timeout_pressure {
+                        reasons.push("timeout_spike");
+                    }
+                    if overload_pressure {
+                        reasons.push("inflight_overload");
+                    }
+                    let reason = reasons.join("+");
+                    if watchdog.request_restart(&reason) {
+                        metrics.inc_watchdog_restart_request();
+                        warn!("Watchdog requested safe restart: {}", reason);
+                    }
+                    degraded_windows = 0;
+                }
+
+                if !watchdog.restart_requested() {
+                    continue;
+                }
+
+                let requested_at = watchdog.restart_requested_at_ms();
+                let grace_elapsed = requested_at != 0
+                    && now.saturating_sub(requested_at) >= watchdog_config.drain_grace_ms;
+                if !watchdog.workers_drained() && !grace_elapsed {
+                    continue;
+                }
+
+                let restart_reason = watchdog.restart_reason();
+                if watchdog.workers_drained() {
+                    info!(
+                        "Watchdog safe restart condition reached (all workers drained): {}",
+                        restart_reason
+                    );
+                } else {
+                    warn!(
+                        "Watchdog restart drain grace elapsed; executing hook without full drain: {}",
+                        restart_reason
+                    );
+                }
+
+                let cmd = watchdog_config
+                    .restart_hook
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default();
+                let status = tokio::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .env("SPOOKY_WATCHDOG_REASON", &restart_reason)
+                    .status()
+                    .await;
+                match status {
+                    Ok(status) => {
+                        info!(
+                            "Watchdog restart hook exited with status {}",
+                            status
+                                .code()
+                                .map(|code| code.to_string())
+                                .unwrap_or_else(|| "signal".to_string())
+                        );
+                    }
+                    Err(err) => {
+                        error!("Watchdog restart hook execution failed: {}", err);
+                    }
+                }
+                metrics.inc_watchdog_restart_hook();
+
+                watchdog.complete_restart_cycle();
+            }
+        });
     }
 
     fn spawn_health_checks(

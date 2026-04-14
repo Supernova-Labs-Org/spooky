@@ -256,6 +256,46 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.resilience.watchdog.check_interval_ms == 0 {
+        error!("resilience.watchdog.check_interval_ms must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.watchdog.poll_stall_timeout_ms == 0 {
+        error!("resilience.watchdog.poll_stall_timeout_ms must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.watchdog.timeout_error_rate_percent > 100 {
+        error!("resilience.watchdog.timeout_error_rate_percent must be <= 100");
+        return false;
+    }
+
+    if config.resilience.watchdog.min_requests_per_window == 0 {
+        error!("resilience.watchdog.min_requests_per_window must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.watchdog.overload_inflight_percent > 100 {
+        error!("resilience.watchdog.overload_inflight_percent must be <= 100");
+        return false;
+    }
+
+    if config.resilience.watchdog.unhealthy_consecutive_windows == 0 {
+        error!("resilience.watchdog.unhealthy_consecutive_windows must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.watchdog.drain_grace_ms == 0 {
+        error!("resilience.watchdog.drain_grace_ms must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.watchdog.restart_cooldown_ms == 0 {
+        error!("resilience.watchdog.restart_cooldown_ms must be greater than 0");
+        return false;
+    }
+
     // --- Validate observability ---
     if config.observability.metrics.enabled {
         if config.observability.metrics.address.is_empty() {
@@ -593,6 +633,8 @@ upstream:
         assert_eq!(cfg.observability.metrics.path, "/metrics");
         assert!(cfg.resilience.adaptive_admission.enabled);
         assert_eq!(cfg.resilience.route_queue.default_cap, 512);
+        assert!(!cfg.resilience.watchdog.enabled);
+        assert_eq!(cfg.resilience.watchdog.check_interval_ms, 1_000);
     }
 
     #[test]
@@ -658,6 +700,14 @@ upstream:
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.resilience.brownout.trigger_inflight_percent = 50;
         cfg.resilience.brownout.recover_inflight_percent = 50;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.watchdog.timeout_error_rate_percent = 101;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.watchdog.unhealthy_consecutive_windows = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());

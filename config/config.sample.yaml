@@ -109,3 +109,14 @@ resilience:
         trigger_inflight_percent: 90
         recover_inflight_percent: 60
         core_routes: []
+    watchdog:
+        enabled: false
+        check_interval_ms: 1000
+        poll_stall_timeout_ms: 5000
+        timeout_error_rate_percent: 60
+        min_requests_per_window: 20
+        overload_inflight_percent: 95
+        unhealthy_consecutive_windows: 3
+        drain_grace_ms: 8000
+        restart_cooldown_ms: 120000
+        restart_hook: null

@@ -25,6 +25,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use crate::cid_radix::CidRadix;
 use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
 use crate::resilience::{AdaptivePermit, RouteQueuePermit, RuntimeResilience};
+use crate::watchdog::WatchdogCoordinator;
 
 /// A streaming HTTP body backed by a tokio mpsc channel.
 /// The quiche Data handler sends chunks through the sender;
@@ -62,6 +63,7 @@ pub mod constants;
 pub mod quic_listener;
 mod resilience;
 mod route_index;
+mod watchdog;
 
 pub use quic_listener::configure_async_runtime;
 
@@ -72,6 +74,7 @@ pub struct SharedRuntimeState {
     pub(crate) global_inflight: Arc<Semaphore>,
     pub(crate) metrics: Arc<Metrics>,
     pub(crate) resilience: Arc<RuntimeResilience>,
+    pub(crate) watchdog: Arc<WatchdogCoordinator>,
 }
 
 pub struct QUICListener {
@@ -86,8 +89,10 @@ pub struct QUICListener {
     pub(crate) routing_index: route_index::RouteIndex,
     pub metrics: Arc<Metrics>,
     pub resilience: Arc<RuntimeResilience>,
+    pub watchdog: Arc<WatchdogCoordinator>,
     pub draining: bool,
     pub drain_start: Option<Instant>,
+    pub watchdog_worker_drained: bool,
     pub backend_timeout: Duration,
     pub backend_body_idle_timeout: Duration,
     pub backend_body_total_timeout: Duration,
@@ -207,6 +212,9 @@ pub struct Metrics {
     pub backend_errors: AtomicU64,
     pub overload_shed: AtomicU64,
     pub scid_rotations: AtomicU64,
+    pub watchdog_restart_requests: AtomicU64,
+    pub watchdog_restart_hooks: AtomicU64,
+    pub watchdog_degraded_windows: AtomicU64,
     route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
 }
 
@@ -248,6 +256,9 @@ impl Default for Metrics {
             backend_errors: AtomicU64::new(0),
             overload_shed: AtomicU64::new(0),
             scid_rotations: AtomicU64::new(0),
+            watchdog_restart_requests: AtomicU64::new(0),
+            watchdog_restart_hooks: AtomicU64::new(0),
+            watchdog_degraded_windows: AtomicU64::new(0),
             route_stats_shards: shards,
         }
     }
@@ -280,6 +291,20 @@ impl Metrics {
 
     pub fn inc_scid_rotation(&self) {
         self.scid_rotations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_watchdog_restart_request(&self) {
+        self.watchdog_restart_requests
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_watchdog_restart_hook(&self) {
+        self.watchdog_restart_hooks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_watchdog_degraded_window(&self) {
+        self.watchdog_degraded_windows
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
@@ -373,6 +398,27 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_scid_rotations {}\n",
             self.scid_rotations.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_watchdog_restart_requests Total watchdog restart requests.\n");
+        out.push_str("# TYPE spooky_watchdog_restart_requests counter\n");
+        out.push_str(&format!(
+            "spooky_watchdog_restart_requests {}\n",
+            self.watchdog_restart_requests.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_watchdog_restart_hooks Total executed watchdog restart hooks.\n");
+        out.push_str("# TYPE spooky_watchdog_restart_hooks counter\n");
+        out.push_str(&format!(
+            "spooky_watchdog_restart_hooks {}\n",
+            self.watchdog_restart_hooks.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_watchdog_degraded_windows Total degraded watchdog evaluation windows.\n");
+        out.push_str("# TYPE spooky_watchdog_degraded_windows counter\n");
+        out.push_str(&format!(
+            "spooky_watchdog_degraded_windows {}\n",
+            self.watchdog_degraded_windows.load(Ordering::Relaxed)
         ));
 
         let mut snapshot: Vec<(String, RouteStats)> = Vec::new();

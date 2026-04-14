@@ -202,6 +202,42 @@ pub fn resilience_default_brownout_recover_inflight_percent() -> u8 {
     60
 }
 
+pub fn resilience_default_watchdog_enabled() -> bool {
+    false
+}
+
+pub fn resilience_default_watchdog_check_interval_ms() -> u64 {
+    1_000
+}
+
+pub fn resilience_default_watchdog_poll_stall_timeout_ms() -> u64 {
+    5_000
+}
+
+pub fn resilience_default_watchdog_timeout_error_rate_percent() -> u8 {
+    60
+}
+
+pub fn resilience_default_watchdog_min_requests_per_window() -> u64 {
+    20
+}
+
+pub fn resilience_default_watchdog_overload_inflight_percent() -> u8 {
+    95
+}
+
+pub fn resilience_default_watchdog_unhealthy_consecutive_windows() -> u32 {
+    3
+}
+
+pub fn resilience_default_watchdog_drain_grace_ms() -> u64 {
+    8_000
+}
+
+pub fn resilience_default_watchdog_restart_cooldown_ms() -> u64 {
+    120_000
+}
+
 pub fn observe_default_address() -> String {
     String::from("127.0.0.1")
 }

@@ -70,7 +70,6 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    QUICListener::spawn_control_plane_tasks(&config_yaml, &shared_state);
 
     let requested_workers = config_yaml.performance.worker_threads.max(1);
     let worker_count = if requested_workers > 1 && !config_yaml.performance.reuseport {
@@ -82,6 +81,7 @@ async fn main() {
     } else {
         requested_workers
     };
+    QUICListener::spawn_control_plane_tasks(&config_yaml, &shared_state, worker_count);
 
     let sockets = if worker_count > 1 {
         match QUICListener::bind_reuseport_sockets(&config_yaml, worker_count) {

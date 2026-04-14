@@ -407,14 +407,18 @@ impl Metrics {
             self.watchdog_restart_requests.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_watchdog_restart_hooks Total executed watchdog restart hooks.\n");
+        out.push_str(
+            "# HELP spooky_watchdog_restart_hooks Total executed watchdog restart hooks.\n",
+        );
         out.push_str("# TYPE spooky_watchdog_restart_hooks counter\n");
         out.push_str(&format!(
             "spooky_watchdog_restart_hooks {}\n",
             self.watchdog_restart_hooks.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_watchdog_degraded_windows Total degraded watchdog evaluation windows.\n");
+        out.push_str(
+            "# HELP spooky_watchdog_degraded_windows Total degraded watchdog evaluation windows.\n",
+        );
         out.push_str("# TYPE spooky_watchdog_degraded_windows counter\n");
         out.push_str(&format!(
             "spooky_watchdog_degraded_windows {}\n",

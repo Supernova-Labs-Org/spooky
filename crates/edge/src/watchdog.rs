@@ -72,7 +72,8 @@ impl WatchdogCoordinator {
     }
 
     pub fn set_expected_workers(&self, workers: usize) {
-        self.expected_workers.store(workers.max(1), Ordering::Relaxed);
+        self.expected_workers
+            .store(workers.max(1), Ordering::Relaxed);
     }
 
     pub fn mark_poll_progress(&self) {
@@ -109,7 +110,8 @@ impl WatchdogCoordinator {
             return false;
         }
 
-        self.restart_requested_at_ms.store(now_ms, Ordering::Relaxed);
+        self.restart_requested_at_ms
+            .store(now_ms, Ordering::Relaxed);
         self.drained_workers.store(0, Ordering::Relaxed);
         if let Ok(mut current) = self.restart_reason.lock() {
             *current = reason.to_string();
@@ -145,7 +147,8 @@ impl WatchdogCoordinator {
     }
 
     pub fn complete_restart_cycle(&self) {
-        self.last_restart_at_ms.store(now_millis(), Ordering::Relaxed);
+        self.last_restart_at_ms
+            .store(now_millis(), Ordering::Relaxed);
         self.restart_requested.store(false, Ordering::Relaxed);
         self.restart_requested_at_ms.store(0, Ordering::Relaxed);
         self.drained_workers.store(0, Ordering::Relaxed);

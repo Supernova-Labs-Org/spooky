@@ -167,7 +167,9 @@ impl QUICListener {
         shared_state: &SharedRuntimeState,
         worker_count: usize,
     ) {
-        shared_state.watchdog.set_expected_workers(worker_count.max(1));
+        shared_state
+            .watchdog
+            .set_expected_workers(worker_count.max(1));
         Self::spawn_health_checks(
             shared_state.upstream_pools.clone(),
             Arc::clone(&shared_state.h2_pool),
@@ -1653,7 +1655,8 @@ impl QUICListener {
                             );
                             if let Some(req) = connection.streams.remove(&stream_id) {
                                 metrics.inc_failure();
-                                let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
+                                let route_label =
+                                    req.upstream_name.as_deref().unwrap_or("unrouted");
                                 metrics.record_route(
                                     route_label,
                                     req.start.elapsed(),
@@ -2067,40 +2070,38 @@ impl QUICListener {
                                 }
                             }
                         }
-                        ResponseChunk::End => {
-                            match h3.send_body(quic, stream_id, b"", true) {
-                                Ok(_) => {
-                                    req.phase = StreamPhase::Completed;
-                                    terminal = true;
-                                    break;
-                                }
-                                Err(quiche::h3::Error::StreamBlocked) => {
-                                    req.pending_chunk = Some(ResponseChunk::End);
-                                    break;
-                                }
-                                Err(err) => {
-                                    error!(
-                                        "HTTP/3 send_body end protocol error on stream {}: {:?}",
-                                        stream_id, err
-                                    );
-                                    req.phase = StreamPhase::Failed;
-                                    metrics.inc_failure();
-                                    metrics.inc_backend_error();
-                                    let route_label =
-                                        req.upstream_name.as_deref().unwrap_or("unrouted");
-                                    metrics.record_route(
-                                        route_label,
-                                        req.start.elapsed(),
-                                        RouteOutcome::BackendError,
-                                    );
-                                    resilience
-                                        .adaptive_admission
-                                        .observe(req.start.elapsed(), true);
-                                    terminal = true;
-                                    break;
-                                }
+                        ResponseChunk::End => match h3.send_body(quic, stream_id, b"", true) {
+                            Ok(_) => {
+                                req.phase = StreamPhase::Completed;
+                                terminal = true;
+                                break;
                             }
-                        }
+                            Err(quiche::h3::Error::StreamBlocked) => {
+                                req.pending_chunk = Some(ResponseChunk::End);
+                                break;
+                            }
+                            Err(err) => {
+                                error!(
+                                    "HTTP/3 send_body end protocol error on stream {}: {:?}",
+                                    stream_id, err
+                                );
+                                req.phase = StreamPhase::Failed;
+                                metrics.inc_failure();
+                                metrics.inc_backend_error();
+                                let route_label =
+                                    req.upstream_name.as_deref().unwrap_or("unrouted");
+                                metrics.record_route(
+                                    route_label,
+                                    req.start.elapsed(),
+                                    RouteOutcome::BackendError,
+                                );
+                                resilience
+                                    .adaptive_admission
+                                    .observe(req.start.elapsed(), true);
+                                terminal = true;
+                                break;
+                            }
+                        },
                         ResponseChunk::Error(err) => {
                             // Best-effort: close the stream.
                             let _ = h3.send_body(quic, stream_id, b"", true);

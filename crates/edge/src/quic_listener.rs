@@ -856,6 +856,9 @@ impl QUICListener {
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
+            let _ = connection
+                .quic
+                .close(true, 0x1, b"http3 protocol handling error");
         }
 
         Self::maybe_rotate_scid(&mut connection, &self.metrics);
@@ -1643,7 +1646,32 @@ impl QUICListener {
                             }
                         }
                         Err(quiche::h3::Error::Done) => break,
-                        Err(e) => return Err(e),
+                        Err(err) => {
+                            error!(
+                                "HTTP/3 recv_body protocol error on stream {}: {:?}",
+                                stream_id, err
+                            );
+                            if let Some(req) = connection.streams.remove(&stream_id) {
+                                metrics.inc_failure();
+                                let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
+                                metrics.record_route(
+                                    route_label,
+                                    req.start.elapsed(),
+                                    RouteOutcome::Failure,
+                                );
+                                resilience
+                                    .adaptive_admission
+                                    .observe(req.start.elapsed(), true);
+                            }
+                            let _ = Self::send_simple_response(
+                                h3,
+                                &mut connection.quic,
+                                stream_id,
+                                http::StatusCode::BAD_REQUEST,
+                                b"malformed request stream\n",
+                            );
+                            break;
+                        }
                     }
                 },
                 Ok((stream_id, quiche::h3::Event::Finished)) => {
@@ -1724,7 +1752,7 @@ impl QUICListener {
             if let Some(req) = streams.get(&stream_id)
                 && Instant::now() >= req.total_request_deadline
             {
-                Self::handle_forward_result(
+                if let Err(protocol_err) = Self::handle_forward_result(
                     h3,
                     quic,
                     stream_id,
@@ -1733,7 +1761,12 @@ impl QUICListener {
                     upstream_pools,
                     routing_index,
                     metrics,
-                )?;
+                ) {
+                    error!(
+                        "failed to emit timeout response for stream {}: {:?}",
+                        stream_id, protocol_err
+                    );
+                }
                 resilience
                     .adaptive_admission
                     .observe(req.start.elapsed(), true);
@@ -1802,7 +1835,34 @@ impl QUICListener {
                                 value.as_bytes(),
                             ));
                         }
-                        h3.send_response(quic, stream_id, &h3_headers, false)?;
+                        if let Err(err) = h3.send_response(quic, stream_id, &h3_headers, false) {
+                            if let Some(req) = streams.get(&stream_id) {
+                                let protocol = ProxyError::Protocol(format!(
+                                    "failed to send HTTP/3 response headers: {:?}",
+                                    err
+                                ));
+                                if let Err(protocol_err) = Self::handle_forward_result(
+                                    h3,
+                                    quic,
+                                    stream_id,
+                                    req,
+                                    Err(protocol),
+                                    upstream_pools,
+                                    routing_index,
+                                    metrics,
+                                ) {
+                                    error!(
+                                        "failed to emit protocol recovery response on stream {}: {:?}",
+                                        stream_id, protocol_err
+                                    );
+                                }
+                                resilience
+                                    .adaptive_admission
+                                    .observe(req.start.elapsed(), true);
+                            }
+                            streams.remove(&stream_id);
+                            continue;
+                        }
 
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
                         // Enforces both body idle and total deadlines so slow upstream bodies
@@ -1930,7 +1990,7 @@ impl QUICListener {
                         // Send error response first, then remove the stream so
                         // cleanup only happens after the response has been emitted.
                         if let Some(req) = streams.get(&stream_id) {
-                            Self::handle_forward_result(
+                            if let Err(protocol_err) = Self::handle_forward_result(
                                 h3,
                                 quic,
                                 stream_id,
@@ -1939,7 +1999,12 @@ impl QUICListener {
                                 upstream_pools,
                                 routing_index,
                                 metrics,
-                            )?;
+                            ) {
+                                error!(
+                                    "failed to emit recoverable forward error response on stream {}: {:?}",
+                                    stream_id, protocol_err
+                                );
+                            }
                             resilience
                                 .adaptive_admission
                                 .observe(req.start.elapsed(), true);
@@ -1979,14 +2044,62 @@ impl QUICListener {
                                     req.pending_chunk = Some(ResponseChunk::Data(data));
                                     break;
                                 }
-                                Err(e) => return Err(e),
+                                Err(err) => {
+                                    error!(
+                                        "HTTP/3 send_body data protocol error on stream {}: {:?}",
+                                        stream_id, err
+                                    );
+                                    req.phase = StreamPhase::Failed;
+                                    metrics.inc_failure();
+                                    metrics.inc_backend_error();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::BackendError,
+                                    );
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
+                                    terminal = true;
+                                    break;
+                                }
                             }
                         }
                         ResponseChunk::End => {
-                            h3.send_body(quic, stream_id, b"", true)?;
-                            req.phase = StreamPhase::Completed;
-                            terminal = true;
-                            break;
+                            match h3.send_body(quic, stream_id, b"", true) {
+                                Ok(_) => {
+                                    req.phase = StreamPhase::Completed;
+                                    terminal = true;
+                                    break;
+                                }
+                                Err(quiche::h3::Error::StreamBlocked) => {
+                                    req.pending_chunk = Some(ResponseChunk::End);
+                                    break;
+                                }
+                                Err(err) => {
+                                    error!(
+                                        "HTTP/3 send_body end protocol error on stream {}: {:?}",
+                                        stream_id, err
+                                    );
+                                    req.phase = StreamPhase::Failed;
+                                    metrics.inc_failure();
+                                    metrics.inc_backend_error();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::BackendError,
+                                    );
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
+                                    terminal = true;
+                                    break;
+                                }
+                            }
                         }
                         ResponseChunk::Error(err) => {
                             // Best-effort: close the stream.
@@ -2169,9 +2282,19 @@ impl QUICListener {
         let upstream_pool = upstream_name.and_then(|n| upstream_pools.get(n)).cloned();
 
         match result {
-            // Ok variant is handled upstream by advance_streams_non_blocking;
-            // handle_forward_result is only called with Err variants.
-            Ok(_) => unreachable!("handle_forward_result called with Ok result"),
+            Ok(_) => {
+                error!("Unexpected successful forward result in error handler path");
+                metrics.inc_failure();
+                metrics.inc_backend_error();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_GATEWAY,
+                    b"unexpected upstream state\n",
+                )
+            }
             Err(ProxyError::Bridge(err)) => {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
@@ -2252,6 +2375,19 @@ impl QUICListener {
                     stream_id,
                     http::StatusCode::BAD_GATEWAY,
                     b"upstream error\n",
+                )
+            }
+            Err(ProxyError::Protocol(err)) => {
+                error!("Protocol error: {}", err);
+                metrics.inc_failure();
+                metrics.inc_backend_error();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_GATEWAY,
+                    b"upstream protocol error\n",
                 )
             }
             Err(ProxyError::Timeout) => {

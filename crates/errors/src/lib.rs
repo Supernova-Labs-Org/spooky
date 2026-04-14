@@ -47,6 +47,9 @@ pub enum ProxyError {
     #[error("transport error: {0}")]
     Transport(String),
 
+    #[error("protocol error: {0}")]
+    Protocol(String),
+
     #[error("backend timeout")]
     Timeout,
 

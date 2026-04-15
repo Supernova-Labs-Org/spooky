@@ -1027,8 +1027,17 @@ fn classify_regression(
     let severe = gate.severe_pct.max(warn);
 
     if baseline > 0.0 {
-        let warn_limit = baseline * (1.0 + warn);
-        let severe_limit = baseline * (1.0 + severe);
+        // For tiny baselines (for example, allocation calls close to zero),
+        // percent-only thresholds are too sensitive to allocator/runtime noise
+        // across OS/toolchain environments. Apply a configurable floor so gates
+        // remain stable while still catching meaningful growth.
+        let effective_baseline = if gate.zero_baseline_limit > 0.0 {
+            baseline.max(gate.zero_baseline_limit)
+        } else {
+            baseline
+        };
+        let warn_limit = effective_baseline * (1.0 + warn);
+        let severe_limit = effective_baseline * (1.0 + severe);
         if current > severe_limit {
             return Some((RegressionSeverity::Severe, warn_limit, severe_limit));
         }

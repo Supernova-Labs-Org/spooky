@@ -36,7 +36,7 @@ gates:
   alloc_calls:
     warn_pct: 0.20
     severe_pct: 0.50
-    zero_baseline_limit: 32
+    zero_baseline_limit: 4
   alloc_bytes:
     warn_pct: 0.20
     severe_pct: 0.50

@@ -143,4 +143,6 @@ Regression gates evaluate:
 - allocation inflation (`alloc_calls`, `alloc_bytes`)
 - tail latency regression (`latency_p99_ns`) for sampled-latency cases (macro suite and any sampled micro cases)
 
+For metrics with tiny baselines (especially allocation call counts), the gate logic applies a minimum baseline floor from the manifest to avoid false positives caused by allocator/runtime differences across environments.
+
 CI fails on severe regressions. Warn-level regressions remain visible in markdown artifacts for review.

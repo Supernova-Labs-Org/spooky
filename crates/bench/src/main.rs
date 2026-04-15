@@ -240,6 +240,8 @@ struct GateMetric {
     severe_pct: f64,
     #[serde(default)]
     zero_baseline_limit: f64,
+    #[serde(default)]
+    min_delta_abs: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1038,6 +1040,11 @@ fn classify_regression(
         };
         let warn_limit = effective_baseline * (1.0 + warn);
         let severe_limit = effective_baseline * (1.0 + severe);
+        let delta = current - baseline;
+        let min_delta_abs = gate.min_delta_abs.max(0.0);
+        if delta < min_delta_abs {
+            return None;
+        }
         if current > severe_limit {
             return Some((RegressionSeverity::Severe, warn_limit, severe_limit));
         }
@@ -1061,6 +1068,42 @@ fn classify_regression(
         return Some((RegressionSeverity::Warn, warn_limit, severe_limit));
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GateMetric, RegressionSeverity, classify_regression};
+
+    fn gate(
+        warn_pct: f64,
+        severe_pct: f64,
+        zero_baseline_limit: f64,
+        min_delta_abs: f64,
+    ) -> GateMetric {
+        GateMetric {
+            warn_pct,
+            severe_pct,
+            zero_baseline_limit,
+            min_delta_abs,
+        }
+    }
+
+    #[test]
+    fn min_delta_abs_suppresses_small_absolute_memory_drift() {
+        let memory_gate = gate(0.20, 0.40, 128.0, 256.0);
+        let regression = classify_regression(320.0, 200.0, &memory_gate, 128.0);
+        assert!(regression.is_none());
+    }
+
+    #[test]
+    fn min_delta_abs_still_allows_large_absolute_memory_regressions() {
+        let memory_gate = gate(0.20, 0.40, 128.0, 256.0);
+        let regression = classify_regression(520.0, 200.0, &memory_gate, 128.0);
+        assert!(matches!(
+            regression,
+            Some((RegressionSeverity::Severe, _, _))
+        ));
+    }
 }
 
 fn median(values: &mut [f64]) -> f64 {

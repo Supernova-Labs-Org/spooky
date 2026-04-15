@@ -950,7 +950,8 @@
 <h3 id="regression-gates-ci-profile">Regression gates (CI profile)</h3>
 <pre><code class="language-bash">./scripts/bench-gate.sh
 </code></pre>
-<p>This runs both micro and macro suites with baseline checks and fails on severe regressions by default.</p>
+<p>This runs both micro and macro suites with baseline checks and fails on severe regressions by default.
+For noisy shared environments, you can set <code>BENCH_GATE_RETRIES=1</code> (or higher) to retry failed suites before final failure.</p>
 <h2 id="promote-new-release-baseline">Promote New Release Baseline</h2>
 <p>After validating benchmark results for a release:</p>
 <pre><code class="language-bash">./scripts/bench-promote-baseline.sh vX.Y.Z
@@ -989,7 +990,8 @@
 <li>allocation inflation (<code>alloc_calls</code>, <code>alloc_bytes</code>)</li>
 <li>tail latency regression (<code>latency_p99_ns</code>) for sampled-latency cases (macro suite and any sampled micro cases)</li>
 </ul>
-<p>For metrics with tiny baselines (especially allocation call counts), the gate logic applies a minimum baseline floor from the manifest to avoid false positives caused by allocator/runtime differences across environments.</p>
+<p>For metrics with tiny baselines (especially allocation call counts), the gate logic applies a minimum baseline floor from the manifest to avoid false positives caused by allocator/runtime differences across environments.
+Memory gates also support an absolute increase floor (<code>min_delta_abs</code>) so small RSS movement does not fail CI when percentage deltas look large on tiny baselines.</p>
 <p>CI fails on severe regressions. Warn-level regressions remain visible in markdown artifacts for review.</p>
   </div>
   

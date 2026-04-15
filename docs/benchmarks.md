@@ -92,6 +92,7 @@ Outputs:
 ```
 
 This runs both micro and macro suites with baseline checks and fails on severe regressions by default.
+For noisy shared environments, you can set `BENCH_GATE_RETRIES=1` (or higher) to retry failed suites before final failure.
 
 ## Promote New Release Baseline
 
@@ -144,5 +145,6 @@ Regression gates evaluate:
 - tail latency regression (`latency_p99_ns`) for sampled-latency cases (macro suite and any sampled micro cases)
 
 For metrics with tiny baselines (especially allocation call counts), the gate logic applies a minimum baseline floor from the manifest to avoid false positives caused by allocator/runtime differences across environments.
+Memory gates also support an absolute increase floor (`min_delta_abs`) so small RSS movement does not fail CI when percentage deltas look large on tiny baselines.
 
 CI fails on severe regressions. Warn-level regressions remain visible in markdown artifacts for review.

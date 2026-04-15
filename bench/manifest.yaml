@@ -33,6 +33,7 @@ gates:
     warn_pct: 0.20
     severe_pct: 0.40
     zero_baseline_limit: 128
+    min_delta_abs: 256
   alloc_calls:
     warn_pct: 0.20
     severe_pct: 0.50

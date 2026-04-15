@@ -34,7 +34,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run benchmark regression gates
         run: |
-          PROFILE=ci FAIL_ON=severe ./scripts/bench-gate.sh
+          PROFILE=ci FAIL_ON=severe BENCH_GATE_RETRIES=1 ./scripts/bench-gate.sh
       - name: Upload benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4

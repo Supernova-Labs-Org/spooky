@@ -76,6 +76,31 @@ fn request_content_length(headers: &[quiche::h3::Header]) -> Option<usize> {
     None
 }
 
+fn resolve_primary_from_radix_prefix<T>(
+    dcid: &[u8],
+    connections: &HashMap<Arc<[u8]>, T>,
+    cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+    cid_radix: &mut CidRadix,
+) -> Option<Arc<[u8]>> {
+    let matched_cid = cid_radix.longest_prefix_match(dcid)?;
+
+    if connections.contains_key(matched_cid.as_ref()) {
+        return Some(matched_cid);
+    }
+
+    if let Some(primary) = cid_routes.get(matched_cid.as_ref()).cloned() {
+        if connections.contains_key(primary.as_ref()) {
+            return Some(primary);
+        }
+        // Alias points to a missing primary, clean up stale alias map entry.
+        cid_routes.remove(matched_cid.as_ref());
+    }
+
+    // Stale radix entry (either alias or retired primary).
+    cid_radix.remove(matched_cid.as_ref());
+    None
+}
+
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let shared_state = Arc::new(Self::build_shared_state(&config)?);
@@ -478,17 +503,21 @@ impl QUICListener {
         // This handles cases where client uses longer DCIDs based on server's SCID
         if header.ty == quiche::Type::Short
             && dcid_bytes.len() > MIN_SCID_LEN_BYTES
-            && let Some(matched_cid) = self.cid_radix.longest_prefix_match(&dcid_bytes)
+            && let Some(primary_cid) = resolve_primary_from_radix_prefix(
+                &dcid_bytes,
+                &self.connections,
+                &mut self.cid_routes,
+                &mut self.cid_radix,
+            )
         {
             debug!(
-                "Found connection via prefix match. Stored CID: {:02x?}, Packet DCID: {:02x?}",
-                matched_cid, &dcid_bytes
+                "Found connection via prefix match. Resolved CID: {:02x?}, Packet DCID: {:02x?}",
+                primary_cid, &dcid_bytes
             );
-            let stored_cid_copy: Arc<[u8]> = Arc::clone(&matched_cid);
-            if let Some(mut connection) = self.connections.remove(&stored_cid_copy) {
+            if let Some(mut connection) = self.connections.remove(primary_cid.as_ref()) {
                 self.peer_routes.remove(&connection.peer_address);
                 connection.peer_address = peer;
-                return Some((connection, stored_cid_copy));
+                return Some((connection, primary_cid));
             }
         }
 
@@ -2894,3 +2923,77 @@ fn fallback_runtime() -> Option<&'static tokio::runtime::Runtime> {
 
 static FALLBACK_RT: OnceLock<Option<tokio::runtime::Runtime>> = OnceLock::new();
 static FALLBACK_RT_THREADS: AtomicUsize = AtomicUsize::new(2);
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc};
+
+    use crate::cid_radix::CidRadix;
+
+    use super::resolve_primary_from_radix_prefix;
+
+    fn cid(bytes: &[u8]) -> Arc<[u8]> {
+        Arc::from(bytes)
+    }
+
+    #[test]
+    fn prefix_match_on_alias_resolves_to_primary_connection() {
+        let primary = cid(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let alias = cid(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        let mut connections: HashMap<Arc<[u8]>, ()> = HashMap::new();
+        connections.insert(Arc::clone(&primary), ());
+
+        let mut cid_routes = HashMap::new();
+        cid_routes.insert(Arc::clone(&alias), Arc::clone(&primary));
+
+        let mut cid_radix = CidRadix::new();
+        cid_radix.insert(Arc::clone(&alias));
+
+        let mut dcid = alias.as_ref().to_vec();
+        dcid.extend_from_slice(&[0xAA, 0xBB]);
+
+        let resolved =
+            resolve_primary_from_radix_prefix(&dcid, &connections, &mut cid_routes, &mut cid_radix)
+                .expect("prefix lookup should resolve to active primary");
+
+        assert_eq!(resolved.as_ref(), primary.as_ref());
+        assert!(
+            cid_routes.get(alias.as_ref()).is_some(),
+            "live alias should remain mapped to active primary"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(&dcid).is_some(),
+            "live alias should remain indexed in radix"
+        );
+    }
+
+    #[test]
+    fn stale_alias_prefix_match_is_cleaned_up() {
+        let primary = cid(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let alias = cid(&[9, 10, 11, 12, 13, 14, 15, 16]);
+
+        let connections: HashMap<Arc<[u8]>, ()> = HashMap::new();
+
+        let mut cid_routes = HashMap::new();
+        cid_routes.insert(Arc::clone(&alias), Arc::clone(&primary));
+
+        let mut cid_radix = CidRadix::new();
+        cid_radix.insert(Arc::clone(&alias));
+
+        let mut dcid = alias.as_ref().to_vec();
+        dcid.extend_from_slice(&[0xAA, 0xBB]);
+
+        let resolved =
+            resolve_primary_from_radix_prefix(&dcid, &connections, &mut cid_routes, &mut cid_radix);
+        assert!(resolved.is_none(), "stale alias must not resolve");
+        assert!(
+            cid_routes.get(alias.as_ref()).is_none(),
+            "stale alias mapping should be removed"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias.as_ref()).is_none(),
+            "stale alias should be removed from radix"
+        );
+    }
+}

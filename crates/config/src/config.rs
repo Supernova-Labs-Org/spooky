@@ -24,6 +24,13 @@ use crate::default::{
     resilience_default_cb_open_ms, resilience_default_hedging_delay_ms,
     resilience_default_hedging_enabled, resilience_default_retry_budget_enabled,
     resilience_default_retry_budget_ratio_percent, resilience_default_route_queue_default_cap,
+    resilience_default_watchdog_check_interval_ms, resilience_default_watchdog_drain_grace_ms,
+    resilience_default_watchdog_enabled, resilience_default_watchdog_min_requests_per_window,
+    resilience_default_watchdog_overload_inflight_percent,
+    resilience_default_watchdog_poll_stall_timeout_ms,
+    resilience_default_watchdog_restart_cooldown_ms,
+    resilience_default_watchdog_timeout_error_rate_percent,
+    resilience_default_watchdog_unhealthy_consecutive_windows,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -244,6 +251,8 @@ pub struct Resilience {
     pub retry_budget: RetryBudget,
     #[serde(default)]
     pub brownout: Brownout,
+    #[serde(default)]
+    pub watchdog: Watchdog,
 }
 
 impl Default for Resilience {
@@ -255,6 +264,7 @@ impl Default for Resilience {
             hedging: Hedging::default(),
             retry_budget: RetryBudget::default(),
             brownout: Brownout::default(),
+            watchdog: Watchdog::default(),
         }
     }
 }
@@ -387,6 +397,48 @@ impl Default for Brownout {
             trigger_inflight_percent: resilience_default_brownout_trigger_inflight_percent(),
             recover_inflight_percent: resilience_default_brownout_recover_inflight_percent(),
             core_routes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Watchdog {
+    #[serde(default = "resilience_default_watchdog_enabled")]
+    pub enabled: bool,
+    #[serde(default = "resilience_default_watchdog_check_interval_ms")]
+    pub check_interval_ms: u64,
+    #[serde(default = "resilience_default_watchdog_poll_stall_timeout_ms")]
+    pub poll_stall_timeout_ms: u64,
+    #[serde(default = "resilience_default_watchdog_timeout_error_rate_percent")]
+    pub timeout_error_rate_percent: u8,
+    #[serde(default = "resilience_default_watchdog_min_requests_per_window")]
+    pub min_requests_per_window: u64,
+    #[serde(default = "resilience_default_watchdog_overload_inflight_percent")]
+    pub overload_inflight_percent: u8,
+    #[serde(default = "resilience_default_watchdog_unhealthy_consecutive_windows")]
+    pub unhealthy_consecutive_windows: u32,
+    #[serde(default = "resilience_default_watchdog_drain_grace_ms")]
+    pub drain_grace_ms: u64,
+    #[serde(default = "resilience_default_watchdog_restart_cooldown_ms")]
+    pub restart_cooldown_ms: u64,
+    #[serde(default)]
+    pub restart_hook: Option<String>,
+}
+
+impl Default for Watchdog {
+    fn default() -> Self {
+        Self {
+            enabled: resilience_default_watchdog_enabled(),
+            check_interval_ms: resilience_default_watchdog_check_interval_ms(),
+            poll_stall_timeout_ms: resilience_default_watchdog_poll_stall_timeout_ms(),
+            timeout_error_rate_percent: resilience_default_watchdog_timeout_error_rate_percent(),
+            min_requests_per_window: resilience_default_watchdog_min_requests_per_window(),
+            overload_inflight_percent: resilience_default_watchdog_overload_inflight_percent(),
+            unhealthy_consecutive_windows:
+                resilience_default_watchdog_unhealthy_consecutive_windows(),
+            drain_grace_ms: resilience_default_watchdog_drain_grace_ms(),
+            restart_cooldown_ms: resilience_default_watchdog_restart_cooldown_ms(),
+            restart_hook: None,
         }
     }
 }

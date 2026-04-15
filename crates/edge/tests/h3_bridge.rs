@@ -5,7 +5,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::{Duration, Instant},
@@ -630,6 +630,89 @@ async fn start_h2_backend_with_regression_routes() -> SocketAddr {
     addr
 }
 
+async fn start_h2_backend_with_chaos_routes() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let jitter_counter = Arc::new(AtomicUsize::new(0));
+    let flap_counter = Arc::new(AtomicUsize::new(0));
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+
+            let io = TokioIo::new(stream);
+            let jitter_counter = Arc::clone(&jitter_counter);
+            let flap_counter = Arc::clone(&flap_counter);
+            let service = service_fn(move |req: Request<Incoming>| {
+                let path = req.uri().path().to_string();
+                let jitter_counter = Arc::clone(&jitter_counter);
+                let flap_counter = Arc::clone(&flap_counter);
+                async move {
+                    let response: Response<TestBody> = match path.as_str() {
+                        "/jitter" => {
+                            let jitter =
+                                15 + (jitter_counter.fetch_add(1, Ordering::Relaxed) % 120) as u64;
+                            tokio::time::sleep(Duration::from_millis(jitter)).await;
+                            Response::new(Full::new(Bytes::from_static(b"jitter-ok\n")).boxed())
+                        }
+                        "/loss" => {
+                            tokio::time::sleep(Duration::from_secs(BACKEND_TIMEOUT_SECS + 2)).await;
+                            Response::new(Full::new(Bytes::from_static(b"late-loss\n")).boxed())
+                        }
+                        "/flap" => {
+                            if flap_counter.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
+                                Response::new(Full::new(Bytes::from_static(b"flap-ok\n")).boxed())
+                            } else {
+                                Response::builder()
+                                    .status(503)
+                                    .body(Full::new(Bytes::from_static(b"flap-fail\n")).boxed())
+                                    .unwrap()
+                            }
+                        }
+                        "/health" => Response::new(Full::new(Bytes::from_static(b"ok\n")).boxed()),
+                        _ => Response::new(Full::new(Bytes::from_static(b"fast-ok\n")).boxed()),
+                    };
+                    Ok::<_, hyper::Error>(response)
+                }
+            });
+
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    });
+
+    addr
+}
+
+fn make_config_with_backends(
+    port: u32,
+    backends: Vec<Backend>,
+    lb_type: &str,
+    cert: String,
+    key: String,
+) -> Config {
+    let mut config = make_config(
+        port,
+        backends
+            .first()
+            .map(|backend| backend.address.clone())
+            .unwrap_or_else(|| "127.0.0.1:1".to_string()),
+        cert,
+        key,
+    );
+    if let Some(upstream) = config.upstream.get_mut("test_pool") {
+        upstream.backends = backends;
+        upstream.load_balancing.lb_type = lb_type.to_string();
+    }
+    config
+}
+
 #[test]
 fn http3_to_http2_roundtrip() {
     let dir = tempdir().expect("failed to create temp dir");
@@ -1209,5 +1292,183 @@ fn backend_timeout_respects_configured_performance_value() {
     assert!(
         elapsed < Duration::from_secs(2),
         "configured backend timeout should fail fast, observed elapsed={elapsed:?}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn chaos_high_jitter_remains_responsive() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_chaos_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.backend_timeout_ms = 1_500;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let paths: Vec<&str> = vec!["/jitter"; 24];
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &paths,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+    )
+    .expect("jitter workload should complete");
+
+    let success = observations
+        .iter()
+        .filter(|obs| obs.status.as_deref() == Some("200"))
+        .count();
+    assert_eq!(
+        success,
+        observations.len(),
+        "all jitter requests should succeed"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn chaos_packet_loss_like_timeout_maps_to_recoverable_response() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_chaos_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.backend_timeout_ms = 120;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/fast", "/loss", "/fast", "/loss"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+    )
+    .expect("loss-like workload should complete");
+
+    let fast_ok = observations
+        .iter()
+        .filter(|obs| obs.path == "/fast" && obs.status.as_deref() == Some("200"))
+        .count();
+    let loss_timeout = observations
+        .iter()
+        .filter(|obs| obs.path == "/loss" && obs.status.as_deref() == Some("503"))
+        .count();
+    assert_eq!(fast_ok, 2, "fast paths must remain healthy");
+    assert_eq!(
+        loss_timeout, 2,
+        "loss paths must map to recoverable timeout response"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn chaos_backend_flapping_is_stable_under_concurrency() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_chaos_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.backend_timeout_ms = 500;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let paths: Vec<&str> = vec!["/flap"; 20];
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &paths,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+    )
+    .expect("flapping workload should complete");
+
+    let success = observations
+        .iter()
+        .filter(|obs| obs.status.as_deref() == Some("200"))
+        .count();
+    let service_unavailable = observations
+        .iter()
+        .filter(|obs| obs.status.as_deref() == Some("503"))
+        .count();
+    assert!(
+        success > 0,
+        "flapping workload should still serve successes"
+    );
+    assert!(
+        service_unavailable > 0,
+        "flapping workload should surface recoverable failures without collapse"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn chaos_partial_outage_preserves_some_availability() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let healthy_backend = rt.block_on(start_h2_backend_with_chaos_routes());
+    let backends = vec![
+        Backend {
+            id: "dead-backend".to_string(),
+            address: "127.0.0.1:1".to_string(),
+            weight: 1,
+            health_check: HealthCheck {
+                path: "/health".to_string(),
+                interval: 1000,
+                timeout_ms: 100,
+                failure_threshold: 1,
+                success_threshold: 1,
+                cooldown_ms: 0,
+            },
+        },
+        Backend {
+            id: "healthy-backend".to_string(),
+            address: healthy_backend.to_string(),
+            weight: 1,
+            health_check: HealthCheck {
+                path: "/health".to_string(),
+                interval: 1000,
+                timeout_ms: 1000,
+                failure_threshold: 1,
+                success_threshold: 1,
+                cooldown_ms: 0,
+            },
+        },
+    ];
+    let mut config = make_config_with_backends(0, backends, "round-robin", cert, key);
+    config.performance.backend_timeout_ms = 250;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let paths: Vec<&str> = vec!["/fast"; 20];
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &paths,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+    )
+    .expect("partial outage workload should complete");
+
+    let success = observations
+        .iter()
+        .filter(|obs| obs.status.as_deref() == Some("200"))
+        .count();
+    let failures = observations
+        .iter()
+        .filter(|obs| obs.status.as_deref() != Some("200"))
+        .count();
+    assert!(success >= 5, "healthy backend should preserve availability");
+    assert!(
+        failures > 0,
+        "partial outage should still surface some failures"
     );
 }

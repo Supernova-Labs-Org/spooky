@@ -164,6 +164,40 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.quic_max_idle_timeout_ms == 0 {
+        error!("performance.quic_max_idle_timeout_ms must be greater than 0");
+        return false;
+    }
+
+    if config.performance.quic_initial_max_data == 0 {
+        error!("performance.quic_initial_max_data must be greater than 0");
+        return false;
+    }
+
+    if config.performance.quic_initial_max_stream_data == 0 {
+        error!("performance.quic_initial_max_stream_data must be greater than 0");
+        return false;
+    }
+
+    if config.performance.quic_initial_max_stream_data > config.performance.quic_initial_max_data {
+        error!(
+            "performance.quic_initial_max_stream_data ({}) must be <= quic_initial_max_data ({})",
+            config.performance.quic_initial_max_stream_data,
+            config.performance.quic_initial_max_data
+        );
+        return false;
+    }
+
+    if config.performance.quic_initial_max_streams_bidi == 0 {
+        error!("performance.quic_initial_max_streams_bidi must be greater than 0");
+        return false;
+    }
+
+    if config.performance.quic_initial_max_streams_uni == 0 {
+        error!("performance.quic_initial_max_streams_uni must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_connect_timeout_ms > config.performance.backend_timeout_ms {
         error!("performance.backend_connect_timeout_ms must be <= backend_timeout_ms");
         return false;
@@ -705,6 +739,32 @@ upstream:
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.new_connections_burst = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.quic_max_idle_timeout_ms = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.quic_initial_max_data = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.quic_initial_max_stream_data = 0;
+        assert!(!validate(&cfg));
+
+        // stream limit exceeds connection limit — cross-field violation
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.quic_initial_max_data = 1_000_000;
+        cfg.performance.quic_initial_max_stream_data = 2_000_000;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.quic_initial_max_streams_bidi = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.quic_initial_max_streams_uni = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());

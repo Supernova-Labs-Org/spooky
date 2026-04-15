@@ -42,9 +42,8 @@ use crate::{
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
-        QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
-        REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
+        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT,
+        REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
         drain_timeout, scid_rotation_interval,
@@ -460,15 +459,15 @@ impl QUICListener {
             .map_err(|err| {
                 ProxyError::Transport(format!("failed to set ALPN protocols: {:?}", err))
             })?;
-        quic_config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+        quic_config.set_max_idle_timeout(config.performance.quic_max_idle_timeout_ms);
         quic_config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
         quic_config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
-        quic_config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
-        quic_config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
-        quic_config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
-        quic_config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
-        quic_config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
-        quic_config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+        quic_config.set_initial_max_data(config.performance.quic_initial_max_data);
+        quic_config.set_initial_max_stream_data_bidi_local(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_stream_data_bidi_remote(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_stream_data_uni(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_streams_bidi(config.performance.quic_initial_max_streams_bidi);
+        quic_config.set_initial_max_streams_uni(config.performance.quic_initial_max_streams_uni);
         quic_config.set_disable_active_migration(true);
         quic_config.verify_peer(false);
 

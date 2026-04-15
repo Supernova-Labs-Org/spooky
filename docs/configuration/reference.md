@@ -123,6 +123,11 @@ The following table lists all default configuration values used when properties 
 | `log.file.path` | `"/var/log/spooky/spooky.log"` | Log file path (used when `log.file.enabled` is true) |
 | `performance.new_connections_per_sec` | `2000` | Token-bucket refill rate for new QUIC connections (conns/sec) |
 | `performance.new_connections_burst` | `500` | Burst capacity for new QUIC connections |
+| `performance.quic_max_idle_timeout_ms` | `5000` | QUIC idle timeout — connection closed after this many ms of inactivity |
+| `performance.quic_initial_max_data` | `10000000` | Connection-level flow control window (bytes) |
+| `performance.quic_initial_max_stream_data` | `1000000` | Per-stream flow control window (bytes) |
+| `performance.quic_initial_max_streams_bidi` | `100` | Max concurrent bidirectional streams per connection |
+| `performance.quic_initial_max_streams_uni` | `100` | Max concurrent unidirectional streams per connection |
 
 ## Listen Configuration
 
@@ -498,6 +503,11 @@ Controls resource limits, tuning knobs, and connection-flood protection. All fie
 | `h2_pool_idle_timeout_ms` | integer | No | `90000` | How long an idle H2 connection is kept before being closed (ms) |
 | `new_connections_per_sec` | integer | No | `2000` | Steady-state rate at which new QUIC connections are accepted (token-bucket refill, connections/sec) |
 | `new_connections_burst` | integer | No | `500` | Burst capacity above the steady-state rate; the bucket starts full so the first burst of legitimate connections always succeeds |
+| `quic_max_idle_timeout_ms` | integer | No | `5000` | QUIC idle timeout in ms; connection is closed after this period of inactivity |
+| `quic_initial_max_data` | integer | No | `10000000` | Connection-level QUIC flow control window in bytes |
+| `quic_initial_max_stream_data` | integer | No | `1000000` | Per-stream QUIC flow control window in bytes; must be ≤ `quic_initial_max_data` |
+| `quic_initial_max_streams_bidi` | integer | No | `100` | Maximum concurrent bidirectional QUIC streams per connection |
+| `quic_initial_max_streams_uni` | integer | No | `100` | Maximum concurrent unidirectional QUIC streams per connection |
 
 ### Connection flood protection
 

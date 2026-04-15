@@ -142,6 +142,26 @@ pub fn perf_default_new_connections_burst() -> u32 {
     500
 }
 
+pub fn perf_default_quic_max_idle_timeout_ms() -> u64 {
+    5_000
+}
+
+pub fn perf_default_quic_initial_max_data() -> u64 {
+    10_000_000
+}
+
+pub fn perf_default_quic_initial_max_stream_data() -> u64 {
+    1_000_000
+}
+
+pub fn perf_default_quic_initial_max_streams_bidi() -> u64 {
+    100
+}
+
+pub fn perf_default_quic_initial_max_streams_uni() -> u64 {
+    100
+}
+
 pub fn resilience_default_adaptive_enabled() -> bool {
     true
 }

@@ -874,80 +874,123 @@
     </div>
   </div>
   <div class="typography w-full flex-1 *:data-[slot=alert]:first:mt-0">
-    <p>Spooky includes a dedicated benchmark harness for CPU and memory regression tracking.</p>
+    <p>Spooky ships with a manifest-driven benchmark system that covers both micro and macro performance and enforces regression gates in CI.</p>
 <h2 id="scope">Scope</h2>
-<p>The suite measures:</p>
+<h3 id="microbenchmarks-kept-and-required">Microbenchmarks (kept and required)</h3>
 <ul>
-<li>Route lookup (indexed and linear reference)</li>
-<li>Load balancer selection (round-robin, random, consistent-hash)</li>
-<li>Connection lookup primitives (exact, alias, CID prefix scan, peer scan/map fallback)</li>
+<li>Route lookup</li>
+<li><code>route_lookup_indexed_hit</code></li>
+<li><code>route_lookup_linear_hit</code></li>
+<li><code>route_lookup_indexed_miss</code></li>
+<li>Load balancer selection</li>
+<li><code>lb_round_robin_pick</code></li>
+<li><code>lb_random_pick</code></li>
+<li><code>lb_consistent_hash_pick</code></li>
+<li>Connection lookup primitives</li>
+<li><code>connection_exact_lookup</code></li>
+<li><code>connection_alias_lookup</code></li>
+<li><code>connection_prefix_scan_miss_lookup</code></li>
+<li><code>connection_peer_scan_miss</code></li>
+<li><code>connection_peer_map_hit</code></li>
+<li><code>connection_peer_map_miss</code></li>
 </ul>
-<p>Each benchmark runs at scales:</p>
+<h3 id="macrobenchmarks">Macrobenchmarks</h3>
 <ul>
-<li>100</li>
-<li>1,000</li>
-<li>10,000</li>
+<li><code>macro_traffic_mix</code></li>
+<li>Simulates realistic mixed traffic patterns across routing, LB decisions, and connection lookup paths.</li>
+<li><code>macro_long_lived_stream</code></li>
+<li>Simulates long-lived stream handling with multi-chunk work per request to capture tail behavior under sustained work.</li>
 </ul>
-<h2 id="metrics">Metrics</h2>
-<p>For every benchmark case, the harness reports:</p>
+<h2 id="manifest">Manifest</h2>
+<p>Benchmark settings live in:</p>
 <ul>
-<li><code>latency_ns_per_op</code> (CPU)</li>
-<li><code>alloc_calls</code> (allocation count)</li>
-<li><code>alloc_bytes</code> (total allocated bytes)</li>
-<li><code>rss_delta_kb</code> (resident memory delta)</li>
+<li><code>bench/manifest.yaml</code></li>
 </ul>
-<p>Outputs are written to JSON and optional Markdown summary.</p>
+<p>It controls:</p>
+<ul>
+<li>run profiles (<code>full</code>, <code>ci</code>)</li>
+<li>micro and macro scales/iterations</li>
+<li>regression gate thresholds for:</li>
+<li>CPU (<code>ns/op</code>)</li>
+<li>memory (<code>rss_delta_kb</code>)</li>
+<li>allocations (<code>alloc_calls</code>, <code>alloc_bytes</code>)</li>
+<li>tail latency (<code>p99</code>)</li>
+</ul>
+<h2 id="baselines-per-release">Baselines Per Release</h2>
+<p>Release baselines are tracked in:</p>
+<ul>
+<li><code>bench/baselines/releases.json</code></li>
+</ul>
+<p>Each release maps to:</p>
+<ul>
+<li><code>micro</code> baseline JSON</li>
+<li><code>macro</code> baseline JSON</li>
+</ul>
+<p>Current release baseline pointers are used by regression gates when <code>--check-baseline</code> is enabled.</p>
 <h2 id="run-locally">Run Locally</h2>
-<p>Generate a fresh benchmark report:</p>
-<pre><code class="language-bash">cargo run -p spooky-bench --release -- \
-  --output bench/latest.json \
-  --markdown-out bench/latest.md
+<h3 id="microbench">Microbench</h3>
+<pre><code class="language-bash">./scripts/bench-micro.sh
 </code></pre>
-<p>Run regression checks against baseline:</p>
+<p>Outputs:</p>
+<ul>
+<li><code>bench/micro/latest.json</code></li>
+<li><code>bench/micro/latest.md</code></li>
+<li>compatibility copies:</li>
+<li><code>bench/latest.json</code></li>
+<li><code>bench/latest.md</code></li>
+</ul>
+<h3 id="macrobench">Macrobench</h3>
+<pre><code class="language-bash">./scripts/bench-macro.sh
+</code></pre>
+<p>Outputs:</p>
+<ul>
+<li><code>bench/macro/latest.json</code></li>
+<li><code>bench/macro/latest.md</code></li>
+</ul>
+<h3 id="regression-gates-ci-profile">Regression gates (CI profile)</h3>
+<pre><code class="language-bash">./scripts/bench-gate.sh
+</code></pre>
+<p>This runs both micro and macro suites with baseline checks and fails on severe regressions by default.</p>
+<h2 id="promote-new-release-baseline">Promote New Release Baseline</h2>
+<p>After validating benchmark results for a release:</p>
+<pre><code class="language-bash">./scripts/bench-promote-baseline.sh vX.Y.Z
+</code></pre>
+<p>This:</p>
+<ul>
+<li>copies latest micro/macro reports into <code>bench/baselines/vX.Y.Z/</code></li>
+<li>updates <code>bench/baselines/releases.json</code></li>
+<li>optionally moves <code>current_release</code> pointer (default: true)</li>
+</ul>
+<h2 id="direct-cli-advanced">Direct CLI (advanced)</h2>
+<p>Micro run:</p>
 <pre><code class="language-bash">cargo run -p spooky-bench --release -- \
-  --output bench/latest.json \
-  --baseline bench/baseline.json \
+  --suite micro \
+  --profile full \
+  --manifest bench/manifest.yaml \
+  --output bench/micro/latest.json \
+  --markdown-out bench/micro/latest.md
+</code></pre>
+<p>Macro run with baseline gate:</p>
+<pre><code class="language-bash">cargo run -p spooky-bench --release -- \
+  --suite macro \
+  --profile ci \
+  --manifest bench/manifest.yaml \
+  --baseline-index bench/baselines/releases.json \
   --check-baseline \
-  --cpu-threshold 0.40 \
-  --mem-threshold 0.20 \
-  --markdown-out bench/latest.md
+  --fail-on severe \
+  --output bench/macro/latest.json \
+  --markdown-out bench/macro/latest.md
 </code></pre>
-<h2 id="baseline-and-thresholds">Baseline and Thresholds</h2>
-<p>Baseline file:</p>
+<h2 id="ci-policy">CI Policy</h2>
+<p>Regression gates evaluate:</p>
 <ul>
-<li><code>bench/baseline.json</code></li>
+<li>CPU slowdown (<code>latency_ns_per_op</code>)</li>
+<li>memory growth (<code>rss_delta_kb</code>)</li>
+<li>allocation inflation (<code>alloc_calls</code>, <code>alloc_bytes</code>)</li>
+<li>tail latency regression (<code>latency_p99_ns</code>) for sampled-latency cases (macro suite and any sampled micro cases)</li>
 </ul>
-<p>Current thresholds:</p>
-<ul>
-<li>CPU regression threshold: <code>40%</code></li>
-<li>Memory regression threshold: <code>20%</code></li>
-</ul>
-<p>Regression checks fail if benchmark metrics exceed thresholds versus baseline.</p>
-<h2 id="linux-burst-tolerance-tuning">Linux Burst-Tolerance Tuning</h2>
-<p>For high-burst UDP traffic tests, tune host kernel networking before benchmarking:</p>
-<pre><code class="language-bash">sudo ./scripts/sysctl-linux-network-tuning.sh
-</code></pre>
-<p>Recommended runtime config pairing in <code>performance</code>:</p>
-<ul>
-<li><code>udp_recv_buffer_bytes: 8388608</code></li>
-<li><code>udp_send_buffer_bytes: 8388608</code></li>
-<li><code>h2_pool_max_idle_per_backend: 256</code></li>
-<li><code>h2_pool_idle_timeout_ms: 90000</code></li>
-<li><code>per_backend_inflight_limit: 64</code> (reduce for stricter overload shedding)</li>
-</ul>
-<h2 id="memory-guardrail-policy">Memory Guardrail Policy</h2>
-<p>All performance-related changes must include memory deltas in reports.</p>
-<ul>
-<li>Regressions with significant memory inflation should be rejected.</li>
-<li>If memory growth is intentional, it must be justified in PR notes with benchmark evidence.</li>
-</ul>
-<h2 id="artifacts">Artifacts</h2>
-<p>Benchmark runs can emit:</p>
-<ul>
-<li>JSON report</li>
-<li>Markdown summary</li>
-</ul>
-<p>Use these artifacts to track trend lines and justify threshold updates when needed.</p>
+<p>For metrics with tiny baselines (especially allocation call counts), the gate logic applies a minimum baseline floor from the manifest to avoid false positives caused by allocator/runtime differences across environments.</p>
+<p>CI fails on severe regressions. Warn-level regressions remain visible in markdown artifacts for review.</p>
   </div>
   
   <script>
@@ -1225,12 +1268,34 @@
             Scope
         </a>
         
+        
+        <a href="#microbenchmarks-kept-and-required"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#microbenchmarks-kept-and-required');">
+            Microbenchmarks (kept and required)
+        </a>
+        
+        <a href="#macrobenchmarks"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#macrobenchmarks');">
+            Macrobenchmarks
+        </a>
+        
+        
 
         
-        <a href="#metrics"
+        <a href="#manifest"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#metrics');">
-            Metrics
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#manifest');">
+            Manifest
+        </a>
+        
+
+        
+        <a href="#baselines-per-release"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#baselines-per-release');">
+            Baselines Per Release
         </a>
         
 
@@ -1241,36 +1306,48 @@
             Run Locally
         </a>
         
+        
+        <a href="#microbench"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#microbench');">
+            Microbench
+        </a>
+        
+        <a href="#macrobench"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#macrobench');">
+            Macrobench
+        </a>
+        
+        <a href="#regression-gates-ci-profile"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#regression-gates-ci-profile');">
+            Regression gates (CI profile)
+        </a>
+        
+        
 
         
-        <a href="#baseline-and-thresholds"
+        <a href="#promote-new-release-baseline"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#baseline-and-thresholds');">
-            Baseline and Thresholds
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#promote-new-release-baseline');">
+            Promote New Release Baseline
         </a>
         
 
         
-        <a href="#linux-burst-tolerance-tuning"
+        <a href="#direct-cli-advanced"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#linux-burst-tolerance-tuning');">
-            Linux Burst-Tolerance Tuning
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#direct-cli-advanced');">
+            Direct CLI (advanced)
         </a>
         
 
         
-        <a href="#memory-guardrail-policy"
+        <a href="#ci-policy"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#memory-guardrail-policy');">
-            Memory Guardrail Policy
-        </a>
-        
-
-        
-        <a href="#artifacts"
-            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#artifacts');">
-            Artifacts
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#ci-policy');">
+            CI Policy
         </a>
         
 

@@ -134,6 +134,14 @@ pub fn perf_default_per_backend_inflight_limit() -> usize {
     64
 }
 
+pub fn perf_default_new_connections_per_sec() -> u32 {
+    2000
+}
+
+pub fn perf_default_new_connections_burst() -> u32 {
+    500
+}
+
 pub fn resilience_default_adaptive_enabled() -> bool {
     true
 }

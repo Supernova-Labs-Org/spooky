@@ -12,7 +12,8 @@ use crate::default::{
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
     perf_default_backend_total_request_timeout_ms, perf_default_control_plane_threads,
     perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
-    perf_default_h2_pool_max_idle_per_backend, perf_default_per_backend_inflight_limit,
+    perf_default_h2_pool_max_idle_per_backend, perf_default_new_connections_burst,
+    perf_default_new_connections_per_sec, perf_default_per_backend_inflight_limit,
     perf_default_per_upstream_inflight_limit, perf_default_pin_workers, perf_default_reuseport,
     perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
     perf_default_worker_threads, resilience_default_adaptive_decrease_step,
@@ -212,6 +213,15 @@ pub struct Performance {
 
     #[serde(default = "perf_default_per_backend_inflight_limit")]
     pub per_backend_inflight_limit: usize,
+
+    /// Steady-state new QUIC connections allowed per second (token-bucket refill rate).
+    #[serde(default = "perf_default_new_connections_per_sec")]
+    pub new_connections_per_sec: u32,
+
+    /// Maximum burst of new QUIC connections above the steady-state rate.
+    /// Must be >= 1; values below 1 are clamped to 1 at runtime.
+    #[serde(default = "perf_default_new_connections_burst")]
+    pub new_connections_burst: u32,
 }
 
 impl Default for Performance {
@@ -233,6 +243,8 @@ impl Default for Performance {
             h2_pool_max_idle_per_backend: perf_default_h2_pool_max_idle_per_backend(),
             h2_pool_idle_timeout_ms: perf_default_h2_pool_idle_timeout_ms(),
             per_backend_inflight_limit: perf_default_per_backend_inflight_limit(),
+            new_connections_per_sec: perf_default_new_connections_per_sec(),
+            new_connections_burst: perf_default_new_connections_burst(),
         }
     }
 }

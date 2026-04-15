@@ -737,3 +737,164 @@ fn repeated_malformed_packets_leave_maps_consistent() {
 
     assert_maps_empty(&listener);
 }
+
+// ---------------------------------------------------------------------------
+// Connection flood / rate-limit tests (task 1.2)
+// ---------------------------------------------------------------------------
+
+fn make_config_with_rate_limit(
+    port: u32,
+    cert: String,
+    key: String,
+    backend_address: String,
+    new_connections_per_sec: u32,
+    new_connections_burst: u32,
+) -> Config {
+    use spooky_config::config::{Performance, RouteMatch, Upstream};
+    use std::collections::HashMap;
+
+    let mut upstream = HashMap::new();
+    upstream.insert(
+        "test_pool".to_string(),
+        Upstream {
+            load_balancing: LoadBalancing {
+                lb_type: "random".to_string(),
+                key: None,
+            },
+            route: RouteMatch {
+                path_prefix: Some("/".to_string()),
+                ..Default::default()
+            },
+            backends: vec![Backend {
+                id: "backend1".to_string(),
+                address: backend_address,
+                weight: 1,
+                health_check: HealthCheck {
+                    path: "/health".to_string(),
+                    interval: 1000,
+                    timeout_ms: 1000,
+                    failure_threshold: 3,
+                    success_threshold: 1,
+                    cooldown_ms: 0,
+                },
+            }],
+        },
+    );
+
+    Config {
+        version: 1,
+        listen: Listen {
+            protocol: "http3".to_string(),
+            port,
+            address: "127.0.0.1".to_string(),
+            tls: Tls { cert, key },
+        },
+        upstream,
+        load_balancing: Some(LoadBalancing {
+            lb_type: "random".to_string(),
+            key: None,
+        }),
+        log: Log {
+            level: "error".to_string(),
+            file: Default::default(),
+        },
+        performance: Performance {
+            new_connections_per_sec,
+            new_connections_burst,
+            ..Performance::default()
+        },
+        observability: spooky_config::config::Observability::default(),
+        resilience: spooky_config::config::Resilience::default(),
+    }
+}
+
+/// Build a minimal valid QUIC Initial packet using quiche so the listener can
+/// parse the header and attempt `quiche::accept`. Returns the encoded bytes.
+fn build_initial_packet(dest_addr: std::net::SocketAddr) -> Vec<u8> {
+    let local_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let mut config =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).expect("quiche config");
+    config.verify_peer(false);
+    config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .expect("alpn");
+    config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+
+    let mut conn = quiche::connect(Some("localhost"), &scid, local_addr, dest_addr, &mut config)
+        .expect("quiche connect");
+
+    let mut out = vec![0u8; MAX_UDP_PAYLOAD_BYTES];
+    let (len, _send_info) = conn.send(&mut out).expect("quiche send");
+    out.truncate(len);
+    out
+}
+
+/// When burst=1 and rate is near-zero, the first Initial packet creates a
+/// connection, and subsequent ones in the same instant are dropped.
+#[test]
+fn connection_flood_is_rate_limited() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    // burst=1, rate=1/s: after the first accept the bucket is empty.
+    let config = make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 1, 1);
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    // Send enough distinct Initial packets to saturate the rate limit.
+    // Each packet comes from a different SCID so the listener sees each as a
+    // new connection attempt (no existing DCID match).
+    const FLOOD_COUNT: usize = 10;
+    for _ in 0..FLOOD_COUNT {
+        let pkt = build_initial_packet(addr);
+        send_udp(addr, &pkt);
+        listener.poll();
+    }
+
+    // With burst=1 only the very first packet can create a connection.
+    // All subsequent ones are dropped by the rate limiter.
+    assert!(
+        listener.connections.len() <= 1,
+        "rate limiter must cap connections at burst=1, got {}",
+        listener.connections.len()
+    );
+}
+
+/// Normal traffic well below the rate limit must not be affected.
+/// With a generous burst and rate, all N connection attempts succeed.
+#[test]
+fn normal_traffic_below_rate_limit_is_unaffected() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    // burst=20, rate=10000/s: far above what we'll send.
+    let config =
+        make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 20);
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    const REQUEST_COUNT: usize = 5;
+    for _ in 0..REQUEST_COUNT {
+        let pkt = build_initial_packet(addr);
+        send_udp(addr, &pkt);
+        listener.poll();
+    }
+
+    assert_eq!(
+        listener.connections.len(),
+        REQUEST_COUNT,
+        "all {} connections should be accepted when below rate limit",
+        REQUEST_COUNT
+    );
+}

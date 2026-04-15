@@ -154,6 +154,16 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.new_connections_per_sec == 0 {
+        error!("performance.new_connections_per_sec must be greater than 0");
+        return false;
+    }
+
+    if config.performance.new_connections_burst == 0 {
+        error!("performance.new_connections_burst must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_connect_timeout_ms > config.performance.backend_timeout_ms {
         error!("performance.backend_connect_timeout_ms must be <= backend_timeout_ms");
         return false;
@@ -687,6 +697,14 @@ upstream:
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.per_backend_inflight_limit = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.new_connections_per_sec = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.new_connections_burst = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());

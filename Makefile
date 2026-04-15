@@ -1,4 +1,4 @@
-.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify
+.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify bench-micro bench-macro bench-gate bench-promote-baseline
 
 run:
 	make build
@@ -92,3 +92,19 @@ docs-build:
 docs-setup:
 	pip install -r docs-requirements.txt --break-system-packages
 	mkdocs build
+
+bench-micro:
+	./scripts/bench-micro.sh
+
+bench-macro:
+	./scripts/bench-macro.sh
+
+bench-gate:
+	./scripts/bench-gate.sh
+
+bench-promote-baseline:
+	@if [ -z "$(RELEASE)" ]; then \
+		echo "usage: make bench-promote-baseline RELEASE=vX.Y.Z"; \
+		exit 1; \
+	fi
+	./scripts/bench-promote-baseline.sh "$(RELEASE)"

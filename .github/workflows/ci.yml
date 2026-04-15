@@ -19,3 +19,31 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run tests
         run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test
+
+  bench-regression:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential pkg-config
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run benchmark regression gates
+        run: |
+          PROFILE=ci FAIL_ON=severe ./scripts/bench-gate.sh
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-reports
+          path: |
+            bench/micro/latest.json
+            bench/micro/latest.md
+            bench/macro/latest.json
+            bench/macro/latest.md
+            bench/latest.json
+            bench/latest.md

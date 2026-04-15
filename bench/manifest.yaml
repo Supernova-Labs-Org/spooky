@@ -1,0 +1,47 @@
+version: 1
+
+profiles:
+  full:
+    scales: [100, 1000, 10000]
+    macro_scales: [1000, 10000]
+    macro_traffic_mix_iterations: 40000
+    macro_long_lived_stream_iterations: 12000
+    macro_long_lived_stream_chunks: 96
+    macro_long_lived_stream_chunk_bytes: 8192
+
+  ci:
+    scales: [100, 1000]
+    macro_scales: [1000]
+    macro_traffic_mix_iterations: 12000
+    macro_long_lived_stream_iterations: 4000
+    macro_long_lived_stream_chunks: 48
+    macro_long_lived_stream_chunk_bytes: 4096
+
+micro:
+  include_h3_header_collection: true
+
+macro:
+  include_traffic_mix: true
+  include_long_lived_stream: true
+
+gates:
+  cpu:
+    warn_pct: 0.40
+    severe_pct: 0.70
+    zero_baseline_limit: 0
+  memory:
+    warn_pct: 0.20
+    severe_pct: 0.40
+    zero_baseline_limit: 128
+  alloc_calls:
+    warn_pct: 0.20
+    severe_pct: 0.50
+    zero_baseline_limit: 32
+  alloc_bytes:
+    warn_pct: 0.20
+    severe_pct: 0.50
+    zero_baseline_limit: 16384
+  tail_p99:
+    warn_pct: 0.30
+    severe_pct: 0.60
+    zero_baseline_limit: 0

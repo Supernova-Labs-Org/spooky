@@ -8,6 +8,7 @@ license.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 libc.workspace = true
 smallvec.workspace = true
 

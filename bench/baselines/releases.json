@@ -1,0 +1,9 @@
+{
+  "current_release": "v0.1.0",
+  "releases": {
+    "v0.1.0": {
+      "micro": "bench/baselines/v0.1.0/micro.json",
+      "macro": "bench/baselines/v0.1.0/macro.json"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "suite": "spooky-performance-regression",
+  "report_kind": "macro",
+  "profile": "ci",
+  "generated_unix_secs": 1776230398,
+  "cpu_threshold": 0.4,
+  "mem_threshold": 0.2,
+  "cases": [
+    {
+      "kind": "macro",
+      "name": "macro_long_lived_stream",
+      "scale": 1000,
+      "iterations": 4000,
+      "duration_ns": 17781936,
+      "latency_ns_per_op": 4445.484,
+      "throughput_ops_per_sec": 224947.3848066937,
+      "alloc_calls": 1,
+      "alloc_bytes": 64000,
+      "rss_delta_kb": 0,
+      "cpu_pct": 91.53028513581913,
+      "latency_p50_ns": 3759.0,
+      "latency_p95_ns": 5025.0,
+      "latency_p99_ns": 16349.0,
+      "latency_max_ns": 740673.0,
+      "latency_sampled": true
+    },
+    {
+      "kind": "macro",
+      "name": "macro_traffic_mix",
+      "scale": 1000,
+      "iterations": 12000,
+      "duration_ns": 55007333,
+      "latency_ns_per_op": 4583.944416666666,
+      "throughput_ops_per_sec": 218152.73247295956,
+      "alloc_calls": 1,
+      "alloc_bytes": 192000,
+      "rss_delta_kb": 200,
+      "cpu_pct": 96.6913301943389,
+      "latency_p50_ns": 532.0,
+      "latency_p95_ns": 28865.0,
+      "latency_p99_ns": 34730.0,
+      "latency_max_ns": 221102.0,
+      "latency_sampled": true
+    }
+  ]
+}

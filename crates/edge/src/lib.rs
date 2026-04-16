@@ -145,13 +145,15 @@ pub enum StreamPhase {
 /// A chunk of the upstream response being streamed back to the client.
 #[derive(Debug)]
 pub enum ResponseChunk {
+    /// Emit downstream response headers (used when headers are deferred until
+    /// body-size validation completes).
+    Start {
+        status: http::StatusCode,
+        headers: Vec<(Vec<u8>, Vec<u8>)>,
+    },
     Data(Bytes),
     End,
     Error(ProxyError),
-    /// The upstream response body exceeded the configured cap.
-    /// The stream must be RST (not cleanly finished) so the client sees an
-    /// unambiguous error rather than a silently truncated 200 response.
-    BodyTooLarge,
 }
 
 pub struct RequestEnvelope {
@@ -186,6 +188,8 @@ pub struct RequestEnvelope {
     pub upstream_result_rx: Option<oneshot::Receiver<ForwardResult>>,
     /// Receives response body chunks to write back over QUIC.
     pub response_chunk_rx: Option<mpsc::Receiver<ResponseChunk>>,
+    /// True once downstream response headers are emitted on this stream.
+    pub response_headers_sent: bool,
     /// A chunk that could not be written due to QUIC send backpressure; retried next poll.
     pub pending_chunk: Option<ResponseChunk>,
 }

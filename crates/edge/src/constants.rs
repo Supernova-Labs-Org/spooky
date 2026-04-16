@@ -13,7 +13,10 @@ use std::time::Duration;
 //   Response path
 //   ├─ response channel: RESPONSE_CHUNK_CHANNEL_CAPACITY * RESPONSE_CHUNK_BYTES_LIMIT
 //   │                   = 16 * 16 KiB = 256 KiB
-//   └─ hard response cap: max_response_body_bytes (default 100 MiB) → stream RST on breach
+//   └─ hard response cap: max_response_body_bytes (default 100 MiB)
+//      - declared content-length over cap -> 503 before streaming
+//      - unknown-length responses are cap-validated before headers are emitted
+//        and return 503 on breach (no reset fallback)
 //
 // Per-connection worst-case:
 //   MAX_STREAMS_PER_CONNECTION (= QUIC_INITIAL_MAX_STREAMS_BIDI = 100) streams

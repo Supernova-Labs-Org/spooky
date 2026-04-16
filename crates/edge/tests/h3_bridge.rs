@@ -1008,7 +1008,12 @@ async fn start_h2_backend_with_regression_routes() -> SocketAddr {
                             tokio::time::sleep(Duration::from_millis(140)).await;
                             let _ = tx.send(Bytes::from_static(b"chunk-3")).await;
                         });
-                        Response::new(body.boxed())
+                        let mut response = Response::new(body.boxed());
+                        response.headers_mut().insert(
+                            CONTENT_LENGTH,
+                            HeaderValue::from_static("21"),
+                        );
+                        response
                     }
                     _ => Response::new(Full::new(Bytes::from_static(b"default\n")).boxed()),
                 };
@@ -2304,5 +2309,183 @@ fn response_body_cap_returns_503_on_declared_length_breach() {
     assert!(
         !got_reset,
         "response cap breach should terminate with HTTP error, not stream reset"
+    );
+}
+
+/// Unknown-length upstream bodies are validated against the cap before the
+/// proxy emits downstream headers; breaches must terminate as 503 (no reset).
+#[test]
+fn response_body_cap_returns_503_on_unknown_length_breach() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let listener_tcp = rt.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let backend_addr = listener_tcp.local_addr().unwrap();
+    rt.spawn(async move {
+        loop {
+            let (stream, _) = match listener_tcp.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_req: Request<Incoming>| async move {
+                    let (tx, body) = DelayedChunkBody::channel(8);
+                    tokio::spawn(async move {
+                        let chunk = Bytes::from(vec![b'x'; 1024]);
+                        for _ in 0..8 {
+                            let _ = tx.send(chunk.clone()).await;
+                        }
+                    });
+                    Ok::<_, hyper::Error>(Response::new(body.boxed()))
+                });
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    });
+
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.max_response_body_bytes = 1024;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let local_addr = socket.local_addr().unwrap();
+
+    let mut qconfig = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    qconfig.verify_peer(false);
+    qconfig
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
+    qconfig.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    qconfig.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    qconfig.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    qconfig.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    qconfig.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    qconfig.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    qconfig.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+    qconfig.set_disable_active_migration(true);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+    let mut conn =
+        quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig).unwrap();
+    let h3_config = quiche::h3::Config::new().unwrap();
+
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    let (w, si) = conn.send(&mut out).unwrap();
+    socket.send_to(&out[..w], si.to).unwrap();
+
+    let start = Instant::now();
+    let mut h3: Option<quiche::h3::Connection> = None;
+    let mut req_sent = false;
+    let mut got_reset = false;
+    let mut status = String::new();
+    let mut response_body = Vec::new();
+
+    'outer: loop {
+        loop {
+            match conn.send(&mut out) {
+                Ok((w, si)) => {
+                    let _ = socket.send_to(&out[..w], si.to);
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => panic!("send: {e:?}"),
+            }
+        }
+
+        let timeout = quic_read_timeout(&conn);
+        socket.set_read_timeout(Some(timeout)).unwrap();
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                conn.recv(
+                    &mut buf[..len],
+                    quiche::RecvInfo {
+                        from,
+                        to: local_addr,
+                    },
+                )
+                .unwrap();
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                conn.on_timeout();
+            }
+            Err(e) => panic!("recv: {e:?}"),
+        }
+
+        if conn.is_established() && h3.is_none() {
+            h3 = Some(
+                quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap(),
+            );
+        }
+
+        if let Some(h3c) = h3.as_mut() {
+            if !req_sent && conn.is_established() {
+                let req = vec![
+                    quiche::h3::Header::new(b":method", b"GET"),
+                    quiche::h3::Header::new(b":scheme", b"https"),
+                    quiche::h3::Header::new(b":authority", b"localhost"),
+                    quiche::h3::Header::new(b":path", b"/"),
+                    quiche::h3::Header::new(b"user-agent", b"spooky-cap-test"),
+                ];
+                h3c.send_request(&mut conn, &req, true).unwrap();
+                req_sent = true;
+            }
+
+            loop {
+                match h3c.poll(&mut conn) {
+                    Ok((_sid, quiche::h3::Event::Headers { list, .. })) => {
+                        for h in &list {
+                            if h.name() == b":status" {
+                                status = String::from_utf8_lossy(h.value()).to_string();
+                            }
+                        }
+                    }
+                    Ok((sid, quiche::h3::Event::Data)) => loop {
+                        match h3c.recv_body(&mut conn, sid, &mut buf) {
+                            Ok(read) => response_body.extend_from_slice(&buf[..read]),
+                            Err(quiche::h3::Error::Done) => break,
+                            Err(e) => panic!("recv_body: {e:?}"),
+                        }
+                    },
+                    Ok((_sid, quiche::h3::Event::Finished)) => break 'outer,
+                    Ok((_sid, quiche::h3::Event::Reset(_))) => {
+                        got_reset = true;
+                        break 'outer;
+                    }
+                    Ok(_) => {}
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(e) => panic!("poll: {e:?}"),
+                }
+            }
+        }
+
+        if start.elapsed() > Duration::from_secs(REQUEST_TIMEOUT_SECS + 4) {
+            panic!("timeout waiting for 503 response");
+        }
+    }
+
+    assert_eq!(status, "503", "expected 503 for unknown-length cap breach");
+    assert_eq!(
+        String::from_utf8_lossy(&response_body),
+        "upstream response body too large\n"
+    );
+    assert!(
+        !got_reset,
+        "unknown-length cap breach should terminate with HTTP error, not stream reset"
     );
 }

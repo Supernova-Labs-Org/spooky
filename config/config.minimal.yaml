@@ -1,0 +1,16 @@
+version: 1
+
+listen:
+  tls:
+    cert: certs/proxy-fullchain.pem
+    key: certs/proxy-key-pkcs8.pem
+
+upstream:
+  default:
+    route:
+      path_prefix: "/"
+    backends:
+      - id: "backend1"
+        address: "127.0.0.1:8080"
+        health_check:
+          path: "/health"

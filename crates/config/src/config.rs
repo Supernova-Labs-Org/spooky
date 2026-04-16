@@ -12,8 +12,12 @@ use crate::default::{
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
     perf_default_backend_total_request_timeout_ms, perf_default_control_plane_threads,
     perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
-    perf_default_h2_pool_max_idle_per_backend, perf_default_per_backend_inflight_limit,
-    perf_default_per_upstream_inflight_limit, perf_default_pin_workers, perf_default_reuseport,
+    perf_default_h2_pool_max_idle_per_backend, perf_default_new_connections_burst,
+    perf_default_new_connections_per_sec, perf_default_per_backend_inflight_limit,
+    perf_default_per_upstream_inflight_limit, perf_default_pin_workers,
+    perf_default_quic_initial_max_data, perf_default_quic_initial_max_stream_data,
+    perf_default_quic_initial_max_streams_bidi, perf_default_quic_initial_max_streams_uni,
+    perf_default_quic_max_idle_timeout_ms, perf_default_reuseport,
     perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
     perf_default_worker_threads, resilience_default_adaptive_decrease_step,
     resilience_default_adaptive_enabled, resilience_default_adaptive_high_latency_ms,
@@ -212,6 +216,37 @@ pub struct Performance {
 
     #[serde(default = "perf_default_per_backend_inflight_limit")]
     pub per_backend_inflight_limit: usize,
+
+    /// Steady-state new QUIC connections allowed per second (token-bucket refill rate).
+    #[serde(default = "perf_default_new_connections_per_sec")]
+    pub new_connections_per_sec: u32,
+
+    /// Maximum burst of new QUIC connections above the steady-state rate.
+    /// Must be >= 1; values below 1 are clamped to 1 at runtime.
+    #[serde(default = "perf_default_new_connections_burst")]
+    pub new_connections_burst: u32,
+
+    /// QUIC idle timeout: connection is closed after this many ms of inactivity.
+    #[serde(default = "perf_default_quic_max_idle_timeout_ms")]
+    pub quic_max_idle_timeout_ms: u64,
+
+    /// QUIC connection-level flow control: total bytes the client may send before
+    /// receiving a MAX_DATA frame.
+    #[serde(default = "perf_default_quic_initial_max_data")]
+    pub quic_initial_max_data: u64,
+
+    /// QUIC stream-level flow control: bytes allowed per stream (bidi and uni).
+    /// Must be <= `quic_initial_max_data`.
+    #[serde(default = "perf_default_quic_initial_max_stream_data")]
+    pub quic_initial_max_stream_data: u64,
+
+    /// Maximum number of concurrent bidirectional streams per connection.
+    #[serde(default = "perf_default_quic_initial_max_streams_bidi")]
+    pub quic_initial_max_streams_bidi: u64,
+
+    /// Maximum number of concurrent unidirectional streams per connection.
+    #[serde(default = "perf_default_quic_initial_max_streams_uni")]
+    pub quic_initial_max_streams_uni: u64,
 }
 
 impl Default for Performance {
@@ -233,6 +268,13 @@ impl Default for Performance {
             h2_pool_max_idle_per_backend: perf_default_h2_pool_max_idle_per_backend(),
             h2_pool_idle_timeout_ms: perf_default_h2_pool_idle_timeout_ms(),
             per_backend_inflight_limit: perf_default_per_backend_inflight_limit(),
+            new_connections_per_sec: perf_default_new_connections_per_sec(),
+            new_connections_burst: perf_default_new_connections_burst(),
+            quic_max_idle_timeout_ms: perf_default_quic_max_idle_timeout_ms(),
+            quic_initial_max_data: perf_default_quic_initial_max_data(),
+            quic_initial_max_stream_data: perf_default_quic_initial_max_stream_data(),
+            quic_initial_max_streams_bidi: perf_default_quic_initial_max_streams_bidi(),
+            quic_initial_max_streams_uni: perf_default_quic_initial_max_streams_uni(),
         }
     }
 }

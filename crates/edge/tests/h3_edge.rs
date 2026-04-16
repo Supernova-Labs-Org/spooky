@@ -548,3 +548,353 @@ fn server_rotates_scids_for_active_connection() {
     assert!(rotations > 0, "server did not rotate any SCID");
     assert_cid_sync_invariants(&listener_guard);
 }
+
+// ---------------------------------------------------------------------------
+// Malformed packet hardening tests (task 1.1)
+//
+// Each test fires one or more invalid UDP datagrams at a fresh listener and
+// asserts that:
+//  (a) the listener does not panic,
+//  (b) all routing maps remain empty / unchanged after the bad traffic.
+//
+// The listener is driven by a single poll() call per datagram so the test
+// stays synchronous and deterministic.
+// ---------------------------------------------------------------------------
+
+fn make_listener() -> (QUICListener, std::net::SocketAddr) {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let config = make_config(0, cert, key, "127.0.0.1:1".to_string());
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let addr = listener.socket.local_addr().expect("local_addr");
+    (listener, addr)
+}
+
+fn send_udp(to: std::net::SocketAddr, payload: &[u8]) {
+    let sock = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    sock.send_to(payload, to).expect("send_to");
+}
+
+fn assert_maps_empty(listener: &QUICListener) {
+    assert!(
+        listener.connections.is_empty(),
+        "connections map must be empty after malformed traffic, had {} entries",
+        listener.connections.len()
+    );
+    assert!(
+        listener.cid_routes.is_empty(),
+        "cid_routes must be empty after malformed traffic, had {} entries",
+        listener.cid_routes.len()
+    );
+    assert!(
+        listener.peer_routes.is_empty(),
+        "peer_routes must be empty after malformed traffic, had {} entries",
+        listener.peer_routes.len()
+    );
+}
+
+/// A single zero-byte UDP datagram must be dropped without panic and leave all
+/// maps empty.
+#[test]
+fn malformed_zero_length_datagram_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    send_udp(addr, &[]);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// A single-byte payload cannot be a valid QUIC header; listener must drop it.
+#[test]
+fn malformed_single_byte_datagram_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    send_udp(addr, &[0xFF]);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// Completely random garbage bytes must not panic and must leave maps clean.
+#[test]
+fn malformed_random_garbage_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    let garbage: Vec<u8> = (0u8..64).collect();
+    send_udp(addr, &garbage);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// A valid-looking QUIC long header with a plausible type byte but truncated
+/// body should be rejected cleanly.
+#[test]
+fn malformed_truncated_long_header_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    // Long-header first byte: version-specific Initial packet marker (0xC0 | 0x00)
+    // followed by the QUIC version, then truncated before DCIL/SCIL fields.
+    let truncated: &[u8] = &[
+        0xC0,       // long-header flag + Initial type bits
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        // deliberately truncated here (no DCIL/SCIL/lengths)
+    ];
+    send_udp(addr, truncated);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// A long header with a DCID length that overflows the packet should be
+/// rejected without panicking.
+#[test]
+fn malformed_dcid_length_overflow_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    // Craft a packet whose DCID length field claims 255 bytes but the packet
+    // ends immediately after.
+    let mut pkt = vec![
+        0xC0,                   // long-header Initial
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        0xFF,                   // DCID length = 255 (but no bytes follow)
+    ];
+    // pad with some bytes but far fewer than 255
+    pkt.extend_from_slice(&[0xAB; 8]);
+    send_udp(addr, &pkt);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// A short-header packet destined for an unknown connection must be silently
+/// dropped; it must not create a new connection entry.
+#[test]
+fn short_header_unknown_connection_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    // Short header: first bit 0, remaining bits arbitrary. Use a 20-byte DCID
+    // that does not correspond to any established connection.
+    let mut pkt = vec![0x40u8]; // short-header flag (bit 7 = 0, bit 6 = 1 for fixed bit)
+    pkt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x00, 0x01,
+                             0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+                             0x0A, 0x0B, 0x0C, 0x0D]);
+    send_udp(addr, &pkt);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// A Retry packet from an unknown peer must be ignored without creating state.
+#[test]
+fn retry_packet_for_unknown_connection_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    // Long-header Retry type: bits 0xF0 with version and minimal fields.
+    // quiche will parse the header but the listener should not create a conn.
+    let mut pkt = vec![
+        0xF0,                   // long-header, Retry type bits
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        0x08,                   // DCID len = 8
+    ];
+    pkt.extend_from_slice(&[0x11; 8]); // DCID
+    pkt.push(0x08);                    // SCID len = 8
+    pkt.extend_from_slice(&[0x22; 8]); // SCID
+    // Retry token (arbitrary, no integrity tag)
+    pkt.extend_from_slice(&[0x99; 16]);
+    send_udp(addr, &pkt);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// A Handshake packet for which no connection exists must be dropped cleanly.
+#[test]
+fn handshake_packet_unknown_connection_is_dropped() {
+    let (mut listener, addr) = make_listener();
+    // Long-header Handshake type: 0xE0
+    let mut pkt = vec![
+        0xE0,                   // long-header, Handshake type bits
+        0x00, 0x00, 0x00, 0x01, // QUIC v1
+        0x08,                   // DCID len = 8
+    ];
+    pkt.extend_from_slice(&[0x33; 8]); // DCID
+    pkt.push(0x08);                    // SCID len = 8
+    pkt.extend_from_slice(&[0x44; 8]); // SCID
+    // Packet number + payload (garbage)
+    pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    pkt.extend_from_slice(&[0xAA; 20]);
+    send_udp(addr, &pkt);
+    listener.poll();
+    assert_maps_empty(&listener);
+}
+
+/// Repeated bursts of malformed packets must not accumulate any routing state.
+#[test]
+fn repeated_malformed_packets_leave_maps_consistent() {
+    let (mut listener, addr) = make_listener();
+
+    let payloads: &[&[u8]] = &[
+        &[],                                      // zero-length
+        &[0xFF],                                  // single byte
+        &[0x00; 16],                              // all-zero short
+        &[0xFF; 64],                              // all-ones garbage
+        &[0xC0, 0x00, 0x00, 0x00, 0x01, 0xFF],   // truncated long header
+        &[0x40, 0xDE, 0xAD, 0xBE, 0xEF, 0x00],   // short header, unknown DCID
+    ];
+
+    for payload in payloads {
+        send_udp(addr, payload);
+        listener.poll();
+    }
+
+    assert_maps_empty(&listener);
+}
+
+// ---------------------------------------------------------------------------
+// Connection flood / rate-limit tests (task 1.2)
+// ---------------------------------------------------------------------------
+
+fn make_config_with_rate_limit(
+    port: u32,
+    cert: String,
+    key: String,
+    backend_address: String,
+    new_connections_per_sec: u32,
+    new_connections_burst: u32,
+) -> Config {
+    use spooky_config::config::{Performance, RouteMatch, Upstream};
+    use std::collections::HashMap;
+
+    let mut upstream = HashMap::new();
+    upstream.insert(
+        "test_pool".to_string(),
+        Upstream {
+            load_balancing: LoadBalancing {
+                lb_type: "random".to_string(),
+                key: None,
+            },
+            route: RouteMatch {
+                path_prefix: Some("/".to_string()),
+                ..Default::default()
+            },
+            backends: vec![Backend {
+                id: "backend1".to_string(),
+                address: backend_address,
+                weight: 1,
+                health_check: HealthCheck {
+                    path: "/health".to_string(),
+                    interval: 1000,
+                    timeout_ms: 1000,
+                    failure_threshold: 3,
+                    success_threshold: 1,
+                    cooldown_ms: 0,
+                },
+            }],
+        },
+    );
+
+    Config {
+        version: 1,
+        listen: Listen {
+            protocol: "http3".to_string(),
+            port,
+            address: "127.0.0.1".to_string(),
+            tls: Tls { cert, key },
+        },
+        upstream,
+        load_balancing: Some(LoadBalancing {
+            lb_type: "random".to_string(),
+            key: None,
+        }),
+        log: Log {
+            level: "error".to_string(),
+            file: Default::default(),
+        },
+        performance: Performance {
+            new_connections_per_sec,
+            new_connections_burst,
+            ..Performance::default()
+        },
+        observability: spooky_config::config::Observability::default(),
+        resilience: spooky_config::config::Resilience::default(),
+    }
+}
+
+/// Build a minimal valid QUIC Initial packet using quiche so the listener can
+/// parse the header and attempt `quiche::accept`. Returns the encoded bytes.
+fn build_initial_packet(dest_addr: std::net::SocketAddr) -> Vec<u8> {
+    let local_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+
+    let mut config =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).expect("quiche config");
+    config.verify_peer(false);
+    config
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .expect("alpn");
+    config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+
+    let mut conn = quiche::connect(Some("localhost"), &scid, local_addr, dest_addr, &mut config)
+        .expect("quiche connect");
+
+    let mut out = vec![0u8; MAX_UDP_PAYLOAD_BYTES];
+    let (len, _send_info) = conn.send(&mut out).expect("quiche send");
+    out.truncate(len);
+    out
+}
+
+/// When burst=1 and rate is near-zero, the first Initial packet creates a
+/// connection, and subsequent ones in the same instant are dropped.
+#[test]
+fn connection_flood_is_rate_limited() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    // burst=1, rate=1/s: after the first accept the bucket is empty.
+    let config = make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 1, 1);
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    // Send enough distinct Initial packets to saturate the rate limit.
+    // Each packet comes from a different SCID so the listener sees each as a
+    // new connection attempt (no existing DCID match).
+    const FLOOD_COUNT: usize = 10;
+    for _ in 0..FLOOD_COUNT {
+        let pkt = build_initial_packet(addr);
+        send_udp(addr, &pkt);
+        listener.poll();
+    }
+
+    // With burst=1 only the very first packet can create a connection.
+    // All subsequent ones are dropped by the rate limiter.
+    assert!(
+        listener.connections.len() <= 1,
+        "rate limiter must cap connections at burst=1, got {}",
+        listener.connections.len()
+    );
+}
+
+/// Normal traffic well below the rate limit must not be affected.
+/// With a generous burst and rate, all N connection attempts succeed.
+#[test]
+fn normal_traffic_below_rate_limit_is_unaffected() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    // burst=20, rate=10000/s: far above what we'll send.
+    let config =
+        make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 20);
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    const REQUEST_COUNT: usize = 5;
+    for _ in 0..REQUEST_COUNT {
+        let pkt = build_initial_packet(addr);
+        send_udp(addr, &pkt);
+        listener.poll();
+    }
+
+    assert_eq!(
+        listener.connections.len(),
+        REQUEST_COUNT,
+        "all {} connections should be accepted when below rate limit",
+        REQUEST_COUNT
+    );
+}

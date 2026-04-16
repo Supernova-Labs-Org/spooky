@@ -42,9 +42,8 @@ use crate::{
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
-        QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
-        REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
+        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT,
+        REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
         drain_timeout, scid_rotation_interval,
@@ -54,6 +53,50 @@ use crate::{
     route_index::RouteIndex,
     watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
+
+/// A leaky token-bucket rate limiter for new QUIC connection accepts.
+///
+/// Tokens refill at `rate_per_sec` tokens/second up to a cap of `burst`.
+/// Each new `quiche::accept` call consumes one token; if the bucket is empty
+/// the packet is silently dropped (no panic, no connection state allocated).
+pub(crate) struct TokenBucket {
+    /// Maximum tokens the bucket can hold (burst capacity).
+    burst: f64,
+    /// Tokens added per nanosecond (= rate_per_sec / 1_000_000_000).
+    tokens_per_ns: f64,
+    /// Current available tokens.
+    tokens: f64,
+    /// Last time tokens were refilled.
+    last_refill: Instant,
+}
+
+impl TokenBucket {
+    fn new(rate_per_sec: u32, burst: u32) -> Self {
+        let burst = (burst.max(1)) as f64;
+        let rate_per_sec = rate_per_sec.max(1) as f64;
+        Self {
+            burst,
+            tokens_per_ns: rate_per_sec / 1_000_000_000.0,
+            tokens: burst, // start full so the first burst of legitimate connections succeeds
+            last_refill: Instant::now(),
+        }
+    }
+
+    /// Try to consume one token. Returns `true` if a token was available
+    /// (connection may proceed), `false` if the bucket is empty (drop).
+    fn try_consume(&mut self) -> bool {
+        let now = Instant::now();
+        let elapsed_ns = now.saturating_duration_since(self.last_refill).as_nanos() as f64;
+        self.last_refill = now;
+        self.tokens = (self.tokens + elapsed_ns * self.tokens_per_ns).min(self.burst);
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 fn is_hop_header(name: &str) -> bool {
     matches!(
@@ -260,6 +303,10 @@ impl QUICListener {
             Duration::from_millis(config.performance.backend_body_total_timeout_ms);
         let backend_total_request_timeout =
             Duration::from_millis(config.performance.backend_total_request_timeout_ms);
+        let conn_rate_limiter = TokenBucket::new(
+            config.performance.new_connections_per_sec,
+            config.performance.new_connections_burst,
+        );
 
         Ok(Self {
             socket,
@@ -287,6 +334,7 @@ impl QUICListener {
             cid_routes: HashMap::new(),
             peer_routes: HashMap::new(),
             cid_radix: CidRadix::new(),
+            conn_rate_limiter,
         })
     }
 
@@ -411,15 +459,15 @@ impl QUICListener {
             .map_err(|err| {
                 ProxyError::Transport(format!("failed to set ALPN protocols: {:?}", err))
             })?;
-        quic_config.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+        quic_config.set_max_idle_timeout(config.performance.quic_max_idle_timeout_ms);
         quic_config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
         quic_config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
-        quic_config.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
-        quic_config.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
-        quic_config.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
-        quic_config.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
-        quic_config.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
-        quic_config.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+        quic_config.set_initial_max_data(config.performance.quic_initial_max_data);
+        quic_config.set_initial_max_stream_data_bidi_local(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_stream_data_bidi_remote(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_stream_data_uni(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_streams_bidi(config.performance.quic_initial_max_streams_bidi);
+        quic_config.set_initial_max_streams_uni(config.performance.quic_initial_max_streams_uni);
         quic_config.set_disable_active_migration(true);
         quic_config.verify_peer(false);
 
@@ -535,6 +583,13 @@ impl QUICListener {
         if header.token.is_some() {
             debug!("Received 0-RTT attempt, will negotiate fresh connection");
             // return None;
+        }
+
+        // Rate-limit new connection creation to prevent unbounded memory growth
+        // under connection floods. Existing connections are never affected.
+        if !self.conn_rate_limiter.try_consume() {
+            debug!("New connection rate limit exceeded, dropping Initial packet from {}", peer);
+            return None;
         }
 
         let mut scid_bytes = [0u8; DEFAULT_SCID_LEN_BYTES];
@@ -2930,7 +2985,7 @@ mod tests {
 
     use crate::cid_radix::CidRadix;
 
-    use super::resolve_primary_from_radix_prefix;
+    use super::{TokenBucket, resolve_primary_from_radix_prefix};
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
@@ -2994,6 +3049,68 @@ mod tests {
         assert!(
             cid_radix.longest_prefix_match(alias.as_ref()).is_none(),
             "stale alias should be removed from radix"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TokenBucket unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn token_bucket_allows_up_to_burst_immediately() {
+        let mut tb = TokenBucket::new(100, 5);
+        // Bucket starts full; first 5 tokens should all succeed.
+        for i in 0..5 {
+            assert!(tb.try_consume(), "token {} should be available (burst=5)", i);
+        }
+        // 6th token must fail — bucket is empty.
+        assert!(!tb.try_consume(), "6th token must be denied when burst exhausted");
+    }
+
+    #[test]
+    fn token_bucket_refills_over_time() {
+        let mut tb = TokenBucket::new(1_000_000, 2); // 1 M tokens/sec = 1 per µs
+        // Drain the bucket.
+        assert!(tb.try_consume());
+        assert!(tb.try_consume());
+        assert!(!tb.try_consume());
+
+        // Sleep slightly longer than 1 token's worth at 1M/s (1µs).
+        std::thread::sleep(std::time::Duration::from_micros(5));
+
+        // At least one token must have been refilled.
+        assert!(
+            tb.try_consume(),
+            "bucket should have refilled at least one token after sleep"
+        );
+    }
+
+    #[test]
+    fn token_bucket_rate_zero_clamps_to_one() {
+        // rate=0 is clamped to 1; burst=0 is clamped to 1.
+        let mut tb = TokenBucket::new(0, 0);
+        // Starts with 1 token (burst=1).
+        assert!(tb.try_consume(), "first token should succeed with clamped burst=1");
+        assert!(!tb.try_consume(), "second token must fail when burst=1");
+    }
+
+    #[test]
+    fn token_bucket_never_exceeds_burst() {
+        // With rate=1/s a burst of 3 should yield exactly 3 tokens on a fresh
+        // bucket, then nothing more (refill is 1ns per second — negligible in a
+        // tight loop running for microseconds).
+        let burst = 3u32;
+        let mut tb = TokenBucket::new(1, burst); // 1 token/sec → ~1ns per token
+        let mut consumed = 0;
+        for _ in 0..(burst + 10) {
+            if tb.try_consume() {
+                consumed += 1;
+            }
+        }
+        assert_eq!(
+            consumed, burst as usize,
+            "fresh bucket must yield exactly burst={} tokens in a tight loop, got {}",
+            burst, consumed
         );
     }
 }

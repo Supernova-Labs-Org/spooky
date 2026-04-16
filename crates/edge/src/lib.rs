@@ -97,6 +97,7 @@ pub struct QUICListener {
     pub backend_body_idle_timeout: Duration,
     pub backend_body_total_timeout: Duration,
     pub backend_total_request_timeout: Duration,
+    pub max_response_body_bytes: usize,
 
     pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
@@ -147,6 +148,10 @@ pub enum ResponseChunk {
     Data(Bytes),
     End,
     Error(ProxyError),
+    /// The upstream response body exceeded the configured cap.
+    /// The stream must be RST (not cleanly finished) so the client sees an
+    /// unambiguous error rather than a silently truncated 200 response.
+    BodyTooLarge,
 }
 
 pub struct RequestEnvelope {

@@ -42,8 +42,8 @@ use crate::{
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT,
-        REQUEST_CHUNK_BYTES_LIMIT,
+        MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES,
+        MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
         drain_timeout, scid_rotation_interval,
@@ -303,6 +303,7 @@ impl QUICListener {
             Duration::from_millis(config.performance.backend_body_total_timeout_ms);
         let backend_total_request_timeout =
             Duration::from_millis(config.performance.backend_total_request_timeout_ms);
+        let max_response_body_bytes = config.performance.max_response_body_bytes;
         let conn_rate_limiter = TokenBucket::new(
             config.performance.new_connections_per_sec,
             config.performance.new_connections_burst,
@@ -328,6 +329,7 @@ impl QUICListener {
             backend_body_idle_timeout,
             backend_body_total_timeout,
             backend_total_request_timeout,
+            max_response_body_bytes,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -939,6 +941,7 @@ impl QUICListener {
                 &self.routing_index,
                 &self.metrics,
                 &self.resilience,
+                self.max_response_body_bytes,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -1013,6 +1016,7 @@ impl QUICListener {
                     &self.metrics,
                     self.backend_total_request_timeout,
                     &self.resilience,
+                    self.max_response_body_bytes,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
                 }
@@ -1110,6 +1114,7 @@ impl QUICListener {
         routing_index: &RouteIndex,
         metrics: &Metrics,
         resilience: &RuntimeResilience,
+        max_response_body_bytes: usize,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -1609,6 +1614,34 @@ impl QUICListener {
                         }
                     };
 
+                    // App-level stream count cap: mirrors the QUIC max_streams_bidi
+                    // limit so the streams HashMap can never grow beyond what the
+                    // transport layer allows even if a race or misconfiguration
+                    // delivers a stream-open event before the flow-control frame
+                    // reaches the client.
+                    if connection.streams.len() >= MAX_STREAMS_PER_CONNECTION {
+                        warn!(
+                            "stream limit reached ({} streams), rejecting stream {}",
+                            MAX_STREAMS_PER_CONNECTION, stream_id
+                        );
+                        // Dropping the permits and body_tx here releases inflight
+                        // semaphore slots and signals the upstream task to abort.
+                        drop(body_tx);
+                        drop(global_inflight_permit);
+                        drop(upstream_inflight_permit);
+                        drop(adaptive_admission_permit);
+                        drop(route_queue_permit);
+                        drop(upstream_result_rx);
+                        Self::send_simple_response(
+                            h3,
+                            &mut connection.quic,
+                            stream_id,
+                            http::StatusCode::SERVICE_UNAVAILABLE,
+                            b"too many concurrent streams\n",
+                        )?;
+                        continue;
+                    }
+
                     connection.streams.insert(
                         stream_id,
                         RequestEnvelope {
@@ -1797,6 +1830,7 @@ impl QUICListener {
             metrics,
             backend_total_request_timeout,
             resilience,
+            max_response_body_bytes,
         )?;
 
         Ok(())
@@ -1832,6 +1866,7 @@ impl QUICListener {
         metrics: &Metrics,
         _backend_total_request_timeout: Duration,
         resilience: &RuntimeResilience,
+        max_response_body_bytes: usize,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
 
@@ -1962,6 +1997,7 @@ impl QUICListener {
                         let fut = async move {
                             use http_body_util::BodyExt;
                             let mut body: hyper::body::Incoming = body;
+                            let mut response_bytes_received: usize = 0;
                             loop {
                                 let frame_fut = BodyExt::frame(&mut body);
                                 let now = tokio::time::Instant::now();
@@ -1984,6 +2020,21 @@ impl QUICListener {
                                     }
                                     Ok(Some(Ok(f))) => {
                                         if let Ok(data) = f.into_data() {
+                                            // Enforce hard cap on total response body bytes.
+                                            // Protects against runaway upstream responses causing
+                                            // unbounded memory growth in the pump task.
+                                            response_bytes_received = response_bytes_received
+                                                .saturating_add(data.len());
+                                            if response_bytes_received > max_response_body_bytes {
+                                                // Signal the flush loop to RST the stream.
+                                                // Headers were already sent with 200 so we cannot
+                                                // retroactively set a 5xx status; RST is the
+                                                // HTTP/3-correct way to signal mid-stream abort.
+                                                let _ = chunk_tx
+                                                    .send(ResponseChunk::BodyTooLarge)
+                                                    .await;
+                                                return;
+                                            }
                                             for start in
                                                 (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
                                             {
@@ -2186,6 +2237,37 @@ impl QUICListener {
                                 break;
                             }
                         },
+                        ResponseChunk::BodyTooLarge => {
+                            // Response body exceeded the configured cap.  Headers were
+                            // already sent (200) so we cannot retroactively set 5xx.
+                            // RST the QUIC stream so the client sees an unambiguous
+                            // abort rather than a silently truncated clean response.
+                            // H3_INTERNAL_ERROR = 0x0102 per RFC 9114 §8.1.
+                            let _ = quic.stream_shutdown(
+                                stream_id,
+                                quiche::Shutdown::Write,
+                                0x0102,
+                            );
+                            req.phase = StreamPhase::Failed;
+                            metrics.inc_failure();
+                            metrics.inc_backend_error();
+                            let route_label =
+                                req.upstream_name.as_deref().unwrap_or("unrouted");
+                            metrics.record_route(
+                                route_label,
+                                req.start.elapsed(),
+                                RouteOutcome::BackendError,
+                            );
+                            resilience
+                                .adaptive_admission
+                                .observe(req.start.elapsed(), true);
+                            warn!(
+                                "upstream response body exceeded cap ({} bytes) on stream {}",
+                                max_response_body_bytes, stream_id
+                            );
+                            terminal = true;
+                            break;
+                        }
                         ResponseChunk::Error(err) => {
                             // Best-effort: close the stream.
                             let _ = h3.send_body(quic, stream_id, b"", true);

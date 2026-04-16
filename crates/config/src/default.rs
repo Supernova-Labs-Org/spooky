@@ -162,6 +162,10 @@ pub fn perf_default_quic_initial_max_streams_uni() -> u64 {
     100
 }
 
+pub fn perf_default_max_response_body_bytes() -> usize {
+    100 * 1024 * 1024 // 100 MiB
+}
+
 pub fn resilience_default_adaptive_enabled() -> bool {
     true
 }

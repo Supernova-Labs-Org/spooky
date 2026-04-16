@@ -79,6 +79,7 @@ performance:
     quic_initial_max_stream_data: 1000000   # per-stream flow control window (bytes); must be <= quic_initial_max_data
     quic_initial_max_streams_bidi: 100      # max concurrent bidirectional streams per connection
     quic_initial_max_streams_uni: 100       # max concurrent unidirectional streams per connection
+    max_response_body_bytes: 104857600      # hard cap on upstream response body per stream (100 MiB); streams exceeding this get a 502
 
 observability:
     metrics:

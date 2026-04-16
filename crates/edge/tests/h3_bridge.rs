@@ -31,7 +31,8 @@ use tokio::net::TcpListener;
 use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
-    BACKEND_TIMEOUT_SECS, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES, MAX_UDP_PAYLOAD_BYTES,
+    BACKEND_TIMEOUT_SECS, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
+    MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES,
     QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI,
     QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA, REQUEST_TIMEOUT_SECS,
     UDP_READ_TIMEOUT_MS,
@@ -1470,5 +1471,232 @@ fn chaos_partial_outage_preserves_some_availability() {
     assert!(
         failures > 0,
         "partial outage should still surface some failures"
+    );
+}
+
+/// When more than MAX_STREAMS_PER_CONNECTION concurrent streams are opened on a
+/// single connection the proxy must reject the excess stream with 503.
+#[test]
+fn stream_cap_rejects_excess_concurrent_streams() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    // Slow backend so all N+1 streams are in-flight simultaneously.
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    // Raise the QUIC transport stream limit above the app-level cap so the N+1th
+    // stream reaches the application guard (rather than being dropped at the
+    // QUIC layer with StreamLimit).
+    config.performance.quic_initial_max_streams_bidi =
+        (MAX_STREAMS_PER_CONNECTION as u64) + 10;
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    // Send MAX_STREAMS_PER_CONNECTION + 1 slow requests concurrently.
+    // The first N must all succeed (200); the N+1th must be shed (503).
+    let n = MAX_STREAMS_PER_CONNECTION + 1;
+    let paths: Vec<&str> = vec!["/slow"; n];
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &paths,
+        // slow path takes ~700 ms; give plenty of room
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 10),
+    )
+    .expect("concurrent requests should complete");
+
+    let count_503 = observations
+        .iter()
+        .filter(|o| o.status.as_deref() == Some("503"))
+        .count();
+    let count_200 = observations
+        .iter()
+        .filter(|o| o.status.as_deref() == Some("200"))
+        .count();
+
+    assert!(
+        count_503 >= 1,
+        "expected at least one 503 when stream cap is exceeded, got statuses: {:?}",
+        observations.iter().map(|o| &o.status).collect::<Vec<_>>()
+    );
+    assert!(
+        count_200 >= 1,
+        "expected at least one successful stream through the cap, got statuses: {:?}",
+        observations.iter().map(|o| &o.status).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        count_200 + count_503,
+        n,
+        "every stream must get a terminal response"
+    );
+}
+
+/// When the upstream response body exceeds `max_response_body_bytes` the proxy
+/// must RST the stream (H3_INTERNAL_ERROR).  We set the cap to 1 KiB and have
+/// the backend return 8 KiB so the breach is guaranteed.
+///
+/// The proxy already sent response headers (200) before the cap fires, so it
+/// cannot retroactively send 5xx.  Instead it RSTs the QUIC write side so the
+/// client sees an unambiguous stream abort rather than a silently truncated
+/// clean response.
+#[test]
+fn response_body_cap_rsts_stream_on_breach() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    // Backend that serves exactly 8 KiB.
+    let large_body = Bytes::from(vec![b'x'; 8 * 1024]);
+    let listener_tcp = rt.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+    let backend_addr = listener_tcp.local_addr().unwrap();
+    rt.spawn(async move {
+        loop {
+            let (stream, _) = match listener_tcp.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+            let body_clone = large_body.clone();
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let service = service_fn(move |_req: Request<Incoming>| {
+                    let body = body_clone.clone();
+                    async move {
+                        Ok::<_, hyper::Error>(Response::new(Full::new(body).boxed()))
+                    }
+                });
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    });
+
+    // Cap at 1 KiB — far below the 8 KiB the backend will send.
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.max_response_body_bytes = 1024;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    // Bespoke client loop: treat Reset as the expected terminal event.
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let local_addr = socket.local_addr().unwrap();
+
+    let mut qconfig = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    qconfig.verify_peer(false);
+    qconfig
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .unwrap();
+    qconfig.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    qconfig.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    qconfig.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    qconfig.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    qconfig.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    qconfig.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    qconfig.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+    qconfig.set_disable_active_migration(true);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+    let mut conn =
+        quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig).unwrap();
+    let h3_config = quiche::h3::Config::new().unwrap();
+
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    let (w, si) = conn.send(&mut out).unwrap();
+    socket.send_to(&out[..w], si.to).unwrap();
+
+    let start = Instant::now();
+    let mut h3: Option<quiche::h3::Connection> = None;
+    let mut req_sent = false;
+    let mut got_reset = false;
+
+    'outer: loop {
+        loop {
+            match conn.send(&mut out) {
+                Ok((w, si)) => {
+                    let _ = socket.send_to(&out[..w], si.to);
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => panic!("send: {e:?}"),
+            }
+        }
+
+        let timeout = quic_read_timeout(&conn);
+        socket.set_read_timeout(Some(timeout)).unwrap();
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                conn.recv(
+                    &mut buf[..len],
+                    quiche::RecvInfo {
+                        from,
+                        to: local_addr,
+                    },
+                )
+                .unwrap();
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                conn.on_timeout();
+            }
+            Err(e) => panic!("recv: {e:?}"),
+        }
+
+        if conn.is_established() && h3.is_none() {
+            h3 = Some(
+                quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap(),
+            );
+        }
+
+        if let Some(h3c) = h3.as_mut() {
+            if !req_sent && conn.is_established() {
+                let req = vec![
+                    quiche::h3::Header::new(b":method", b"GET"),
+                    quiche::h3::Header::new(b":scheme", b"https"),
+                    quiche::h3::Header::new(b":authority", b"localhost"),
+                    quiche::h3::Header::new(b":path", b"/"),
+                    quiche::h3::Header::new(b"user-agent", b"spooky-cap-test"),
+                ];
+                h3c.send_request(&mut conn, &req, true).unwrap();
+                req_sent = true;
+            }
+
+            loop {
+                match h3c.poll(&mut conn) {
+                    Ok((_sid, quiche::h3::Event::Headers { .. })) => {}
+                    Ok((_sid, quiche::h3::Event::Data)) => {}
+                    Ok((_sid, quiche::h3::Event::Finished)) => {
+                        // Should not happen with the RST path, but handle it.
+                        break 'outer;
+                    }
+                    Ok((_sid, quiche::h3::Event::Reset(_))) => {
+                        got_reset = true;
+                        break 'outer;
+                    }
+                    Ok(_) => {}
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(e) => panic!("poll: {e:?}"),
+                }
+            }
+        }
+
+        if start.elapsed() > Duration::from_secs(REQUEST_TIMEOUT_SECS + 4) {
+            panic!("timeout waiting for stream reset");
+        }
+    }
+
+    assert!(
+        got_reset,
+        "expected the stream to be RST when response body cap is exceeded"
     );
 }

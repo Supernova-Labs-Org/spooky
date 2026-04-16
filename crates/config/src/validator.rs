@@ -198,6 +198,11 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.max_response_body_bytes == 0 {
+        error!("performance.max_response_body_bytes must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_connect_timeout_ms > config.performance.backend_timeout_ms {
         error!("performance.backend_connect_timeout_ms must be <= backend_timeout_ms");
         return false;
@@ -765,6 +770,10 @@ upstream:
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.quic_initial_max_streams_uni = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.max_response_body_bytes = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());

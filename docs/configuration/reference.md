@@ -128,7 +128,7 @@ The following table lists all default configuration values used when properties 
 | `performance.quic_initial_max_stream_data` | `1000000` | Per-stream flow control window (bytes) |
 | `performance.quic_initial_max_streams_bidi` | `100` | Max concurrent bidirectional streams per connection |
 | `performance.quic_initial_max_streams_uni` | `100` | Max concurrent unidirectional streams per connection |
-| `performance.max_response_body_bytes` | `104857600` | Hard cap on upstream response body bytes per stream (100 MiB); streams exceeding this are terminated with 502 |
+| `performance.max_response_body_bytes` | `104857600` | Hard cap on upstream response body bytes per stream (100 MiB); streams exceeding this return 503 (`upstream response body too large`) |
 
 ## Listen Configuration
 
@@ -509,7 +509,7 @@ Controls resource limits, tuning knobs, and connection-flood protection. All fie
 | `quic_initial_max_stream_data` | integer | No | `1000000` | Per-stream QUIC flow control window in bytes; must be ≤ `quic_initial_max_data` |
 | `quic_initial_max_streams_bidi` | integer | No | `100` | Maximum concurrent bidirectional QUIC streams per connection |
 | `quic_initial_max_streams_uni` | integer | No | `100` | Maximum concurrent unidirectional QUIC streams per connection |
-| `max_response_body_bytes` | integer | No | `104857600` | Hard cap on upstream response body bytes per stream; streams exceeding this are terminated with 502 |
+| `max_response_body_bytes` | integer | No | `104857600` | Hard cap on upstream response body bytes per stream; streams exceeding this return 503 (`upstream response body too large`) |
 
 ### Connection flood protection
 

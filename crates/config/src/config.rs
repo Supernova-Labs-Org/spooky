@@ -16,8 +16,9 @@ use crate::default::{
     perf_default_new_connections_per_sec, perf_default_per_backend_inflight_limit,
     perf_default_per_upstream_inflight_limit, perf_default_pin_workers,
     perf_default_quic_initial_max_data, perf_default_quic_initial_max_stream_data,
-    perf_default_quic_initial_max_streams_bidi, perf_default_quic_initial_max_streams_uni,
-    perf_default_quic_max_idle_timeout_ms, perf_default_reuseport,
+    perf_default_max_response_body_bytes, perf_default_quic_initial_max_streams_bidi,
+    perf_default_quic_initial_max_streams_uni, perf_default_quic_max_idle_timeout_ms,
+    perf_default_reuseport,
     perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
     perf_default_worker_threads, resilience_default_adaptive_decrease_step,
     resilience_default_adaptive_enabled, resilience_default_adaptive_high_latency_ms,
@@ -247,6 +248,12 @@ pub struct Performance {
     /// Maximum number of concurrent unidirectional streams per connection.
     #[serde(default = "perf_default_quic_initial_max_streams_uni")]
     pub quic_initial_max_streams_uni: u64,
+
+    /// Hard cap on upstream response body bytes per stream.
+    /// Streams whose response body exceeds this size are terminated with 502.
+    /// Protects against runaway or adversarial upstreams streaming unboundedly.
+    #[serde(default = "perf_default_max_response_body_bytes")]
+    pub max_response_body_bytes: usize,
 }
 
 impl Default for Performance {
@@ -275,6 +282,7 @@ impl Default for Performance {
             quic_initial_max_stream_data: perf_default_quic_initial_max_stream_data(),
             quic_initial_max_streams_bidi: perf_default_quic_initial_max_streams_bidi(),
             quic_initial_max_streams_uni: perf_default_quic_initial_max_streams_uni(),
+            max_response_body_bytes: perf_default_max_response_body_bytes(),
         }
     }
 }

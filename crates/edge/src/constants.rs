@@ -1,5 +1,30 @@
 use std::time::Duration;
 
+// ─── Memory envelope ──────────────────────────────────────────────────────────
+//
+// Per-stream worst-case memory (defaults; operator can tune via `performance.*`):
+//
+//   Request path
+//   ├─ body channel:    REQUEST_CHUNK_CHANNEL_CAPACITY * REQUEST_CHUNK_BYTES_LIMIT
+//   │                   = 8 * 16 KiB = 128 KiB
+//   ├─ backpressure buf: REQUEST_BUFFERED_CHUNK_BYTES_LIMIT = 1 MiB (== MAX_REQUEST_BODY_BYTES)
+//   └─ hard request cap: MAX_REQUEST_BODY_BYTES = 1 MiB → 413 on breach
+//
+//   Response path
+//   ├─ response channel: RESPONSE_CHUNK_CHANNEL_CAPACITY * RESPONSE_CHUNK_BYTES_LIMIT
+//   │                   = 16 * 16 KiB = 256 KiB
+//   └─ hard response cap: max_response_body_bytes (default 100 MiB)
+//      - declared content-length over cap -> 503 before streaming
+//      - unknown-length responses are cap-validated before headers are emitted
+//        and return 503 on breach (no reset fallback)
+//
+// Per-connection worst-case:
+//   MAX_STREAMS_PER_CONNECTION (= QUIC_INITIAL_MAX_STREAMS_BIDI = 100) streams
+//   × per-stream worst case above → ~101 MiB request + ~100 MiB response ≈ 200 MiB
+//   (all caps enforced; no path causes unbounded growth)
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
 pub const MAX_DATAGRAM_SIZE_BYTES: usize = 65_535;
 pub const MAX_UDP_PAYLOAD_BYTES: usize = 1_350;
 
@@ -18,6 +43,17 @@ pub const QUIC_INITIAL_STREAM_DATA: u64 = 1_000_000;
 pub const MAX_REQUEST_BODY_BYTES: usize = 1_000_000;
 pub const QUIC_INITIAL_MAX_STREAMS_BIDI: u64 = 100;
 pub const QUIC_INITIAL_MAX_STREAMS_UNI: u64 = 100;
+
+/// Application-level cap on concurrent open streams per QUIC connection.
+/// Mirrors QUIC_INITIAL_MAX_STREAMS_BIDI so the app map never grows beyond
+/// what the transport layer permits.  Must be kept in sync.
+pub const MAX_STREAMS_PER_CONNECTION: usize = QUIC_INITIAL_MAX_STREAMS_BIDI as usize;
+
+/// Default hard cap on upstream response body bytes per stream (overridable via
+/// `performance.max_response_body_bytes`).  Streams exceeding this are aborted
+/// with a QUIC stream RST (H3_INTERNAL_ERROR) since response headers were already
+/// sent; no unbounded memory growth is possible.
+pub const MAX_RESPONSE_BODY_BYTES: usize = 100 * 1024 * 1024; // 100 MiB
 
 pub const MAX_INFLIGHT_PER_BACKEND: usize = 64;
 pub const DEFAULT_SCID_LEN_BYTES: usize = 16;

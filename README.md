@@ -12,6 +12,7 @@ Modern clients increasingly expect HTTP/3 support, but most production backends 
 - Converting HTTP/3 streams to HTTP/2 requests
 - Load balancing across backend pools with health checks
 - Supporting path and host-based routing
+- Enforcing bounded request/response memory with deterministic overload failures
 
 ## Quick Start
 
@@ -154,7 +155,8 @@ flowchart LR
 - HTTP/3 and QUIC (RFC 9114, RFC 9000)
 - TLS 1.3 with certificate chain validation
 - HTTP/2 backend connectivity
-- Efficient request/response handling with full buffering
+- Streaming request/response handling with bounded queues and body caps
+- Deterministic cap-breach behavior (`413`/`503`) under pressure
 
 **Load Balancing**
 - Random distribution
@@ -191,12 +193,13 @@ cargo test -p spooky-edge
 
 # Run integration tests
 cargo test -p spooky-edge --test lb_integration
+cargo test -p spooky-edge --test h3_bridge
 ```
 
 
 ## Project Status
 
-**Experimental.** Spooky is not production-ready. Core features are implemented and functional, but significant limitations remain (blocking backend I/O, full body buffering, no TLS peer verification, single-threaded QUIC processing).
+**Experimental.** Spooky is not production-ready yet. Core features are implemented and continuously hardened, but it should still be treated as pre-GA software.
 
 See [roadmap](docs/roadmap.md) for known issues and planned improvements.
 

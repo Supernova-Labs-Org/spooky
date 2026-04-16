@@ -97,6 +97,7 @@ pub struct QUICListener {
     pub backend_body_idle_timeout: Duration,
     pub backend_body_total_timeout: Duration,
     pub backend_total_request_timeout: Duration,
+    pub max_response_body_bytes: usize,
 
     pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
@@ -144,6 +145,12 @@ pub enum StreamPhase {
 /// A chunk of the upstream response being streamed back to the client.
 #[derive(Debug)]
 pub enum ResponseChunk {
+    /// Emit downstream response headers (used when headers are deferred until
+    /// body-size validation completes).
+    Start {
+        status: http::StatusCode,
+        headers: Vec<(Vec<u8>, Vec<u8>)>,
+    },
     Data(Bytes),
     End,
     Error(ProxyError),
@@ -181,6 +188,8 @@ pub struct RequestEnvelope {
     pub upstream_result_rx: Option<oneshot::Receiver<ForwardResult>>,
     /// Receives response body chunks to write back over QUIC.
     pub response_chunk_rx: Option<mpsc::Receiver<ResponseChunk>>,
+    /// True once downstream response headers are emitted on this stream.
+    pub response_headers_sent: bool,
     /// A chunk that could not be written due to QUIC send backpressure; retried next poll.
     pub pending_chunk: Option<ResponseChunk>,
 }

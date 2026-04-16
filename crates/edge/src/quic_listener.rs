@@ -42,8 +42,8 @@ use crate::{
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT,
-        REQUEST_CHUNK_BYTES_LIMIT,
+        MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES,
+        MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
         drain_timeout, scid_rotation_interval,
@@ -303,6 +303,7 @@ impl QUICListener {
             Duration::from_millis(config.performance.backend_body_total_timeout_ms);
         let backend_total_request_timeout =
             Duration::from_millis(config.performance.backend_total_request_timeout_ms);
+        let max_response_body_bytes = config.performance.max_response_body_bytes;
         let conn_rate_limiter = TokenBucket::new(
             config.performance.new_connections_per_sec,
             config.performance.new_connections_burst,
@@ -328,6 +329,7 @@ impl QUICListener {
             backend_body_idle_timeout,
             backend_body_total_timeout,
             backend_total_request_timeout,
+            max_response_body_bytes,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -939,6 +941,7 @@ impl QUICListener {
                 &self.routing_index,
                 &self.metrics,
                 &self.resilience,
+                self.max_response_body_bytes,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -1013,6 +1016,7 @@ impl QUICListener {
                     &self.metrics,
                     self.backend_total_request_timeout,
                     &self.resilience,
+                    self.max_response_body_bytes,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
                 }
@@ -1110,6 +1114,7 @@ impl QUICListener {
         routing_index: &RouteIndex,
         metrics: &Metrics,
         resilience: &RuntimeResilience,
+        max_response_body_bytes: usize,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -1609,6 +1614,34 @@ impl QUICListener {
                         }
                     };
 
+                    // App-level stream count cap: mirrors the QUIC max_streams_bidi
+                    // limit so the streams HashMap can never grow beyond what the
+                    // transport layer allows even if a race or misconfiguration
+                    // delivers a stream-open event before the flow-control frame
+                    // reaches the client.
+                    if connection.streams.len() >= MAX_STREAMS_PER_CONNECTION {
+                        warn!(
+                            "stream limit reached ({} streams), rejecting stream {}",
+                            MAX_STREAMS_PER_CONNECTION, stream_id
+                        );
+                        // Dropping the permits and body_tx here releases inflight
+                        // semaphore slots and signals the upstream task to abort.
+                        drop(body_tx);
+                        drop(global_inflight_permit);
+                        drop(upstream_inflight_permit);
+                        drop(adaptive_admission_permit);
+                        drop(route_queue_permit);
+                        drop(upstream_result_rx);
+                        Self::send_simple_response(
+                            h3,
+                            &mut connection.quic,
+                            stream_id,
+                            http::StatusCode::SERVICE_UNAVAILABLE,
+                            b"too many concurrent streams\n",
+                        )?;
+                        continue;
+                    }
+
                     connection.streams.insert(
                         stream_id,
                         RequestEnvelope {
@@ -1633,6 +1666,7 @@ impl QUICListener {
                             request_fin_received,
                             upstream_result_rx,
                             response_chunk_rx: None,
+                            response_headers_sent: false,
                             pending_chunk: None,
                         },
                     );
@@ -1797,6 +1831,7 @@ impl QUICListener {
             metrics,
             backend_total_request_timeout,
             resilience,
+            max_response_body_bytes,
         )?;
 
         Ok(())
@@ -1832,6 +1867,7 @@ impl QUICListener {
         metrics: &Metrics,
         _backend_total_request_timeout: Duration,
         resilience: &RuntimeResilience,
+        max_response_body_bytes: usize,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
 
@@ -1906,62 +1942,115 @@ impl QUICListener {
                 }
                 match forward_result {
                     Ok((status, resp_headers, body)) => {
-                        // Send H3 response headers immediately (non-blocking).
-                        let mut h3_headers = Vec::with_capacity(resp_headers.len() + 1);
-                        h3_headers.push(quiche::h3::Header::new(
-                            b":status",
-                            status.as_str().as_bytes(),
-                        ));
-                        for (name, value) in resp_headers.iter() {
-                            if is_hop_header(name.as_str()) || name == http::header::CONTENT_LENGTH
-                            {
-                                continue;
-                            }
-                            h3_headers.push(quiche::h3::Header::new(
-                                name.as_str().as_bytes(),
-                                value.as_bytes(),
-                            ));
-                        }
-                        if let Err(err) = h3.send_response(quic, stream_id, &h3_headers, false) {
+                        // If upstream advertised a response length beyond our hard cap,
+                        // fail fast with 503 before sending any downstream headers/body.
+                        let upstream_content_length = resp_headers
+                            .get(http::header::CONTENT_LENGTH)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.parse::<usize>().ok());
+                        if upstream_content_length
+                            .is_some_and(|len| len > max_response_body_bytes)
+                        {
                             if let Some(req) = streams.get(&stream_id) {
-                                let protocol = ProxyError::Protocol(format!(
-                                    "failed to send HTTP/3 response headers: {:?}",
-                                    err
-                                ));
-                                if let Err(protocol_err) = Self::handle_forward_result(
-                                    h3,
-                                    quic,
-                                    stream_id,
-                                    req,
-                                    Err(protocol),
-                                    upstream_pools,
-                                    routing_index,
-                                    metrics,
-                                ) {
-                                    error!(
-                                        "failed to emit protocol recovery response on stream {}: {:?}",
-                                        stream_id, protocol_err
-                                    );
-                                }
+                                metrics.inc_failure();
+                                metrics.inc_overload_shed();
+                                let route_label =
+                                    req.upstream_name.as_deref().unwrap_or("unrouted");
+                                metrics.record_route(
+                                    route_label,
+                                    req.start.elapsed(),
+                                    RouteOutcome::OverloadShed,
+                                );
                                 resilience
                                     .adaptive_admission
                                     .observe(req.start.elapsed(), true);
+                                warn!(
+                                    "upstream declared content-length over cap ({} > {}) on stream {}",
+                                    upstream_content_length.unwrap_or_default(),
+                                    max_response_body_bytes,
+                                    stream_id
+                                );
+                                let _ = Self::send_simple_response(
+                                    h3,
+                                    quic,
+                                    stream_id,
+                                    http::StatusCode::SERVICE_UNAVAILABLE,
+                                    b"upstream response body too large\n",
+                                );
                             }
                             streams.remove(&stream_id);
                             continue;
                         }
 
+                        let mut owned_h3_headers: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                        for (name, value) in resp_headers.iter() {
+                            if is_hop_header(name.as_str()) || name == http::header::CONTENT_LENGTH
+                            {
+                                continue;
+                            }
+                            owned_h3_headers
+                                .push((name.as_str().as_bytes().to_vec(), value.as_bytes().to_vec()));
+                        }
+
+                        let defer_headers_until_body_validated = upstream_content_length.is_none();
+
+                        if !defer_headers_until_body_validated {
+                            // For declared-length responses within cap, emit headers immediately
+                            // and stream body progressively.
+                            let mut h3_headers = Vec::with_capacity(owned_h3_headers.len() + 1);
+                            h3_headers.push(quiche::h3::Header::new(
+                                b":status",
+                                status.as_str().as_bytes(),
+                            ));
+                            for (name, value) in &owned_h3_headers {
+                                h3_headers.push(quiche::h3::Header::new(name, value));
+                            }
+                            if let Err(err) = h3.send_response(quic, stream_id, &h3_headers, false)
+                            {
+                                if let Some(req) = streams.get(&stream_id) {
+                                    let protocol = ProxyError::Protocol(format!(
+                                        "failed to send HTTP/3 response headers: {:?}",
+                                        err
+                                    ));
+                                    if let Err(protocol_err) = Self::handle_forward_result(
+                                        h3,
+                                        quic,
+                                        stream_id,
+                                        req,
+                                        Err(protocol),
+                                        upstream_pools,
+                                        routing_index,
+                                        metrics,
+                                    ) {
+                                        error!(
+                                            "failed to emit protocol recovery response on stream {}: {:?}",
+                                            stream_id, protocol_err
+                                        );
+                                    }
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
+                                }
+                                streams.remove(&stream_id);
+                                continue;
+                            }
+                        }
+
                         // Spawn a task that pumps body frames into a ResponseChunk channel.
-                        // Enforces both body idle and total deadlines so slow upstream bodies
-                        // do not keep streams open indefinitely.
+                        // Enforces body deadlines; for unknown-length responses it first
+                        // validates total body size against cap before emitting any headers.
                         let (chunk_tx, chunk_rx) =
                             mpsc::channel::<ResponseChunk>(RESPONSE_CHUNK_CHANNEL_CAPACITY);
                         let fail_tx = chunk_tx.clone();
                         let total_deadline =
                             tokio::time::Instant::now() + backend_body_total_timeout;
+                        let deferred_status = status;
+                        let deferred_headers = owned_h3_headers.clone();
                         let fut = async move {
                             use http_body_util::BodyExt;
                             let mut body: hyper::body::Incoming = body;
+                            let mut response_bytes_received: usize = 0;
+                            let mut buffered_chunks: Vec<Bytes> = Vec::new();
                             loop {
                                 let frame_fut = BodyExt::frame(&mut body);
                                 let now = tokio::time::Instant::now();
@@ -1984,19 +2073,41 @@ impl QUICListener {
                                     }
                                     Ok(Some(Ok(f))) => {
                                         if let Ok(data) = f.into_data() {
-                                            for start in
-                                                (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
-                                            {
-                                                let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
-                                                    .min(data.len());
-                                                if chunk_tx
-                                                    .send(ResponseChunk::Data(
-                                                        data.slice(start..end),
-                                                    ))
-                                                    .await
-                                                    .is_err()
-                                                {
+                                            if defer_headers_until_body_validated {
+                                                response_bytes_received = response_bytes_received
+                                                    .saturating_add(data.len());
+                                                if response_bytes_received > max_response_body_bytes {
+                                                    let _ = chunk_tx
+                                                        .send(ResponseChunk::Error(ProxyError::Pool(
+                                                            PoolError::BackendOverloaded(
+                                                                "upstream response body too large".into(),
+                                                            ),
+                                                        )))
+                                                        .await;
                                                     return;
+                                                }
+                                                for start in
+                                                    (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                                {
+                                                    let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                        .min(data.len());
+                                                    buffered_chunks.push(data.slice(start..end));
+                                                }
+                                            } else {
+                                                for start in
+                                                    (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                                {
+                                                    let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                        .min(data.len());
+                                                    if chunk_tx
+                                                        .send(ResponseChunk::Data(
+                                                            data.slice(start..end),
+                                                        ))
+                                                        .await
+                                                        .is_err()
+                                                    {
+                                                        return;
+                                                    }
                                                 }
                                             }
                                         }
@@ -2011,6 +2122,24 @@ impl QUICListener {
                                         return;
                                     }
                                     Ok(None) => {
+                                        if defer_headers_until_body_validated {
+                                            if chunk_tx
+                                                .send(ResponseChunk::Start {
+                                                    status: deferred_status,
+                                                    headers: deferred_headers,
+                                                })
+                                                .await
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                            for chunk in buffered_chunks {
+                                                if chunk_tx.send(ResponseChunk::Data(chunk)).await.is_err()
+                                                {
+                                                    return;
+                                                }
+                                            }
+                                        }
                                         let _ = chunk_tx.send(ResponseChunk::End).await;
                                         return;
                                     }
@@ -2026,6 +2155,7 @@ impl QUICListener {
 
                         if let Some(req) = streams.get_mut(&stream_id) {
                             req.response_chunk_rx = Some(chunk_rx);
+                            req.response_headers_sent = !defer_headers_until_body_validated;
                             req.phase = StreamPhase::SendingResponse;
                         }
 
@@ -2123,6 +2253,46 @@ impl QUICListener {
                         },
                     };
                     match chunk {
+                        ResponseChunk::Start { status, headers } => {
+                            let mut h3_headers = Vec::with_capacity(headers.len() + 1);
+                            h3_headers.push(quiche::h3::Header::new(
+                                b":status",
+                                status.as_str().as_bytes(),
+                            ));
+                            for (name, value) in &headers {
+                                h3_headers.push(quiche::h3::Header::new(name, value));
+                            }
+                            match h3.send_response(quic, stream_id, &h3_headers, false) {
+                                Ok(_) => {
+                                    req.response_headers_sent = true;
+                                }
+                                Err(quiche::h3::Error::StreamBlocked) => {
+                                    req.pending_chunk = Some(ResponseChunk::Start { status, headers });
+                                    break;
+                                }
+                                Err(err) => {
+                                    error!(
+                                        "HTTP/3 send_response protocol error on stream {}: {:?}",
+                                        stream_id, err
+                                    );
+                                    req.phase = StreamPhase::Failed;
+                                    metrics.inc_failure();
+                                    metrics.inc_backend_error();
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::BackendError,
+                                    );
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
+                                    terminal = true;
+                                    break;
+                                }
+                            }
+                        }
                         ResponseChunk::Data(data) => {
                             match h3.send_body(quic, stream_id, &data, false) {
                                 Ok(_) => {}
@@ -2187,8 +2357,28 @@ impl QUICListener {
                             }
                         },
                         ResponseChunk::Error(err) => {
-                            // Best-effort: close the stream.
-                            let _ = h3.send_body(quic, stream_id, b"", true);
+                            // If headers are not emitted yet, return a deterministic
+                            // HTTP error status instead of resetting or truncating.
+                            if !req.response_headers_sent {
+                                let (status, body): (http::StatusCode, &[u8]) = match &err {
+                                    ProxyError::Timeout => (
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        b"upstream timeout\n",
+                                    ),
+                                    ProxyError::Pool(PoolError::BackendOverloaded(_)) => (
+                                        http::StatusCode::SERVICE_UNAVAILABLE,
+                                        b"upstream response body too large\n",
+                                    ),
+                                    _ => (
+                                        http::StatusCode::BAD_GATEWAY,
+                                        b"upstream error\n",
+                                    ),
+                                };
+                                let _ = Self::send_simple_response(h3, quic, stream_id, status, body);
+                            } else {
+                                // Best-effort: close the stream.
+                                let _ = h3.send_body(quic, stream_id, b"", true);
+                            }
                             req.phase = StreamPhase::Failed;
                             // Mirror the health/metrics updates from the old
                             // send_backend_response timeout/error paths.

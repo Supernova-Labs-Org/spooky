@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-02-18
+## [0.1.0] - 2026-04-16
 
 Initial release of Spooky HTTP/3 to HTTP/2 reverse proxy and load balancer.
 
@@ -62,7 +62,8 @@ Initial release of Spooky HTTP/3 to HTTP/2 reverse proxy and load balancer.
 
 **Operational**
 - CLI with configuration file support
-- Request and response body buffering (up to 64KB)
+- Streaming request and response handling with bounded queues and hard body caps
+- Deterministic cap-breach behavior via HTTP errors (`413`/`503`) under pressure
 - Concurrent connection handling (10,000+ connections tested)
 - Per-backend concurrency limiting (64 max in-flight requests)
 - Backend timeout configuration (2s default)
@@ -100,6 +101,7 @@ Initial release of Spooky HTTP/3 to HTTP/2 reverse proxy and load balancer.
 - Detailed component breakdown by crate
 - HTTP/3 and QUIC protocol documentation
 - API documentation for metrics and logging
+- Memory envelope and bounded-overflow behavior documentation
 - Contributing guide for developers
 - References to RFCs and external resources
 
@@ -108,21 +110,14 @@ Initial release of Spooky HTTP/3 to HTTP/2 reverse proxy and load balancer.
 These limitations are being addressed in future releases:
 
 1. **Performance**
-   - Synchronous backend calls block main thread during HTTP/2 requests
-   - Full request/response body buffering (no streaming)
-   - Consistent hash ring rebuilds on every request
    - Single-threaded QUIC packet processing
 
 2. **Operational**
-   - No metrics export endpoint (Prometheus planned)
    - No configuration hot reload
    - No distributed tracing integration
    - TLS peer verification disabled (development mode)
 
 3. **Features**
-   - No circuit breaker or retry logic
-   - No rate limiting
-   - No request size limits
    - No dynamic backend discovery
 
 See [roadmap](docs/roadmap.md) for planned improvements.

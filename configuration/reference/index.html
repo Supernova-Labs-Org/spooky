@@ -1104,6 +1104,11 @@ log:
 <td><code>100</code></td>
 <td>Max concurrent unidirectional streams per connection</td>
 </tr>
+<tr>
+<td><code>performance.max_response_body_bytes</code></td>
+<td><code>104857600</code></td>
+<td>Hard cap on upstream response body bytes per stream (100 MiB); streams exceeding this return 503 (<code>upstream response body too large</code>)</td>
+</tr>
 </tbody>
 </table></div>
 <h2 id="listen-configuration">Listen Configuration</h2>
@@ -1813,6 +1818,13 @@ log:
 <td>No</td>
 <td><code>100</code></td>
 <td>Maximum concurrent unidirectional QUIC streams per connection</td>
+</tr>
+<tr>
+<td><code>max_response_body_bytes</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>104857600</code></td>
+<td>Hard cap on upstream response body bytes per stream; streams exceeding this return 503 (<code>upstream response body too large</code>)</td>
 </tr>
 </tbody>
 </table></div>

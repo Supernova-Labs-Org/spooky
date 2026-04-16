@@ -308,7 +308,7 @@ Spooky may return the following HTTP status codes to clients:
 - `400 Bad Request`: Malformed or invalid request
 - `500 Internal Server Error`: Internal proxy error (e.g., TLS configuration issues)
 - `502 Bad Gateway`: Backend server error
-- `503 Service Unavailable`: Backend timeout or no healthy backends available
+- `503 Service Unavailable`: Backend timeout, no healthy backends available, or upstream response body exceeds `max_response_body_bytes`
 
 ## Logging
 

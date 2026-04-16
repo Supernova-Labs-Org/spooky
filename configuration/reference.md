@@ -121,6 +121,13 @@ The following table lists all default configuration values used when properties 
 | `log.level` | `"info"` | Logging verbosity level |
 | `log.file.enabled` | `false` | Write logs to file instead of stderr |
 | `log.file.path` | `"/var/log/spooky/spooky.log"` | Log file path (used when `log.file.enabled` is true) |
+| `performance.new_connections_per_sec` | `2000` | Token-bucket refill rate for new QUIC connections (conns/sec) |
+| `performance.new_connections_burst` | `500` | Burst capacity for new QUIC connections |
+| `performance.quic_max_idle_timeout_ms` | `5000` | QUIC idle timeout — connection closed after this many ms of inactivity |
+| `performance.quic_initial_max_data` | `10000000` | Connection-level flow control window (bytes) |
+| `performance.quic_initial_max_stream_data` | `1000000` | Per-stream flow control window (bytes) |
+| `performance.quic_initial_max_streams_bidi` | `100` | Max concurrent bidirectional streams per connection |
+| `performance.quic_initial_max_streams_uni` | `100` | Max concurrent unidirectional streams per connection |
 
 ## Listen Configuration
 
@@ -468,6 +475,72 @@ log:
   file:
     enabled: true
     path: /tmp/spooky-trace.log
+```
+
+## Performance Configuration
+
+Controls resource limits, tuning knobs, and connection-flood protection. All fields are optional and fall back to sane defaults.
+
+### Properties
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `worker_threads` | integer | No | `1` | Number of polling worker threads |
+| `control_plane_threads` | integer | No | `2` | Threads for background tasks (health checks, metrics) |
+| `reuseport` | bool | No | `true` | Enable `SO_REUSEPORT`; required when `worker_threads > 1` |
+| `pin_workers` | bool | No | `false` | Pin each worker thread to a dedicated CPU core |
+| `global_inflight_limit` | integer | No | `4096` | Maximum concurrent in-flight requests across all upstreams |
+| `per_upstream_inflight_limit` | integer | No | `1024` | Maximum concurrent in-flight requests per upstream pool |
+| `per_backend_inflight_limit` | integer | No | `64` | Maximum concurrent in-flight requests per backend |
+| `backend_timeout_ms` | integer | No | `2000` | Initial backend response timeout (ms) |
+| `backend_connect_timeout_ms` | integer | No | `500` | Backend TCP/TLS handshake timeout (ms); must be ≤ `backend_timeout_ms` |
+| `backend_body_idle_timeout_ms` | integer | No | `2000` | Idle timeout while streaming response body (ms); must be ≥ `backend_timeout_ms` |
+| `backend_body_total_timeout_ms` | integer | No | `30000` | Maximum total time to receive the full response body (ms) |
+| `backend_total_request_timeout_ms` | integer | No | `35000` | Hard deadline for an entire request round-trip (ms); must be ≥ `backend_body_total_timeout_ms` |
+| `udp_recv_buffer_bytes` | integer | No | `8388608` | UDP socket receive buffer size (bytes) |
+| `udp_send_buffer_bytes` | integer | No | `8388608` | UDP socket send buffer size (bytes) |
+| `h2_pool_max_idle_per_backend` | integer | No | `256` | Maximum idle HTTP/2 connections kept open per backend |
+| `h2_pool_idle_timeout_ms` | integer | No | `90000` | How long an idle H2 connection is kept before being closed (ms) |
+| `new_connections_per_sec` | integer | No | `2000` | Steady-state rate at which new QUIC connections are accepted (token-bucket refill, connections/sec) |
+| `new_connections_burst` | integer | No | `500` | Burst capacity above the steady-state rate; the bucket starts full so the first burst of legitimate connections always succeeds |
+| `quic_max_idle_timeout_ms` | integer | No | `5000` | QUIC idle timeout in ms; connection is closed after this period of inactivity |
+| `quic_initial_max_data` | integer | No | `10000000` | Connection-level QUIC flow control window in bytes |
+| `quic_initial_max_stream_data` | integer | No | `1000000` | Per-stream QUIC flow control window in bytes; must be ≤ `quic_initial_max_data` |
+| `quic_initial_max_streams_bidi` | integer | No | `100` | Maximum concurrent bidirectional QUIC streams per connection |
+| `quic_initial_max_streams_uni` | integer | No | `100` | Maximum concurrent unidirectional QUIC streams per connection |
+
+### Connection flood protection
+
+`new_connections_per_sec` and `new_connections_burst` implement a token-bucket rate limiter on new QUIC connection accepts. The bucket starts full so legitimate burst traffic at startup is never penalised. Packets for **existing** connections are never affected by this limit — only unknown `Initial` packets that would create a new connection state entry are gated.
+
+```yaml
+performance:
+  new_connections_per_sec: 2000   # refill rate: 2 k new conns/sec
+  new_connections_burst: 500      # allow a burst of up to 500 above the rate
+```
+
+Set `new_connections_burst` to `1` and `new_connections_per_sec` to a low value to aggressively throttle connection floods at the cost of rejecting legitimate concurrent handshakes.
+
+### Examples
+
+```yaml
+# Single-worker, conservative limits
+performance:
+  worker_threads: 1
+  global_inflight_limit: 1024
+  new_connections_per_sec: 500
+  new_connections_burst: 100
+
+# High-throughput multi-worker setup
+performance:
+  worker_threads: 8
+  reuseport: true
+  pin_workers: true
+  global_inflight_limit: 16384
+  per_upstream_inflight_limit: 4096
+  per_backend_inflight_limit: 256
+  new_connections_per_sec: 10000
+  new_connections_burst: 2000
 ```
 
 ## Configuration Validation

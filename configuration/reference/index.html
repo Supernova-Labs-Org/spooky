@@ -1069,6 +1069,41 @@ log:
 <td><code>"/var/log/spooky/spooky.log"</code></td>
 <td>Log file path (used when <code>log.file.enabled</code> is true)</td>
 </tr>
+<tr>
+<td><code>performance.new_connections_per_sec</code></td>
+<td><code>2000</code></td>
+<td>Token-bucket refill rate for new QUIC connections (conns/sec)</td>
+</tr>
+<tr>
+<td><code>performance.new_connections_burst</code></td>
+<td><code>500</code></td>
+<td>Burst capacity for new QUIC connections</td>
+</tr>
+<tr>
+<td><code>performance.quic_max_idle_timeout_ms</code></td>
+<td><code>5000</code></td>
+<td>QUIC idle timeout — connection closed after this many ms of inactivity</td>
+</tr>
+<tr>
+<td><code>performance.quic_initial_max_data</code></td>
+<td><code>10000000</code></td>
+<td>Connection-level flow control window (bytes)</td>
+</tr>
+<tr>
+<td><code>performance.quic_initial_max_stream_data</code></td>
+<td><code>1000000</code></td>
+<td>Per-stream flow control window (bytes)</td>
+</tr>
+<tr>
+<td><code>performance.quic_initial_max_streams_bidi</code></td>
+<td><code>100</code></td>
+<td>Max concurrent bidirectional streams per connection</td>
+</tr>
+<tr>
+<td><code>performance.quic_initial_max_streams_uni</code></td>
+<td><code>100</code></td>
+<td>Max concurrent unidirectional streams per connection</td>
+</tr>
 </tbody>
 </table></div>
 <h2 id="listen-configuration">Listen Configuration</h2>
@@ -1603,6 +1638,209 @@ log:
   file:
     enabled: true
     path: /tmp/spooky-trace.log
+</code></pre>
+<h2 id="performance-configuration">Performance Configuration</h2>
+<p>Controls resource limits, tuning knobs, and connection-flood protection. All fields are optional and fall back to sane defaults.</p>
+<h3 id="properties_4">Properties</h3>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>worker_threads</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>1</code></td>
+<td>Number of polling worker threads</td>
+</tr>
+<tr>
+<td><code>control_plane_threads</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>2</code></td>
+<td>Threads for background tasks (health checks, metrics)</td>
+</tr>
+<tr>
+<td><code>reuseport</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Enable <code>SO_REUSEPORT</code>; required when <code>worker_threads &gt; 1</code></td>
+</tr>
+<tr>
+<td><code>pin_workers</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Pin each worker thread to a dedicated CPU core</td>
+</tr>
+<tr>
+<td><code>global_inflight_limit</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>4096</code></td>
+<td>Maximum concurrent in-flight requests across all upstreams</td>
+</tr>
+<tr>
+<td><code>per_upstream_inflight_limit</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>1024</code></td>
+<td>Maximum concurrent in-flight requests per upstream pool</td>
+</tr>
+<tr>
+<td><code>per_backend_inflight_limit</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>64</code></td>
+<td>Maximum concurrent in-flight requests per backend</td>
+</tr>
+<tr>
+<td><code>backend_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>2000</code></td>
+<td>Initial backend response timeout (ms)</td>
+</tr>
+<tr>
+<td><code>backend_connect_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>500</code></td>
+<td>Backend TCP/TLS handshake timeout (ms); must be ≤ <code>backend_timeout_ms</code></td>
+</tr>
+<tr>
+<td><code>backend_body_idle_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>2000</code></td>
+<td>Idle timeout while streaming response body (ms); must be ≥ <code>backend_timeout_ms</code></td>
+</tr>
+<tr>
+<td><code>backend_body_total_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>30000</code></td>
+<td>Maximum total time to receive the full response body (ms)</td>
+</tr>
+<tr>
+<td><code>backend_total_request_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>35000</code></td>
+<td>Hard deadline for an entire request round-trip (ms); must be ≥ <code>backend_body_total_timeout_ms</code></td>
+</tr>
+<tr>
+<td><code>udp_recv_buffer_bytes</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>8388608</code></td>
+<td>UDP socket receive buffer size (bytes)</td>
+</tr>
+<tr>
+<td><code>udp_send_buffer_bytes</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>8388608</code></td>
+<td>UDP socket send buffer size (bytes)</td>
+</tr>
+<tr>
+<td><code>h2_pool_max_idle_per_backend</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>256</code></td>
+<td>Maximum idle HTTP/2 connections kept open per backend</td>
+</tr>
+<tr>
+<td><code>h2_pool_idle_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>90000</code></td>
+<td>How long an idle H2 connection is kept before being closed (ms)</td>
+</tr>
+<tr>
+<td><code>new_connections_per_sec</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>2000</code></td>
+<td>Steady-state rate at which new QUIC connections are accepted (token-bucket refill, connections/sec)</td>
+</tr>
+<tr>
+<td><code>new_connections_burst</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>500</code></td>
+<td>Burst capacity above the steady-state rate; the bucket starts full so the first burst of legitimate connections always succeeds</td>
+</tr>
+<tr>
+<td><code>quic_max_idle_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>5000</code></td>
+<td>QUIC idle timeout in ms; connection is closed after this period of inactivity</td>
+</tr>
+<tr>
+<td><code>quic_initial_max_data</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>10000000</code></td>
+<td>Connection-level QUIC flow control window in bytes</td>
+</tr>
+<tr>
+<td><code>quic_initial_max_stream_data</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>1000000</code></td>
+<td>Per-stream QUIC flow control window in bytes; must be ≤ <code>quic_initial_max_data</code></td>
+</tr>
+<tr>
+<td><code>quic_initial_max_streams_bidi</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>100</code></td>
+<td>Maximum concurrent bidirectional QUIC streams per connection</td>
+</tr>
+<tr>
+<td><code>quic_initial_max_streams_uni</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>100</code></td>
+<td>Maximum concurrent unidirectional QUIC streams per connection</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="connection-flood-protection">Connection flood protection</h3>
+<p><code>new_connections_per_sec</code> and <code>new_connections_burst</code> implement a token-bucket rate limiter on new QUIC connection accepts. The bucket starts full so legitimate burst traffic at startup is never penalised. Packets for <strong>existing</strong> connections are never affected by this limit — only unknown <code>Initial</code> packets that would create a new connection state entry are gated.</p>
+<pre><code class="language-yaml">performance:
+  new_connections_per_sec: 2000   # refill rate: 2 k new conns/sec
+  new_connections_burst: 500      # allow a burst of up to 500 above the rate
+</code></pre>
+<p>Set <code>new_connections_burst</code> to <code>1</code> and <code>new_connections_per_sec</code> to a low value to aggressively throttle connection floods at the cost of rejecting legitimate concurrent handshakes.</p>
+<h3 id="examples_3">Examples</h3>
+<pre><code class="language-yaml"># Single-worker, conservative limits
+performance:
+  worker_threads: 1
+  global_inflight_limit: 1024
+  new_connections_per_sec: 500
+  new_connections_burst: 100
+
+# High-throughput multi-worker setup
+performance:
+  worker_threads: 8
+  reuseport: true
+  pin_workers: true
+  global_inflight_limit: 16384
+  per_upstream_inflight_limit: 4096
+  per_backend_inflight_limit: 256
+  new_connections_per_sec: 10000
+  new_connections_burst: 2000
 </code></pre>
 <h2 id="configuration-validation">Configuration Validation</h2>
 <p>Spooky validates configuration at startup and reports errors before attempting to start the server.</p>
@@ -2154,6 +2392,34 @@ log:
         <a href="#examples_2"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
             data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#examples_2');">
+            Examples
+        </a>
+        
+        
+
+        
+        <a href="#performance-configuration"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#performance-configuration');">
+            Performance Configuration
+        </a>
+        
+        
+        <a href="#properties_4"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#properties_4');">
+            Properties
+        </a>
+        
+        <a href="#connection-flood-protection"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#connection-flood-protection');">
+            Connection flood protection
+        </a>
+        
+        <a href="#examples_3"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#examples_3');">
             Examples
         </a>
         

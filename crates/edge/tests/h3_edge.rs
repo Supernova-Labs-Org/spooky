@@ -62,7 +62,7 @@ fn make_config(port: u32, cert: String, key: String, backend_address: String) ->
             },
             backends: vec![Backend {
                 id: "backend1".to_string(),
-                address: backend_address,
+                address: normalize_backend_address(backend_address),
                 weight: 1,
                 health_check: HealthCheck {
                     path: "/health".to_string(),
@@ -96,6 +96,14 @@ fn make_config(port: u32, cert: String, key: String, backend_address: String) ->
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
         resilience: spooky_config::config::Resilience::default(),
+    }
+}
+
+fn normalize_backend_address(address: String) -> String {
+    if address.contains("://") {
+        address
+    } else {
+        format!("http://{address}")
     }
 }
 
@@ -497,6 +505,22 @@ fn http3_request_is_accepted_and_parsed() {
 }
 
 #[test]
+fn invalid_backend_scheme_is_rejected_at_startup() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let config = make_config(0, cert, key, "ftp://127.0.0.1:8080".to_string());
+    match QUICListener::new(config) {
+        Ok(_) => panic!("invalid backend scheme should fail startup"),
+        Err(err) => {
+            assert!(
+                err.to_string().contains("invalid backend address"),
+                "unexpected startup error: {err}"
+            );
+        }
+    }
+}
+
+#[test]
 fn server_rotates_scids_for_active_connection() {
     let dir = tempdir().expect("failed to create temp dir");
     let (cert, key) = write_test_certs(&dir);
@@ -769,7 +793,7 @@ fn make_config_with_rate_limit(
             },
             backends: vec![Backend {
                 id: "backend1".to_string(),
-                address: backend_address,
+                address: normalize_backend_address(backend_address),
                 weight: 1,
                 health_check: HealthCheck {
                     path: "/health".to_string(),

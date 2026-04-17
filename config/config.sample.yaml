@@ -18,14 +18,14 @@ upstream:
 
     backends:
       - id: "backend1"
-        address: "127.0.0.1:7001"
+        address: "http://127.0.0.1:7001"   # explicit cleartext for local/dev; omit scheme for verified HTTPS default
         weight: 100  # relative traffic share; must be 1–1000 (higher = more traffic)
         health_check:
           path: "/health"
           interval: 5000
 
       - id: "backend2"
-        address: "127.0.0.1:7002"
+        address: "http://127.0.0.1:7002"   # explicit cleartext for local/dev; omit scheme for verified HTTPS default
         weight: 50   # receives ~33% of traffic vs backend1's ~67%
         health_check:
           path: "/status"
@@ -40,7 +40,7 @@ upstream:
 
     backends:
       - id: "auth1"
-        address: "127.0.0.1:8001"
+        address: "http://127.0.0.1:8001"   # explicit cleartext for local/dev; omit scheme for verified HTTPS default
         weight: 100  # relative traffic share; must be 1–1000
         health_check:
           path: "/health"

@@ -1743,6 +1743,13 @@ log:
 <td>Hard deadline for an entire request round-trip (ms); must be ≥ <code>backend_body_total_timeout_ms</code></td>
 </tr>
 <tr>
+<td><code>shutdown_drain_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>5000</code></td>
+<td>Graceful-shutdown drain timeout in ms; active connections are force-closed once this deadline is reached</td>
+</tr>
+<tr>
 <td><code>udp_recv_buffer_bytes</code></td>
 <td>integer</td>
 <td>No</td>

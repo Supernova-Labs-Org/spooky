@@ -498,6 +498,7 @@ Controls resource limits, tuning knobs, and connection-flood protection. All fie
 | `backend_body_idle_timeout_ms` | integer | No | `2000` | Idle timeout while streaming response body (ms); must be ≥ `backend_timeout_ms` |
 | `backend_body_total_timeout_ms` | integer | No | `30000` | Maximum total time to receive the full response body (ms) |
 | `backend_total_request_timeout_ms` | integer | No | `35000` | Hard deadline for an entire request round-trip (ms); must be ≥ `backend_body_total_timeout_ms` |
+| `shutdown_drain_timeout_ms` | integer | No | `5000` | Graceful-shutdown drain timeout in ms; active connections are force-closed once this deadline is reached |
 | `udp_recv_buffer_bytes` | integer | No | `8388608` | UDP socket receive buffer size (bytes) |
 | `udp_send_buffer_bytes` | integer | No | `8388608` | UDP socket send buffer size (bytes) |
 | `h2_pool_max_idle_per_backend` | integer | No | `256` | Maximum idle HTTP/2 connections kept open per backend |

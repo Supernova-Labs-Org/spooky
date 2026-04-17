@@ -630,9 +630,10 @@ fn malformed_truncated_long_header_is_dropped() {
     // Long-header first byte: version-specific Initial packet marker (0xC0 | 0x00)
     // followed by the QUIC version, then truncated before DCIL/SCIL fields.
     let truncated: &[u8] = &[
-        0xC0,       // long-header flag + Initial type bits
-        0x00, 0x00, 0x00, 0x01, // QUIC v1
-        // deliberately truncated here (no DCIL/SCIL/lengths)
+        0xC0, // long-header flag + Initial type bits
+        0x00, 0x00, 0x00,
+        0x01, // QUIC v1
+              // deliberately truncated here (no DCIL/SCIL/lengths)
     ];
     send_udp(addr, truncated);
     listener.poll();
@@ -647,9 +648,9 @@ fn malformed_dcid_length_overflow_is_dropped() {
     // Craft a packet whose DCID length field claims 255 bytes but the packet
     // ends immediately after.
     let mut pkt = vec![
-        0xC0,                   // long-header Initial
+        0xC0, // long-header Initial
         0x00, 0x00, 0x00, 0x01, // QUIC v1
-        0xFF,                   // DCID length = 255 (but no bytes follow)
+        0xFF, // DCID length = 255 (but no bytes follow)
     ];
     // pad with some bytes but far fewer than 255
     pkt.extend_from_slice(&[0xAB; 8]);
@@ -666,9 +667,10 @@ fn short_header_unknown_connection_is_dropped() {
     // Short header: first bit 0, remaining bits arbitrary. Use a 20-byte DCID
     // that does not correspond to any established connection.
     let mut pkt = vec![0x40u8]; // short-header flag (bit 7 = 0, bit 6 = 1 for fixed bit)
-    pkt.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x00, 0x01,
-                             0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
-                             0x0A, 0x0B, 0x0C, 0x0D]);
+    pkt.extend_from_slice(&[
+        0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D,
+    ]);
     send_udp(addr, &pkt);
     listener.poll();
     assert_maps_empty(&listener);
@@ -681,12 +683,12 @@ fn retry_packet_for_unknown_connection_is_dropped() {
     // Long-header Retry type: bits 0xF0 with version and minimal fields.
     // quiche will parse the header but the listener should not create a conn.
     let mut pkt = vec![
-        0xF0,                   // long-header, Retry type bits
+        0xF0, // long-header, Retry type bits
         0x00, 0x00, 0x00, 0x01, // QUIC v1
-        0x08,                   // DCID len = 8
+        0x08, // DCID len = 8
     ];
     pkt.extend_from_slice(&[0x11; 8]); // DCID
-    pkt.push(0x08);                    // SCID len = 8
+    pkt.push(0x08); // SCID len = 8
     pkt.extend_from_slice(&[0x22; 8]); // SCID
     // Retry token (arbitrary, no integrity tag)
     pkt.extend_from_slice(&[0x99; 16]);
@@ -701,12 +703,12 @@ fn handshake_packet_unknown_connection_is_dropped() {
     let (mut listener, addr) = make_listener();
     // Long-header Handshake type: 0xE0
     let mut pkt = vec![
-        0xE0,                   // long-header, Handshake type bits
+        0xE0, // long-header, Handshake type bits
         0x00, 0x00, 0x00, 0x01, // QUIC v1
-        0x08,                   // DCID len = 8
+        0x08, // DCID len = 8
     ];
     pkt.extend_from_slice(&[0x33; 8]); // DCID
-    pkt.push(0x08);                    // SCID len = 8
+    pkt.push(0x08); // SCID len = 8
     pkt.extend_from_slice(&[0x44; 8]); // SCID
     // Packet number + payload (garbage)
     pkt.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
@@ -722,12 +724,12 @@ fn repeated_malformed_packets_leave_maps_consistent() {
     let (mut listener, addr) = make_listener();
 
     let payloads: &[&[u8]] = &[
-        &[],                                      // zero-length
-        &[0xFF],                                  // single byte
-        &[0x00; 16],                              // all-zero short
-        &[0xFF; 64],                              // all-ones garbage
-        &[0xC0, 0x00, 0x00, 0x00, 0x01, 0xFF],   // truncated long header
-        &[0x40, 0xDE, 0xAD, 0xBE, 0xEF, 0x00],   // short header, unknown DCID
+        &[],                                   // zero-length
+        &[0xFF],                               // single byte
+        &[0x00; 16],                           // all-zero short
+        &[0xFF; 64],                           // all-ones garbage
+        &[0xC0, 0x00, 0x00, 0x00, 0x01, 0xFF], // truncated long header
+        &[0x40, 0xDE, 0xAD, 0xBE, 0xEF, 0x00], // short header, unknown DCID
     ];
 
     for payload in payloads {
@@ -813,8 +815,7 @@ fn make_config_with_rate_limit(
 fn build_initial_packet(dest_addr: std::net::SocketAddr) -> Vec<u8> {
     let local_addr: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
 
-    let mut config =
-        quiche::Config::new(quiche::PROTOCOL_VERSION).expect("quiche config");
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).expect("quiche config");
     config.verify_peer(false);
     config
         .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
@@ -872,6 +873,72 @@ fn connection_flood_is_rate_limited() {
     );
 }
 
+/// Once draining starts, unknown/new Initial packets must not create a
+/// connection, even if admission limits would otherwise allow it.
+#[test]
+fn draining_mode_rejects_initial_when_no_connections_exist() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let config = make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 20);
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    listener.start_draining();
+
+    let pkt = build_initial_packet(addr);
+    send_udp(addr, &pkt);
+    listener.poll();
+
+    assert_eq!(
+        listener.connections.len(),
+        0,
+        "no new connection should be admitted after drain starts"
+    );
+}
+
+/// Draining should preserve existing connection processing but reject any new
+/// connection admission from unknown Initial packets.
+#[test]
+fn draining_mode_rejects_new_initial_after_existing_connection() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let config = make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 20);
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    let first = build_initial_packet(addr);
+    send_udp(addr, &first);
+    listener.poll();
+    assert_eq!(
+        listener.connections.len(),
+        1,
+        "first Initial should create a baseline connection before drain"
+    );
+    let known_connection_ids: std::collections::HashSet<Vec<u8>> = listener
+        .connections
+        .keys()
+        .map(|cid| cid.to_vec())
+        .collect();
+
+    listener.start_draining();
+
+    for _ in 0..5 {
+        let pkt = build_initial_packet(addr);
+        send_udp(addr, &pkt);
+        listener.poll();
+    }
+
+    let post_drain_ids: std::collections::HashSet<Vec<u8>> = listener
+        .connections
+        .keys()
+        .map(|cid| cid.to_vec())
+        .collect();
+    assert!(
+        post_drain_ids.is_subset(&known_connection_ids),
+        "draining mode must reject unknown/new Initial packets (before={known_connection_ids:?}, after={post_drain_ids:?})"
+    );
+}
+
 /// Normal traffic well below the rate limit must not be affected.
 /// With a generous burst and rate, all N connection attempts succeed.
 #[test]
@@ -879,8 +946,7 @@ fn normal_traffic_below_rate_limit_is_unaffected() {
     let dir = tempdir().expect("tempdir");
     let (cert, key) = write_test_certs(&dir);
     // burst=20, rate=10000/s: far above what we'll send.
-    let config =
-        make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 20);
+    let config = make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 20);
     let mut listener = QUICListener::new(config).expect("listener");
     let addr = listener.socket.local_addr().unwrap();
 

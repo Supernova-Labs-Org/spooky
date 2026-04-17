@@ -93,6 +93,7 @@ pub struct QUICListener {
     pub draining: bool,
     pub drain_start: Option<Instant>,
     pub watchdog_worker_drained: bool,
+    pub drain_timeout: Duration,
     pub backend_timeout: Duration,
     pub backend_body_idle_timeout: Duration,
     pub backend_body_total_timeout: Duration,

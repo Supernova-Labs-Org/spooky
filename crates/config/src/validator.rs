@@ -129,6 +129,11 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.shutdown_drain_timeout_ms == 0 {
+        error!("performance.shutdown_drain_timeout_ms must be greater than 0");
+        return false;
+    }
+
     if config.performance.udp_recv_buffer_bytes == 0 {
         error!("performance.udp_recv_buffer_bytes must be greater than 0");
         return false;
@@ -673,6 +678,7 @@ upstream:
         assert_eq!(cfg.performance.backend_body_idle_timeout_ms, 2000);
         assert_eq!(cfg.performance.backend_body_total_timeout_ms, 30000);
         assert_eq!(cfg.performance.backend_total_request_timeout_ms, 35_000);
+        assert_eq!(cfg.performance.shutdown_drain_timeout_ms, 5_000);
         assert_eq!(cfg.performance.udp_recv_buffer_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.performance.udp_send_buffer_bytes, 8 * 1024 * 1024);
         assert_eq!(cfg.performance.h2_pool_max_idle_per_backend, 256);
@@ -716,6 +722,10 @@ upstream:
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.backend_body_total_timeout_ms = 100;
         cfg.performance.backend_body_idle_timeout_ms = 200;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.shutdown_drain_timeout_ms = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -829,6 +839,7 @@ upstream:
         cfg.performance.backend_body_idle_timeout_ms = 2_500;
         cfg.performance.backend_body_total_timeout_ms = 10_000;
         cfg.performance.backend_total_request_timeout_ms = 15_000;
+        cfg.performance.shutdown_drain_timeout_ms = 7_500;
         cfg.performance.udp_recv_buffer_bytes = 4 * 1024 * 1024;
         cfg.performance.udp_send_buffer_bytes = 4 * 1024 * 1024;
         cfg.performance.h2_pool_max_idle_per_backend = 128;

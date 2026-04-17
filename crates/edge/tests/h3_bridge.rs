@@ -4,16 +4,17 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     task::{Context, Poll},
+    thread,
     time::{Duration, Instant},
 };
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use http::header::{CONTENT_LENGTH, HeaderValue};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{
     Request, Response, Uri,
     body::{Body, Frame, Incoming},
@@ -33,10 +34,9 @@ use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing,
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
     BACKEND_TIMEOUT_SECS, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-    MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES,
-    QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA, QUIC_INITIAL_MAX_STREAMS_BIDI,
-    QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA, REQUEST_TIMEOUT_SECS,
-    UDP_READ_TIMEOUT_MS,
+    MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
+    QUIC_INITIAL_MAX_STREAMS_BIDI, QUIC_INITIAL_MAX_STREAMS_UNI, QUIC_INITIAL_STREAM_DATA,
+    REQUEST_TIMEOUT_SECS, UDP_READ_TIMEOUT_MS,
 };
 
 fn write_test_certs(dir: &TempDir) -> (String, String) {
@@ -1009,15 +1009,54 @@ async fn start_h2_backend_with_regression_routes() -> SocketAddr {
                             let _ = tx.send(Bytes::from_static(b"chunk-3")).await;
                         });
                         let mut response = Response::new(body.boxed());
-                        response.headers_mut().insert(
-                            CONTENT_LENGTH,
-                            HeaderValue::from_static("21"),
-                        );
+                        response
+                            .headers_mut()
+                            .insert(CONTENT_LENGTH, HeaderValue::from_static("21"));
                         response
                     }
                     _ => Response::new(Full::new(Bytes::from_static(b"default\n")).boxed()),
                 };
                 Ok::<_, hyper::Error>(response)
+            });
+
+            tokio::spawn(async move {
+                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(io, service)
+                    .await;
+            });
+        }
+    });
+
+    addr
+}
+
+async fn start_h2_backend_with_drain_probe(inflight_seen: Arc<AtomicBool>) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        loop {
+            let (stream, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => break,
+            };
+
+            let io = TokioIo::new(stream);
+            let inflight_seen = Arc::clone(&inflight_seen);
+            let service = service_fn(move |req: Request<Incoming>| {
+                let path = req.uri().path().to_string();
+                let inflight_seen = Arc::clone(&inflight_seen);
+                async move {
+                    let response: Response<TestBody> = match path.as_str() {
+                        "/drain-slow" => {
+                            inflight_seen.store(true, Ordering::Relaxed);
+                            tokio::time::sleep(Duration::from_millis(700)).await;
+                            Response::new(Full::new(Bytes::from_static(b"drain-ok\n")).boxed())
+                        }
+                        _ => Response::new(Full::new(Bytes::from_static(b"default\n")).boxed()),
+                    };
+                    Ok::<_, hyper::Error>(response)
+                }
             });
 
             tokio::spawn(async move {
@@ -1180,6 +1219,270 @@ fn http3_to_http2_roundtrip() {
     let body = run_h3_client(listen_addr).expect("client request failed");
 
     assert!(!body.is_empty(), "expected non-empty response from backend");
+}
+
+#[test]
+fn in_flight_request_completes_during_drain_window() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let inflight_seen = Arc::new(AtomicBool::new(false));
+    let backend_addr = rt.block_on(start_h2_backend_with_drain_probe(Arc::clone(
+        &inflight_seen,
+    )));
+    let config = make_config(0, backend_addr.to_string(), cert, key);
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+
+    let listener = Arc::new(Mutex::new(listener));
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener_thread = {
+        let listener = Arc::clone(&listener);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(mut guard) = listener.lock() {
+                    guard.poll();
+                } else {
+                    break;
+                }
+            }
+        })
+    };
+
+    let client_thread = thread::spawn(move || {
+        run_h3_client_concurrent_get(
+            listen_addr,
+            &["/drain-slow"],
+            Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+        )
+    });
+
+    let wait_start = Instant::now();
+    while !inflight_seen.load(Ordering::Relaxed) {
+        assert!(
+            wait_start.elapsed() < Duration::from_secs(3),
+            "backend never observed the in-flight request before drain"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    if let Ok(mut guard) = listener.lock() {
+        guard.start_draining();
+    }
+
+    let observations = client_thread
+        .join()
+        .expect("client thread join failed")
+        .expect("request should complete while draining");
+    let drained = observation_for(&observations, "/drain-slow");
+    assert_eq!(drained.status.as_deref(), Some("200"));
+    assert_eq!(drained.body, b"drain-ok\n");
+
+    let drain_wait_start = Instant::now();
+    loop {
+        let done = if let Ok(mut guard) = listener.lock() {
+            guard.drain_complete()
+        } else {
+            false
+        };
+        if done {
+            break;
+        }
+        assert!(
+            drain_wait_start.elapsed() < Duration::from_secs(2),
+            "drain should complete promptly once in-flight streams finish"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = listener_thread.join();
+}
+
+/// While draining, new QUIC Initial packets must be silently dropped so no new
+/// connection state is allocated.  The test starts draining before any client
+/// connects, then confirms a fresh QUIC connection attempt never reaches the
+/// Established state within a short window (the handshake packets are dropped).
+#[test]
+fn draining_rejects_new_connections() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend());
+    let config = make_config(0, backend_addr.to_string(), cert, key);
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+
+    let listener = Arc::new(Mutex::new(listener));
+
+    // Start draining immediately — before any client connects.
+    listener.lock().unwrap().start_draining();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let listener_thread = {
+        let listener = Arc::clone(&listener);
+        let stop = Arc::clone(&stop);
+        thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(mut guard) = listener.lock() {
+                    guard.poll();
+                }
+            }
+        })
+    };
+
+    // Attempt a fresh QUIC connection.  Initial packets are silently dropped,
+    // so the handshake never completes; the connection stays in Initial state.
+    let established = {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let local_addr = socket.local_addr().unwrap();
+
+        let mut qconfig = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+        qconfig.verify_peer(false);
+        qconfig
+            .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+            .unwrap();
+        qconfig.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+        qconfig.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+        qconfig.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+        qconfig.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+        qconfig.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+        qconfig.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+        qconfig.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+        qconfig.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+        qconfig.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+        qconfig.set_disable_active_migration(true);
+
+        let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+        rand::thread_rng().fill_bytes(&mut scid_bytes);
+        let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+        let mut conn =
+            quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig)
+                .unwrap();
+
+        let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+        let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+        // Send the Initial packet.
+        let (w, si) = conn.send(&mut out).unwrap();
+        socket.send_to(&out[..w], si.to).unwrap();
+
+        // Poll for up to 500 ms; the handshake should never complete.
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut established = false;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            socket
+                .set_read_timeout(Some(remaining.min(Duration::from_millis(50))))
+                .unwrap();
+            match socket.recv_from(&mut buf) {
+                Ok((len, from)) => {
+                    let _ = conn.recv(
+                        &mut buf[..len],
+                        quiche::RecvInfo {
+                            from,
+                            to: local_addr,
+                        },
+                    );
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    conn.on_timeout();
+                }
+                Err(_) => break,
+            }
+            // Flush any retransmits.
+            loop {
+                match conn.send(&mut out) {
+                    Ok((w, si)) => {
+                        let _ = socket.send_to(&out[..w], si.to);
+                    }
+                    Err(quiche::Error::Done) => break,
+                    Err(_) => break,
+                }
+            }
+            if conn.is_established() {
+                established = true;
+                break;
+            }
+        }
+        established
+    };
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = listener_thread.join();
+
+    assert!(
+        !established,
+        "new QUIC connection must not be established while listener is draining"
+    );
+}
+
+#[test]
+fn draining_forces_close_after_configured_timeout() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let inflight_seen = Arc::new(AtomicBool::new(false));
+    let backend_addr = rt.block_on(start_h2_backend_with_drain_probe(Arc::clone(
+        &inflight_seen,
+    )));
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.shutdown_drain_timeout_ms = 120;
+    let mut listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+
+    let client_thread = thread::spawn(move || {
+        run_h3_client_concurrent_get(
+            listen_addr,
+            &["/drain-slow"],
+            Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+        )
+    });
+
+    let mut drain_started: Option<Instant> = None;
+    let drive_start = Instant::now();
+    loop {
+        listener.poll();
+
+        if drain_started.is_none() && inflight_seen.load(Ordering::Relaxed) {
+            listener.start_draining();
+            drain_started = Some(Instant::now());
+        }
+
+        if drain_started.is_some() && listener.drain_complete() {
+            break;
+        }
+
+        assert!(
+            drive_start.elapsed() < Duration::from_secs(3),
+            "drain test did not converge in expected time"
+        );
+    }
+    let drain_elapsed = drain_started
+        .expect("drain should start once in-flight request is observed")
+        .elapsed();
+    assert!(
+        drain_elapsed < Duration::from_millis(600),
+        "forced close should complete before slow backend success path (elapsed={drain_elapsed:?})"
+    );
+
+    let client_result = client_thread.join().expect("client thread join failed");
+    if let Ok(observations) = client_result {
+        let drained = observation_for(&observations, "/drain-slow");
+        let got_full_success =
+            drained.status.as_deref() == Some("200") && drained.body == b"drain-ok\n";
+        assert!(
+            !got_full_success,
+            "forced close should prevent full slow-backend success before timeout"
+        );
+    }
 }
 
 /// A request body exceeding MAX_REQUEST_BODY_BYTES must be rejected with 413
@@ -1424,7 +1727,10 @@ fn slow_request_producer_over_cap_returns_413() {
     )
     .expect("slow over-cap request producer should complete");
 
-    assert_eq!(status, "413", "slow over-cap producer should get bounded failure");
+    assert_eq!(
+        status, "413",
+        "slow over-cap producer should get bounded failure"
+    );
     assert!(!got_reset, "slow request producer should not reset stream");
 }
 
@@ -2080,8 +2386,7 @@ fn stream_cap_rejects_excess_concurrent_streams() {
     // Raise the QUIC transport stream limit above the app-level cap so the N+1th
     // stream reaches the application guard (rather than being dropped at the
     // QUIC layer with StreamLimit).
-    config.performance.quic_initial_max_streams_bidi =
-        (MAX_STREAMS_PER_CONNECTION as u64) + 10;
+    config.performance.quic_initial_max_streams_bidi = (MAX_STREAMS_PER_CONNECTION as u64) + 10;
     let listener = QUICListener::new(config).expect("failed to create listener");
     let listen_addr = listener.socket.local_addr().unwrap();
     let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
@@ -2196,8 +2501,14 @@ fn response_body_cap_returns_503_on_declared_length_breach() {
     let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
     rand::thread_rng().fill_bytes(&mut scid_bytes);
     let scid = quiche::ConnectionId::from_ref(&scid_bytes);
-    let mut conn =
-        quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig).unwrap();
+    let mut conn = quiche::connect(
+        Some("localhost"),
+        &scid,
+        local_addr,
+        listen_addr,
+        &mut qconfig,
+    )
+    .unwrap();
     let h3_config = quiche::h3::Config::new().unwrap();
 
     let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
@@ -2248,9 +2559,7 @@ fn response_body_cap_returns_503_on_declared_length_breach() {
         }
 
         if conn.is_established() && h3.is_none() {
-            h3 = Some(
-                quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap(),
-            );
+            h3 = Some(quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap());
         }
 
         if let Some(h3c) = h3.as_mut() {
@@ -2376,8 +2685,14 @@ fn response_body_cap_returns_503_on_unknown_length_breach() {
     let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
     rand::thread_rng().fill_bytes(&mut scid_bytes);
     let scid = quiche::ConnectionId::from_ref(&scid_bytes);
-    let mut conn =
-        quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig).unwrap();
+    let mut conn = quiche::connect(
+        Some("localhost"),
+        &scid,
+        local_addr,
+        listen_addr,
+        &mut qconfig,
+    )
+    .unwrap();
     let h3_config = quiche::h3::Config::new().unwrap();
 
     let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
@@ -2428,9 +2743,7 @@ fn response_body_cap_returns_503_on_unknown_length_breach() {
         }
 
         if conn.is_established() && h3.is_none() {
-            h3 = Some(
-                quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap(),
-            );
+            h3 = Some(quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap());
         }
 
         if let Some(h3c) = h3.as_mut() {

@@ -114,6 +114,10 @@ pub fn perf_default_backend_total_request_timeout_ms() -> u64 {
     35_000
 }
 
+pub fn perf_default_shutdown_drain_timeout_ms() -> u64 {
+    5_000
+}
+
 pub fn perf_default_udp_recv_buffer_bytes() -> usize {
     8 * 1024 * 1024
 }

@@ -11,6 +11,6 @@ upstream:
       path_prefix: "/"
     backends:
       - id: "backend1"
-        address: "127.0.0.1:8080"
+        address: "http://127.0.0.1:8080"  # explicit cleartext for local/dev; omit scheme for verified HTTPS default
         health_check:
           path: "/health"

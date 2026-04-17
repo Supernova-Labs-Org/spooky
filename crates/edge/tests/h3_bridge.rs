@@ -76,7 +76,7 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
             },
             backends: vec![Backend {
                 id: "backend1".to_string(),
-                address: backend_addr,
+                address: normalize_backend_address(backend_addr),
                 weight: 1,
                 health_check: HealthCheck {
                     path: "/health".to_string(),
@@ -110,6 +110,14 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
         resilience: spooky_config::config::Resilience::default(),
+    }
+}
+
+fn normalize_backend_address(address: String) -> String {
+    if address.contains("://") {
+        address
+    } else {
+        format!("http://{address}")
     }
 }
 
@@ -1198,7 +1206,13 @@ fn make_config_with_backends(
         key,
     );
     if let Some(upstream) = config.upstream.get_mut("test_pool") {
-        upstream.backends = backends;
+        upstream.backends = backends
+            .into_iter()
+            .map(|mut backend| {
+                backend.address = normalize_backend_address(backend.address);
+                backend
+            })
+            .collect();
         upstream.load_balancing.lb_type = lb_type.to_string();
     }
     config
@@ -1359,9 +1373,14 @@ fn draining_rejects_new_connections() {
         let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
         rand::thread_rng().fill_bytes(&mut scid_bytes);
         let scid = quiche::ConnectionId::from_ref(&scid_bytes);
-        let mut conn =
-            quiche::connect(Some("localhost"), &scid, local_addr, listen_addr, &mut qconfig)
-                .unwrap();
+        let mut conn = quiche::connect(
+            Some("localhost"),
+            &scid,
+            local_addr,
+            listen_addr,
+            &mut qconfig,
+        )
+        .unwrap();
 
         let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
         let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];

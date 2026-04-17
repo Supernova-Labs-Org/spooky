@@ -92,7 +92,13 @@ fn make_config(
                 path_prefix: Some("/".to_string()),
                 ..Default::default()
             },
-            backends,
+            backends: backends
+                .into_iter()
+                .map(|mut backend| {
+                    backend.address = normalize_backend_address(backend.address);
+                    backend
+                })
+                .collect(),
         },
     );
 
@@ -116,6 +122,14 @@ fn make_config(
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
         resilience: spooky_config::config::Resilience::default(),
+    }
+}
+
+fn normalize_backend_address(address: String) -> String {
+    if address.contains("://") {
+        address
+    } else {
+        format!("http://{address}")
     }
 }
 

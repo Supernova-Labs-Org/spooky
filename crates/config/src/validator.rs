@@ -1,5 +1,6 @@
+use crate::backend_endpoint::{BackendEndpoint, BackendScheme};
 use crate::config::Config;
-use log::{error, info};
+use log::{error, info, warn};
 
 pub const VALID_LOG_LEVELS: &[&str] = &[
     "whisper",
@@ -481,31 +482,21 @@ pub fn validate(config: &Config) -> bool {
                 return false;
             }
 
-            // Validate backend address: must be parseable as host:port with a
-            // numeric port in [1, 65535]. Rejects URLs (contain "://"), bare
-            // hostnames, non-numeric ports, and out-of-range port numbers.
-            {
-                let addr = &backend.address;
-                let valid = if addr.contains("://") {
-                    false
-                } else if let Some(colon) = addr.rfind(':') {
-                    let host = &addr[..colon];
-                    let port_str = &addr[colon + 1..];
-                    !host.is_empty()
-                        && !port_str.is_empty()
-                        && port_str.chars().all(|c| c.is_ascii_digit())
-                        && port_str.parse::<u16>().map_or(false, |p| p >= 1)
-                } else {
-                    false
-                };
-                if !valid {
+            let endpoint = match BackendEndpoint::parse(&backend.address) {
+                Ok(endpoint) => endpoint,
+                Err(reason) => {
                     error!(
-                        "Backend address '{}' in upstream '{}' must be host:port \
-                         with a numeric port in 1-65535",
-                        addr, upstream_name
+                        "Backend address '{}' in upstream '{}' is invalid: {}",
+                        backend.address, upstream_name, reason
                     );
                     return false;
                 }
+            };
+            if endpoint.scheme() == BackendScheme::Http {
+                warn!(
+                    "Backend '{}' in upstream '{}' uses explicit insecure cleartext transport ({})",
+                    backend.id, upstream_name, backend.address
+                );
             }
 
             // Validate weight
@@ -857,5 +848,55 @@ upstream:
         };
 
         assert!(validate(&cfg));
+    }
+
+    #[test]
+    fn backend_address_validation_supports_secure_default_and_explicit_http() {
+        let dir = tempdir().expect("tempdir");
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, "cert").expect("write cert");
+        std::fs::write(&key, "key").expect("write key");
+
+        // Bare host:port defaults to HTTPS policy.
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.upstream
+            .get_mut("test_upstream")
+            .expect("upstream")
+            .backends[0]
+            .address = "api.example.internal:443".to_string();
+        assert!(validate(&cfg));
+
+        // Explicit HTTP remains allowed as an opt-out.
+        cfg.upstream
+            .get_mut("test_upstream")
+            .expect("upstream")
+            .backends[0]
+            .address = "http://127.0.0.1:8080".to_string();
+        assert!(validate(&cfg));
+    }
+
+    #[test]
+    fn backend_address_validation_rejects_invalid_urls() {
+        let dir = tempdir().expect("tempdir");
+        let cert = dir.path().join("cert.pem");
+        let key = dir.path().join("key.pem");
+        std::fs::write(&cert, "cert").expect("write cert");
+        std::fs::write(&key, "key").expect("write key");
+
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.upstream
+            .get_mut("test_upstream")
+            .expect("upstream")
+            .backends[0]
+            .address = "https://127.0.0.1:8443/path".to_string();
+        assert!(!validate(&cfg));
+
+        cfg.upstream
+            .get_mut("test_upstream")
+            .expect("upstream")
+            .backends[0]
+            .address = "ftp://127.0.0.1:21".to_string();
+        assert!(!validate(&cfg));
     }
 }

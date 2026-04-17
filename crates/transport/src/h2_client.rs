@@ -5,10 +5,11 @@ use std::time::Duration;
 use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
 use hyper::{Request, rt::Executor};
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 
 pub struct H2Client {
-    client: Client<HttpConnector, BoxBody<Bytes, Infallible>>,
+    client: Client<HttpsConnector<HttpConnector>, BoxBody<Bytes, Infallible>>,
 }
 
 #[derive(Clone, Copy)]
@@ -33,12 +34,17 @@ impl H2Client {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_connect_timeout(Some(connect_timeout));
+        let https = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http2()
+            .wrap_connector(http);
 
         let client = Client::builder(TokioExecutor)
             .http2_only(true)
             .pool_max_idle_per_host(max_idle_per_host)
             .pool_idle_timeout(pool_idle_timeout)
-            .build(http);
+            .build(https);
 
         Self { client }
     }

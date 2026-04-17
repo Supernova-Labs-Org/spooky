@@ -9,5 +9,6 @@ bytes.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+hyper-rustls.workspace = true
 tokio.workspace = true
 spooky-errors = { path = "../errors" }

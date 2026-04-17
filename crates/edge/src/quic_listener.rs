@@ -34,7 +34,7 @@ use tokio::sync::{
     oneshot,
 };
 
-use spooky_config::config::Config as SpookyConfig;
+use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
@@ -181,16 +181,18 @@ impl QUICListener {
             config.performance.h2_pool_idle_timeout_ms
         );
 
-        let backend_addresses = config
-            .upstream
-            .values()
-            .flat_map(|upstream| {
-                upstream
-                    .backends
-                    .iter()
-                    .map(|backend| backend.address.clone())
-            })
-            .collect::<Vec<_>>();
+        let mut backend_addresses = Vec::new();
+        for (upstream_name, upstream) in &config.upstream {
+            for backend in &upstream.backends {
+                if let Err(err) = BackendEndpoint::parse(&backend.address) {
+                    return Err(ProxyError::Transport(format!(
+                        "invalid backend address '{}' in upstream '{}' (backend '{}'): {}",
+                        backend.address, upstream_name, backend.id, err
+                    )));
+                }
+                backend_addresses.push(backend.address.clone());
+            }
+        }
 
         let h2_pool = Arc::new(H2Pool::new(
             backend_addresses,
@@ -3105,13 +3107,24 @@ impl QUICListener {
                 } else {
                     &health.path
                 };
+                let endpoint = match BackendEndpoint::parse(&address) {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        error!(
+                            "disabling health checks for backend '{}' due to invalid endpoint: {}",
+                            address, err
+                        );
+                        return;
+                    }
+                };
+                let health_uri = endpoint.uri_for_path(path);
 
                 loop {
                     tokio::time::sleep(interval).await;
 
                     let request = match http::Request::builder()
                         .method("GET")
-                        .uri(format!("http://{address}{path}"))
+                        .uri(&health_uri)
                         .body(BoxBody::new(Full::new(Bytes::new())))
                     {
                         Ok(req) => req,

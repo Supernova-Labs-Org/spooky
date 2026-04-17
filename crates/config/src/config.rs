@@ -12,13 +12,13 @@ use crate::default::{
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
     perf_default_backend_total_request_timeout_ms, perf_default_control_plane_threads,
     perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
-    perf_default_h2_pool_max_idle_per_backend, perf_default_new_connections_burst,
-    perf_default_new_connections_per_sec, perf_default_per_backend_inflight_limit,
-    perf_default_per_upstream_inflight_limit, perf_default_pin_workers,
-    perf_default_quic_initial_max_data, perf_default_quic_initial_max_stream_data,
-    perf_default_max_response_body_bytes, perf_default_quic_initial_max_streams_bidi,
+    perf_default_h2_pool_max_idle_per_backend, perf_default_max_response_body_bytes,
+    perf_default_new_connections_burst, perf_default_new_connections_per_sec,
+    perf_default_per_backend_inflight_limit, perf_default_per_upstream_inflight_limit,
+    perf_default_pin_workers, perf_default_quic_initial_max_data,
+    perf_default_quic_initial_max_stream_data, perf_default_quic_initial_max_streams_bidi,
     perf_default_quic_initial_max_streams_uni, perf_default_quic_max_idle_timeout_ms,
-    perf_default_reuseport,
+    perf_default_reuseport, perf_default_shutdown_drain_timeout_ms,
     perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
     perf_default_worker_threads, resilience_default_adaptive_decrease_step,
     resilience_default_adaptive_enabled, resilience_default_adaptive_high_latency_ms,
@@ -203,6 +203,9 @@ pub struct Performance {
     #[serde(default = "perf_default_backend_total_request_timeout_ms")]
     pub backend_total_request_timeout_ms: u64,
 
+    #[serde(default = "perf_default_shutdown_drain_timeout_ms")]
+    pub shutdown_drain_timeout_ms: u64,
+
     #[serde(default = "perf_default_udp_recv_buffer_bytes")]
     pub udp_recv_buffer_bytes: usize,
 
@@ -270,6 +273,7 @@ impl Default for Performance {
             backend_body_idle_timeout_ms: perf_default_backend_body_idle_timeout_ms(),
             backend_body_total_timeout_ms: perf_default_backend_body_total_timeout_ms(),
             backend_total_request_timeout_ms: perf_default_backend_total_request_timeout_ms(),
+            shutdown_drain_timeout_ms: perf_default_shutdown_drain_timeout_ms(),
             udp_recv_buffer_bytes: perf_default_udp_recv_buffer_bytes(),
             udp_send_buffer_bytes: perf_default_udp_send_buffer_bytes(),
             h2_pool_max_idle_per_backend: perf_default_h2_pool_max_idle_per_backend(),

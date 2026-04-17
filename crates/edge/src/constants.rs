@@ -30,7 +30,6 @@ pub const MAX_UDP_PAYLOAD_BYTES: usize = 1_350;
 
 pub const UDP_READ_TIMEOUT_MS: u64 = 50;
 pub const BACKEND_TIMEOUT_SECS: u64 = 2;
-pub const DRAIN_TIMEOUT_SECS: u64 = 5;
 pub const REQUEST_TIMEOUT_SECS: u64 = 5;
 
 pub const QUIC_IDLE_TIMEOUT_MS: u64 = 5_000;
@@ -81,10 +80,6 @@ pub const BENCH_CONN_MISS_PORT: u16 = u16::MAX;
 
 pub fn backend_timeout() -> Duration {
     Duration::from_secs(BACKEND_TIMEOUT_SECS)
-}
-
-pub fn drain_timeout() -> Duration {
-    Duration::from_secs(DRAIN_TIMEOUT_SECS)
 }
 
 pub fn request_timeout() -> Duration {

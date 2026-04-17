@@ -42,11 +42,11 @@ use crate::{
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-        MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES,
-        MIN_SCID_LEN_BYTES, REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
+        MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES,
+        REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
-        drain_timeout, scid_rotation_interval,
+        scid_rotation_interval,
     },
     outcome_from_status,
     resilience::RuntimeResilience,
@@ -303,6 +303,7 @@ impl QUICListener {
             Duration::from_millis(config.performance.backend_body_total_timeout_ms);
         let backend_total_request_timeout =
             Duration::from_millis(config.performance.backend_total_request_timeout_ms);
+        let drain_timeout = Duration::from_millis(config.performance.shutdown_drain_timeout_ms);
         let max_response_body_bytes = config.performance.max_response_body_bytes;
         let conn_rate_limiter = TokenBucket::new(
             config.performance.new_connections_per_sec,
@@ -325,6 +326,7 @@ impl QUICListener {
             draining: false,
             drain_start: None,
             watchdog_worker_drained: false,
+            drain_timeout,
             backend_timeout,
             backend_body_idle_timeout,
             backend_body_total_timeout,
@@ -465,9 +467,14 @@ impl QUICListener {
         quic_config.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
         quic_config.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
         quic_config.set_initial_max_data(config.performance.quic_initial_max_data);
-        quic_config.set_initial_max_stream_data_bidi_local(config.performance.quic_initial_max_stream_data);
-        quic_config.set_initial_max_stream_data_bidi_remote(config.performance.quic_initial_max_stream_data);
-        quic_config.set_initial_max_stream_data_uni(config.performance.quic_initial_max_stream_data);
+        quic_config.set_initial_max_stream_data_bidi_local(
+            config.performance.quic_initial_max_stream_data,
+        );
+        quic_config.set_initial_max_stream_data_bidi_remote(
+            config.performance.quic_initial_max_stream_data,
+        );
+        quic_config
+            .set_initial_max_stream_data_uni(config.performance.quic_initial_max_stream_data);
         quic_config.set_initial_max_streams_bidi(config.performance.quic_initial_max_streams_bidi);
         quic_config.set_initial_max_streams_uni(config.performance.quic_initial_max_streams_uni);
         quic_config.set_disable_active_migration(true);
@@ -494,8 +501,19 @@ impl QUICListener {
             return true;
         }
 
+        // Once all in-flight streams are terminal, drain can complete without
+        // waiting for clients to idle-close their QUIC connections.
+        let has_active_streams = self
+            .connections
+            .values()
+            .any(|conn| !conn.streams.is_empty());
+        if !has_active_streams {
+            self.close_all();
+            return true;
+        }
+
         if let Some(start) = self.drain_start
-            && start.elapsed() >= drain_timeout()
+            && start.elapsed() >= self.drain_timeout
         {
             self.close_all();
             return true;
@@ -590,7 +608,10 @@ impl QUICListener {
         // Rate-limit new connection creation to prevent unbounded memory growth
         // under connection floods. Existing connections are never affected.
         if !self.conn_rate_limiter.try_consume() {
-            debug!("New connection rate limit exceeded, dropping Initial packet from {}", peer);
+            debug!(
+                "New connection rate limit exceeded, dropping Initial packet from {}",
+                peer
+            );
             return None;
         }
 
@@ -1948,8 +1969,7 @@ impl QUICListener {
                             .get(http::header::CONTENT_LENGTH)
                             .and_then(|v| v.to_str().ok())
                             .and_then(|v| v.parse::<usize>().ok());
-                        if upstream_content_length
-                            .is_some_and(|len| len > max_response_body_bytes)
+                        if upstream_content_length.is_some_and(|len| len > max_response_body_bytes)
                         {
                             if let Some(req) = streams.get(&stream_id) {
                                 metrics.inc_failure();
@@ -1988,8 +2008,10 @@ impl QUICListener {
                             {
                                 continue;
                             }
-                            owned_h3_headers
-                                .push((name.as_str().as_bytes().to_vec(), value.as_bytes().to_vec()));
+                            owned_h3_headers.push((
+                                name.as_str().as_bytes().to_vec(),
+                                value.as_bytes().to_vec(),
+                            ));
                         }
 
                         let defer_headers_until_body_validated = upstream_content_length.is_none();
@@ -2076,7 +2098,8 @@ impl QUICListener {
                                             if defer_headers_until_body_validated {
                                                 response_bytes_received = response_bytes_received
                                                     .saturating_add(data.len());
-                                                if response_bytes_received > max_response_body_bytes {
+                                                if response_bytes_received > max_response_body_bytes
+                                                {
                                                     let _ = chunk_tx
                                                         .send(ResponseChunk::Error(ProxyError::Pool(
                                                             PoolError::BackendOverloaded(
@@ -2086,16 +2109,16 @@ impl QUICListener {
                                                         .await;
                                                     return;
                                                 }
-                                                for start in
-                                                    (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                                for start in (0..data.len())
+                                                    .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
                                                 {
                                                     let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
                                                         .min(data.len());
                                                     buffered_chunks.push(data.slice(start..end));
                                                 }
                                             } else {
-                                                for start in
-                                                    (0..data.len()).step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                                for start in (0..data.len())
+                                                    .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
                                                 {
                                                     let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
                                                         .min(data.len());
@@ -2134,7 +2157,10 @@ impl QUICListener {
                                                 return;
                                             }
                                             for chunk in buffered_chunks {
-                                                if chunk_tx.send(ResponseChunk::Data(chunk)).await.is_err()
+                                                if chunk_tx
+                                                    .send(ResponseChunk::Data(chunk))
+                                                    .await
+                                                    .is_err()
                                                 {
                                                     return;
                                                 }
@@ -2267,7 +2293,8 @@ impl QUICListener {
                                     req.response_headers_sent = true;
                                 }
                                 Err(quiche::h3::Error::StreamBlocked) => {
-                                    req.pending_chunk = Some(ResponseChunk::Start { status, headers });
+                                    req.pending_chunk =
+                                        Some(ResponseChunk::Start { status, headers });
                                     break;
                                 }
                                 Err(err) => {
@@ -2369,12 +2396,10 @@ impl QUICListener {
                                         http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"upstream response body too large\n",
                                     ),
-                                    _ => (
-                                        http::StatusCode::BAD_GATEWAY,
-                                        b"upstream error\n",
-                                    ),
+                                    _ => (http::StatusCode::BAD_GATEWAY, b"upstream error\n"),
                                 };
-                                let _ = Self::send_simple_response(h3, quic, stream_id, status, body);
+                                let _ =
+                                    Self::send_simple_response(h3, quic, stream_id, status, body);
                             } else {
                                 // Best-effort: close the stream.
                                 let _ = h3.send_body(quic, stream_id, b"", true);
@@ -3251,10 +3276,17 @@ mod tests {
         let mut tb = TokenBucket::new(100, 5);
         // Bucket starts full; first 5 tokens should all succeed.
         for i in 0..5 {
-            assert!(tb.try_consume(), "token {} should be available (burst=5)", i);
+            assert!(
+                tb.try_consume(),
+                "token {} should be available (burst=5)",
+                i
+            );
         }
         // 6th token must fail — bucket is empty.
-        assert!(!tb.try_consume(), "6th token must be denied when burst exhausted");
+        assert!(
+            !tb.try_consume(),
+            "6th token must be denied when burst exhausted"
+        );
     }
 
     #[test]
@@ -3280,7 +3312,10 @@ mod tests {
         // rate=0 is clamped to 1; burst=0 is clamped to 1.
         let mut tb = TokenBucket::new(0, 0);
         // Starts with 1 token (burst=1).
-        assert!(tb.try_consume(), "first token should succeed with clamped burst=1");
+        assert!(
+            tb.try_consume(),
+            "first token should succeed with clamped burst=1"
+        );
         assert!(!tb.try_consume(), "second token must fail when burst=1");
     }
 

@@ -104,3 +104,10 @@ docs/internal/
 site/
 
 .venv/
+
+
+# .graphifyignore
+vendor/
+node_modules/
+dist/
+*.generated.py

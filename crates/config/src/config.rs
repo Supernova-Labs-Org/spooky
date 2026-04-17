@@ -94,8 +94,12 @@ pub struct Upstream {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Backend {
-    pub id: String,      // "backend1"
-    pub address: String, // "10.0.1.100:8080"
+    pub id: String, // "backend1"
+    /// Backend endpoint.
+    /// - `host:port` (defaults to verified HTTPS)
+    /// - `https://host:port` (verified HTTPS)
+    /// - `http://host:port` (explicit insecure opt-out)
+    pub address: String,
 
     #[serde(default = "get_default_weight")]
     pub weight: u32, // 100

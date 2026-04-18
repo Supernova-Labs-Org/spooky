@@ -78,6 +78,14 @@ pub fn perf_default_control_plane_threads() -> usize {
     2
 }
 
+pub fn perf_default_packet_shards_per_worker() -> usize {
+    1
+}
+
+pub fn perf_default_packet_shard_queue_capacity() -> usize {
+    2048
+}
+
 pub fn perf_default_reuseport() -> bool {
     true
 }
@@ -192,6 +200,14 @@ pub fn resilience_default_adaptive_high_latency_ms() -> u64 {
 
 pub fn resilience_default_route_queue_default_cap() -> usize {
     512
+}
+
+pub fn resilience_default_route_queue_global_cap() -> usize {
+    2048
+}
+
+pub fn resilience_default_route_queue_shed_retry_after_seconds() -> u32 {
+    1
 }
 
 pub fn resilience_default_cb_enabled() -> bool {

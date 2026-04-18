@@ -50,7 +50,7 @@ use crate::{
         scid_rotation_interval,
     },
     outcome_from_status,
-    resilience::RuntimeResilience,
+    resilience::{RouteQueueRejection, RuntimeResilience},
     route_index::RouteIndex,
     watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
@@ -248,6 +248,7 @@ impl QUICListener {
                 Duration::from_millis(config.performance.h2_pool_idle_timeout_ms.max(1)),
                 Duration::from_millis(config.performance.backend_connect_timeout_ms.max(1)),
             )),
+            Arc::clone(&shared_state.h2_pool),
             Arc::clone(&shared_state.metrics),
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
@@ -774,7 +775,7 @@ impl QUICListener {
         primary
     }
 
-    pub fn poll(&mut self) {
+    fn poll_preamble(&mut self) -> bool {
         self.watchdog.mark_poll_progress();
         if !self.watchdog.restart_requested() {
             self.watchdog_worker_drained = false;
@@ -788,6 +789,13 @@ impl QUICListener {
                 self.watchdog.mark_worker_drained();
                 self.watchdog_worker_drained = true;
             }
+            return false;
+        }
+        true
+    }
+
+    pub fn poll(&mut self) {
+        if !self.poll_preamble() {
             return;
         }
 
@@ -811,9 +819,28 @@ impl QUICListener {
             Err(_) => return,
         };
 
-        // let mut recv_data = self.recv_buf[..len].to_vec();
-        let mut recv_data = BytesMut::from(&self.recv_buf[..len]);
+        let packet = self.recv_buf[..len].to_vec();
+        self.process_datagram_inner(peer, local_addr, &packet);
+    }
 
+    pub fn poll_idle(&mut self) {
+        if !self.poll_preamble() {
+            return;
+        }
+        self.handle_timeouts();
+    }
+
+    pub fn process_datagram(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+        if !self.poll_preamble() {
+            return;
+        }
+        self.process_datagram_inner(peer, local_addr, packet);
+    }
+
+    fn process_datagram_inner(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+        self.metrics.inc_ingress_packet();
+
+        let mut recv_data = BytesMut::from(packet);
         let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => {
@@ -1221,12 +1248,12 @@ impl QUICListener {
                                     request_start.elapsed(),
                                     RouteOutcome::OverloadShed,
                                 );
-                                Self::send_simple_response(
+                                Self::send_overload_response(
                                     h3,
                                     &mut connection.quic,
                                     stream_id,
-                                    http::StatusCode::SERVICE_UNAVAILABLE,
                                     b"brownout active, non-core route shed\n",
+                                    resilience.shed_retry_after_seconds,
                                 )?;
                                 resilience
                                     .adaptive_admission
@@ -1245,12 +1272,12 @@ impl QUICListener {
                                         request_start.elapsed(),
                                         RouteOutcome::OverloadShed,
                                     );
-                                    Self::send_simple_response(
+                                    Self::send_overload_response(
                                         h3,
                                         &mut connection.quic,
                                         stream_id,
-                                        http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"adaptive admission overload\n",
+                                        resilience.shed_retry_after_seconds,
                                     )?;
                                     resilience
                                         .adaptive_admission
@@ -1261,8 +1288,8 @@ impl QUICListener {
 
                             let route_queue_permit =
                                 match resilience.route_queue.try_acquire(&upstream_name) {
-                                    Some(permit) => permit,
-                                    None => {
+                                    Ok(permit) => permit,
+                                    Err(RouteQueueRejection::RouteCap) => {
                                         metrics.inc_failure();
                                         metrics.inc_overload_shed();
                                         metrics.record_route(
@@ -1270,12 +1297,32 @@ impl QUICListener {
                                             request_start.elapsed(),
                                             RouteOutcome::OverloadShed,
                                         );
-                                        Self::send_simple_response(
+                                        Self::send_overload_response(
                                             h3,
                                             &mut connection.quic,
                                             stream_id,
-                                            http::StatusCode::SERVICE_UNAVAILABLE,
                                             b"route queue cap exceeded\n",
+                                            resilience.shed_retry_after_seconds,
+                                        )?;
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(request_start.elapsed(), true);
+                                        continue;
+                                    }
+                                    Err(RouteQueueRejection::GlobalCap) => {
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_overload_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            b"global queue cap exceeded\n",
+                                            resilience.shed_retry_after_seconds,
                                         )?;
                                         resilience
                                             .adaptive_admission
@@ -1295,12 +1342,12 @@ impl QUICListener {
                                             request_start.elapsed(),
                                             RouteOutcome::OverloadShed,
                                         );
-                                        Self::send_simple_response(
+                                        Self::send_overload_response(
                                             h3,
                                             &mut connection.quic,
                                             stream_id,
-                                            http::StatusCode::SERVICE_UNAVAILABLE,
                                             b"overloaded, retry later\n",
+                                            resilience.shed_retry_after_seconds,
                                         )?;
                                         resilience
                                             .adaptive_admission
@@ -1322,12 +1369,12 @@ impl QUICListener {
                                                 request_start.elapsed(),
                                                 RouteOutcome::OverloadShed,
                                             );
-                                            Self::send_simple_response(
+                                            Self::send_overload_response(
                                                 h3,
                                                 &mut connection.quic,
                                                 stream_id,
-                                                http::StatusCode::SERVICE_UNAVAILABLE,
                                                 b"upstream overloaded, retry later\n",
+                                                resilience.shed_retry_after_seconds,
                                             )?;
                                             resilience
                                                 .adaptive_admission
@@ -1370,12 +1417,12 @@ impl QUICListener {
                                         request_start.elapsed(),
                                         RouteOutcome::OverloadShed,
                                     );
-                                    Self::send_simple_response(
+                                    Self::send_overload_response(
                                         h3,
                                         &mut connection.quic,
                                         stream_id,
-                                        http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"backend overloaded, retry later\n",
+                                        resilience.shed_retry_after_seconds,
                                     )?;
                                     resilience
                                         .adaptive_admission
@@ -1781,12 +1828,12 @@ impl QUICListener {
                                     req.start.elapsed(),
                                     RouteOutcome::OverloadShed,
                                 );
-                                Self::send_simple_response(
+                                Self::send_overload_response(
                                     h3,
                                     &mut connection.quic,
                                     stream_id,
-                                    http::StatusCode::SERVICE_UNAVAILABLE,
                                     b"request body backpressure overload\n",
+                                    resilience.shed_retry_after_seconds,
                                 )?;
                                 resilience
                                     .adaptive_admission
@@ -1913,6 +1960,7 @@ impl QUICListener {
                     upstream_pools,
                     routing_index,
                     metrics,
+                    resilience.shed_retry_after_seconds,
                 ) {
                     error!(
                         "failed to emit timeout response for stream {}: {:?}",
@@ -2051,6 +2099,7 @@ impl QUICListener {
                                         upstream_pools,
                                         routing_index,
                                         metrics,
+                                        resilience.shed_retry_after_seconds,
                                     ) {
                                         error!(
                                             "failed to emit protocol recovery response on stream {}: {:?}",
@@ -2262,6 +2311,7 @@ impl QUICListener {
                                 upstream_pools,
                                 routing_index,
                                 metrics,
+                                resilience.shed_retry_after_seconds,
                             ) {
                                 error!(
                                     "failed to emit recoverable forward error response on stream {}: {:?}",
@@ -2573,6 +2623,7 @@ impl QUICListener {
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
         metrics: &Metrics,
+        overload_retry_after_seconds: u32,
     ) -> Result<(), quiche::h3::Error> {
         let start = req.start;
         let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
@@ -2642,12 +2693,12 @@ impl QUICListener {
                     backend_addr,
                     start.elapsed().as_millis()
                 );
-                Self::send_simple_response(
+                Self::send_overload_response(
                     h3,
                     quic,
                     stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
                     b"backend overloaded, retry later\n",
+                    overload_retry_after_seconds,
                 )
             }
             Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
@@ -2660,12 +2711,12 @@ impl QUICListener {
                     backend_addr,
                     start.elapsed().as_millis()
                 );
-                Self::send_simple_response(
+                Self::send_overload_response(
                     h3,
                     quic,
                     stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
                     b"backend circuit open, retry later\n",
+                    overload_retry_after_seconds,
                 )
             }
             Err(ProxyError::Transport(_))
@@ -2774,6 +2825,29 @@ impl QUICListener {
         Ok(())
     }
 
+    fn send_overload_response(
+        h3: &mut quiche::h3::Connection,
+        quic: &mut quiche::Connection,
+        stream_id: u64,
+        body: &[u8],
+        retry_after_seconds: u32,
+    ) -> Result<(), quiche::h3::Error> {
+        let retry_after = retry_after_seconds.max(1).to_string();
+        let resp_headers = vec![
+            quiche::h3::Header::new(
+                b":status",
+                http::StatusCode::SERVICE_UNAVAILABLE.as_str().as_bytes(),
+            ),
+            quiche::h3::Header::new(b"content-type", b"text/plain"),
+            quiche::h3::Header::new(b"retry-after", retry_after.as_bytes()),
+            quiche::h3::Header::new(b"content-length", body.len().to_string().as_bytes()),
+        ];
+
+        h3.send_response(quic, stream_id, &resp_headers, false)?;
+        h3.send_body(quic, stream_id, body, true)?;
+        Ok(())
+    }
+
     fn flush_send(socket: &UdpSocket, send_buf: &mut [u8], connection: &mut QuicConnection) {
         let mut packet_count = 0;
 
@@ -2854,44 +2928,50 @@ impl QUICListener {
             }
         };
 
-        handle.spawn(async move {
-            info!(
-                "Metrics endpoint listening on http://{}{}",
-                bind, metrics_path
-            );
+        spawn_supervised_async_task(
+            &handle,
+            "metrics-endpoint",
+            Some(Arc::clone(&metrics)),
+            async move {
+                info!(
+                    "Metrics endpoint listening on http://{}{}",
+                    bind, metrics_path
+                );
 
-            loop {
-                let (stream, _peer) = match listener.accept().await {
-                    Ok(v) => v,
-                    Err(err) => {
-                        error!("Metrics endpoint accept failed: {}", err);
-                        continue;
-                    }
-                };
+                loop {
+                    let (stream, _peer) = match listener.accept().await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            error!("Metrics endpoint accept failed: {}", err);
+                            continue;
+                        }
+                    };
 
-                let io = TokioIo::new(stream);
-                let metrics = Arc::clone(&metrics);
-                let metrics_path = metrics_path.clone();
+                    let io = TokioIo::new(stream);
+                    let metrics = Arc::clone(&metrics);
+                    let metrics_path = metrics_path.clone();
 
-                tokio::spawn(async move {
-                    let service = service_fn(move |req: Request<Incoming>| {
-                        let metrics = Arc::clone(&metrics);
-                        let metrics_path = metrics_path.clone();
-                        async move {
-                            Ok::<_, hyper::Error>(Self::handle_metrics_request(
-                                req,
-                                &metrics_path,
-                                metrics,
-                            ))
+                    tokio::spawn(async move {
+                        let service = service_fn(move |req: Request<Incoming>| {
+                            let metrics = Arc::clone(&metrics);
+                            let metrics_path = metrics_path.clone();
+                            async move {
+                                Ok::<_, hyper::Error>(Self::handle_metrics_request(
+                                    req,
+                                    &metrics_path,
+                                    metrics,
+                                ))
+                            }
+                        });
+
+                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
+                        {
+                            error!("Metrics endpoint connection failed: {}", err);
                         }
                     });
-
-                    if let Err(err) = http1::Builder::new().serve_connection(io, service).await {
-                        error!("Metrics endpoint connection failed: {}", err);
-                    }
-                });
-            }
-        });
+                }
+            },
+        );
     }
 
     fn handle_metrics_request(
@@ -2939,149 +3019,156 @@ impl QUICListener {
             }
         };
 
-        handle.spawn(async move {
-            info!(
-                "Watchdog enabled: check_interval_ms={} poll_stall_timeout_ms={} timeout_error_rate_percent={} overload_inflight_percent={} unhealthy_windows={} drain_grace_ms={} restart_cooldown_ms={}",
-                watchdog_config.check_interval_ms,
-                watchdog_config.poll_stall_timeout_ms,
-                watchdog_config.timeout_error_rate_percent,
-                watchdog_config.overload_inflight_percent,
-                watchdog_config.unhealthy_consecutive_windows,
-                watchdog_config.drain_grace_ms,
-                watchdog_config.restart_cooldown_ms,
-            );
+        spawn_supervised_async_task(
+            &handle,
+            "watchdog",
+            Some(Arc::clone(&metrics)),
+            async move {
+                info!(
+                    "Watchdog enabled: check_interval_ms={} poll_stall_timeout_ms={} timeout_error_rate_percent={} overload_inflight_percent={} unhealthy_windows={} drain_grace_ms={} restart_cooldown_ms={}",
+                    watchdog_config.check_interval_ms,
+                    watchdog_config.poll_stall_timeout_ms,
+                    watchdog_config.timeout_error_rate_percent,
+                    watchdog_config.overload_inflight_percent,
+                    watchdog_config.unhealthy_consecutive_windows,
+                    watchdog_config.drain_grace_ms,
+                    watchdog_config.restart_cooldown_ms,
+                );
 
-            let mut interval =
-                tokio::time::interval(Duration::from_millis(watchdog_config.check_interval_ms));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let has_restart_hook = watchdog_config
-                .restart_hook
-                .as_deref()
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty());
-
-            let mut previous_requests = metrics.requests_total.load(Ordering::Relaxed);
-            let mut previous_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
-            let mut degraded_windows = 0u32;
-
-            loop {
-                interval.tick().await;
-                let now = now_millis();
-                let stalled = now.saturating_sub(watchdog.last_poll_progress_ms())
-                    > watchdog_config.poll_stall_timeout_ms;
-
-                let current_requests = metrics.requests_total.load(Ordering::Relaxed);
-                let current_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
-                let request_delta = current_requests.saturating_sub(previous_requests);
-                let timeout_delta = current_timeouts.saturating_sub(previous_timeouts);
-                previous_requests = current_requests;
-                previous_timeouts = current_timeouts;
-
-                let timeout_rate_percent = if request_delta == 0 {
-                    0
-                } else {
-                    timeout_delta.saturating_mul(100) / request_delta
-                };
-
-                let timeout_pressure = request_delta >= watchdog_config.min_requests_per_window
-                    && timeout_rate_percent >= watchdog_config.timeout_error_rate_percent as u64;
-                let overload_pressure = resilience.adaptive_admission.inflight_percent()
-                    >= watchdog_config.overload_inflight_percent;
-
-                if stalled || timeout_pressure || overload_pressure {
-                    degraded_windows = degraded_windows.saturating_add(1);
-                    watchdog.set_degraded(true);
-                    metrics.inc_watchdog_degraded_window();
-                } else {
-                    degraded_windows = 0;
-                    watchdog.set_degraded(false);
-                }
-
-                if degraded_windows >= watchdog_config.unhealthy_consecutive_windows {
-                    if !has_restart_hook {
-                        warn!(
-                            "Watchdog detected unhealthy runtime state, but restart_hook is not configured"
-                        );
-                        degraded_windows = 0;
-                        continue;
-                    }
-                    let mut reasons = Vec::new();
-                    if stalled {
-                        reasons.push("poll_stall");
-                    }
-                    if timeout_pressure {
-                        reasons.push("timeout_spike");
-                    }
-                    if overload_pressure {
-                        reasons.push("inflight_overload");
-                    }
-                    let reason = reasons.join("+");
-                    if watchdog.request_restart(&reason) {
-                        metrics.inc_watchdog_restart_request();
-                        warn!("Watchdog requested safe restart: {}", reason);
-                    }
-                    degraded_windows = 0;
-                }
-
-                if !watchdog.restart_requested() {
-                    continue;
-                }
-
-                let requested_at = watchdog.restart_requested_at_ms();
-                let grace_elapsed = requested_at != 0
-                    && now.saturating_sub(requested_at) >= watchdog_config.drain_grace_ms;
-                if !watchdog.workers_drained() && !grace_elapsed {
-                    continue;
-                }
-
-                let restart_reason = watchdog.restart_reason();
-                if watchdog.workers_drained() {
-                    info!(
-                        "Watchdog safe restart condition reached (all workers drained): {}",
-                        restart_reason
-                    );
-                } else {
-                    warn!(
-                        "Watchdog restart drain grace elapsed; executing hook without full drain: {}",
-                        restart_reason
-                    );
-                }
-
-                let cmd = watchdog_config
+                let mut interval =
+                    tokio::time::interval(Duration::from_millis(watchdog_config.check_interval_ms));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let has_restart_hook = watchdog_config
                     .restart_hook
                     .as_deref()
                     .map(str::trim)
-                    .unwrap_or_default();
-                let status = tokio::process::Command::new("/bin/sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .env("SPOOKY_WATCHDOG_REASON", &restart_reason)
-                    .status()
-                    .await;
-                match status {
-                    Ok(status) => {
+                    .is_some_and(|value| !value.is_empty());
+
+                let mut previous_requests = metrics.requests_total.load(Ordering::Relaxed);
+                let mut previous_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
+                let mut degraded_windows = 0u32;
+
+                loop {
+                    interval.tick().await;
+                    let now = now_millis();
+                    let stalled = now.saturating_sub(watchdog.last_poll_progress_ms())
+                        > watchdog_config.poll_stall_timeout_ms;
+
+                    let current_requests = metrics.requests_total.load(Ordering::Relaxed);
+                    let current_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
+                    let request_delta = current_requests.saturating_sub(previous_requests);
+                    let timeout_delta = current_timeouts.saturating_sub(previous_timeouts);
+                    previous_requests = current_requests;
+                    previous_timeouts = current_timeouts;
+
+                    let timeout_rate_percent = if request_delta == 0 {
+                        0
+                    } else {
+                        timeout_delta.saturating_mul(100) / request_delta
+                    };
+
+                    let timeout_pressure = request_delta >= watchdog_config.min_requests_per_window
+                        && timeout_rate_percent
+                            >= watchdog_config.timeout_error_rate_percent as u64;
+                    let overload_pressure = resilience.adaptive_admission.inflight_percent()
+                        >= watchdog_config.overload_inflight_percent;
+
+                    if stalled || timeout_pressure || overload_pressure {
+                        degraded_windows = degraded_windows.saturating_add(1);
+                        watchdog.set_degraded(true);
+                        metrics.inc_watchdog_degraded_window();
+                    } else {
+                        degraded_windows = 0;
+                        watchdog.set_degraded(false);
+                    }
+
+                    if degraded_windows >= watchdog_config.unhealthy_consecutive_windows {
+                        if !has_restart_hook {
+                            warn!(
+                                "Watchdog detected unhealthy runtime state, but restart_hook is not configured"
+                            );
+                            degraded_windows = 0;
+                            continue;
+                        }
+                        let mut reasons = Vec::new();
+                        if stalled {
+                            reasons.push("poll_stall");
+                        }
+                        if timeout_pressure {
+                            reasons.push("timeout_spike");
+                        }
+                        if overload_pressure {
+                            reasons.push("inflight_overload");
+                        }
+                        let reason = reasons.join("+");
+                        if watchdog.request_restart(&reason) {
+                            metrics.inc_watchdog_restart_request();
+                            warn!("Watchdog requested safe restart: {}", reason);
+                        }
+                        degraded_windows = 0;
+                    }
+
+                    if !watchdog.restart_requested() {
+                        continue;
+                    }
+
+                    let requested_at = watchdog.restart_requested_at_ms();
+                    let grace_elapsed = requested_at != 0
+                        && now.saturating_sub(requested_at) >= watchdog_config.drain_grace_ms;
+                    if !watchdog.workers_drained() && !grace_elapsed {
+                        continue;
+                    }
+
+                    let restart_reason = watchdog.restart_reason();
+                    if watchdog.workers_drained() {
                         info!(
-                            "Watchdog restart hook exited with status {}",
-                            status
-                                .code()
-                                .map(|code| code.to_string())
-                                .unwrap_or_else(|| "signal".to_string())
+                            "Watchdog safe restart condition reached (all workers drained): {}",
+                            restart_reason
+                        );
+                    } else {
+                        warn!(
+                            "Watchdog restart drain grace elapsed; executing hook without full drain: {}",
+                            restart_reason
                         );
                     }
-                    Err(err) => {
-                        error!("Watchdog restart hook execution failed: {}", err);
-                    }
-                }
-                metrics.inc_watchdog_restart_hook();
 
-                watchdog.complete_restart_cycle();
-            }
-        });
+                    let cmd = watchdog_config
+                        .restart_hook
+                        .as_deref()
+                        .map(str::trim)
+                        .unwrap_or_default();
+                    let status = tokio::process::Command::new("/bin/sh")
+                        .arg("-c")
+                        .arg(cmd)
+                        .env("SPOOKY_WATCHDOG_REASON", &restart_reason)
+                        .status()
+                        .await;
+                    match status {
+                        Ok(status) => {
+                            info!(
+                                "Watchdog restart hook exited with status {}",
+                                status
+                                    .code()
+                                    .map(|code| code.to_string())
+                                    .unwrap_or_else(|| "signal".to_string())
+                            );
+                        }
+                        Err(err) => {
+                            error!("Watchdog restart hook execution failed: {}", err);
+                        }
+                    }
+                    metrics.inc_watchdog_restart_hook();
+
+                    watchdog.complete_restart_cycle();
+                }
+            },
+        );
     }
 
     fn spawn_health_checks(
         upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
         health_client: Arc<H2Client>,
+        h2_pool: Arc<H2Pool>,
         metrics: Arc<Metrics>,
     ) {
         let entries = {
@@ -3119,7 +3206,8 @@ impl QUICListener {
             let health_client = Arc::clone(&health_client);
             let metrics = Arc::clone(&metrics);
             let handle = handle.clone();
-            handle.spawn(async move {
+            let metrics = Arc::clone(&metrics);
+            spawn_supervised_async_task(&handle, "health-check", Some(metrics), async move {
                 let interval = Duration::from_millis(health.interval.max(1));
                 let timeout = Duration::from_millis(health.timeout_ms.max(1));
                 let path: &str = if health.path.is_empty() {
@@ -3213,6 +3301,34 @@ where
     } else {
         false
     }
+}
+
+fn spawn_supervised_async_task<F>(
+    handle: &Handle,
+    task_name: &'static str,
+    metrics: Option<Arc<Metrics>>,
+    fut: F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let task_name = task_name.to_string();
+    let join = handle.spawn(fut);
+    let monitor_handle = handle.clone();
+    monitor_handle.spawn(async move {
+        match join.await {
+            Ok(()) => {}
+            Err(err) => {
+                if let Some(metrics) = metrics {
+                    metrics.inc_runtime_panic();
+                }
+                if err.is_panic() {
+                    error!("Background task '{}' panicked", task_name);
+                } else {
+                    warn!("Background task '{}' cancelled", task_name);
+                }
+            }
+        }
+    });
 }
 
 fn fallback_runtime() -> Option<&'static tokio::runtime::Runtime> {

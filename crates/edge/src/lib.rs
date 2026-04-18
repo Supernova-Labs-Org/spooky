@@ -77,6 +77,12 @@ pub struct SharedRuntimeState {
     pub(crate) watchdog: Arc<WatchdogCoordinator>,
 }
 
+impl SharedRuntimeState {
+    pub fn inc_ingress_queue_drop(&self) {
+        self.metrics.inc_ingress_queue_drop();
+    }
+}
+
 pub struct QUICListener {
     pub socket: UdpSocket,
     pub config: Config,
@@ -225,10 +231,13 @@ pub struct Metrics {
     pub backend_timeouts: AtomicU64,
     pub backend_errors: AtomicU64,
     pub overload_shed: AtomicU64,
+    pub ingress_packets_total: AtomicU64,
+    pub ingress_queue_drops: AtomicU64,
     pub scid_rotations: AtomicU64,
     pub watchdog_restart_requests: AtomicU64,
     pub watchdog_restart_hooks: AtomicU64,
     pub watchdog_degraded_windows: AtomicU64,
+    pub runtime_panics: AtomicU64,
     route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
 }
 
@@ -272,10 +281,13 @@ impl Default for Metrics {
             backend_timeouts: AtomicU64::new(0),
             backend_errors: AtomicU64::new(0),
             overload_shed: AtomicU64::new(0),
+            ingress_packets_total: AtomicU64::new(0),
+            ingress_queue_drops: AtomicU64::new(0),
             scid_rotations: AtomicU64::new(0),
             watchdog_restart_requests: AtomicU64::new(0),
             watchdog_restart_hooks: AtomicU64::new(0),
             watchdog_degraded_windows: AtomicU64::new(0),
+            runtime_panics: AtomicU64::new(0),
             route_stats_shards: shards,
         }
     }
@@ -316,6 +328,14 @@ impl Metrics {
         self.overload_shed.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_ingress_packet(&self) {
+        self.ingress_packets_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_queue_drop(&self) {
+        self.ingress_queue_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn inc_scid_rotation(&self) {
         self.scid_rotations.fetch_add(1, Ordering::Relaxed);
     }
@@ -332,6 +352,10 @@ impl Metrics {
     pub fn inc_watchdog_degraded_window(&self) {
         self.watchdog_degraded_windows
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_runtime_panic(&self) {
+        self.runtime_panics.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
@@ -443,6 +467,24 @@ impl Metrics {
             self.overload_shed.load(Ordering::Relaxed)
         ));
 
+        out.push_str(
+            "# HELP spooky_ingress_packets_total Total UDP packets processed by ingress.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_packets_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_packets_total {}\n",
+            self.ingress_packets_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_queue_drops Total ingress packets dropped due to full shard queues.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_queue_drops counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_queue_drops {}\n",
+            self.ingress_queue_drops.load(Ordering::Relaxed)
+        ));
+
         out.push_str("# HELP spooky_scid_rotations Total SCID rotations.\n");
         out.push_str("# TYPE spooky_scid_rotations counter\n");
         out.push_str(&format!(
@@ -464,6 +506,13 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_watchdog_restart_hooks {}\n",
             self.watchdog_restart_hooks.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_runtime_panics Total runtime task panics observed.\n");
+        out.push_str("# TYPE spooky_runtime_panics counter\n");
+        out.push_str(&format!(
+            "spooky_runtime_panics {}\n",
+            self.runtime_panics.load(Ordering::Relaxed)
         ));
 
         out.push_str(

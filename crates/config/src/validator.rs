@@ -90,6 +90,16 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.packet_shards_per_worker == 0 {
+        error!("performance.packet_shards_per_worker must be greater than 0");
+        return false;
+    }
+
+    if config.performance.packet_shard_queue_capacity == 0 {
+        error!("performance.packet_shard_queue_capacity must be greater than 0");
+        return false;
+    }
+
     if config.performance.worker_threads > 1 && !config.performance.reuseport {
         error!("performance.reuseport must be true when performance.worker_threads > 1");
         return false;
@@ -252,6 +262,16 @@ pub fn validate(config: &Config) -> bool {
 
     if config.resilience.route_queue.default_cap == 0 {
         error!("resilience.route_queue.default_cap must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.route_queue.global_cap == 0 {
+        error!("resilience.route_queue.global_cap must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.route_queue.shed_retry_after_seconds == 0 {
+        error!("resilience.route_queue.shed_retry_after_seconds must be greater than 0");
         return false;
     }
 
@@ -660,6 +680,8 @@ upstream:
         let cfg: Config = serde_yaml::from_str(&yaml).expect("parse");
         assert_eq!(cfg.performance.worker_threads, 1);
         assert_eq!(cfg.performance.control_plane_threads, 2);
+        assert_eq!(cfg.performance.packet_shards_per_worker, 1);
+        assert_eq!(cfg.performance.packet_shard_queue_capacity, 2048);
         assert!(cfg.performance.reuseport);
         assert!(!cfg.performance.pin_workers);
         assert_eq!(cfg.performance.global_inflight_limit, 4096);
@@ -679,6 +701,8 @@ upstream:
         assert_eq!(cfg.observability.metrics.path, "/metrics");
         assert!(cfg.resilience.adaptive_admission.enabled);
         assert_eq!(cfg.resilience.route_queue.default_cap, 512);
+        assert_eq!(cfg.resilience.route_queue.global_cap, 2048);
+        assert_eq!(cfg.resilience.route_queue.shed_retry_after_seconds, 1);
         assert!(!cfg.resilience.watchdog.enabled);
         assert_eq!(cfg.resilience.watchdog.check_interval_ms, 1_000);
     }
@@ -698,6 +722,14 @@ upstream:
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 4;
         cfg.performance.reuseport = false;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.packet_shards_per_worker = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.packet_shard_queue_capacity = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -782,6 +814,14 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.route_queue.global_cap = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.route_queue.shed_retry_after_seconds = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.resilience.retry_budget.ratio_percent = 101;
         assert!(!validate(&cfg));
 
@@ -821,6 +861,8 @@ upstream:
         let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 4;
         cfg.performance.control_plane_threads = 2;
+        cfg.performance.packet_shards_per_worker = 2;
+        cfg.performance.packet_shard_queue_capacity = 1024;
         cfg.performance.reuseport = true;
         cfg.performance.pin_workers = true;
         cfg.performance.global_inflight_limit = 10_000;
@@ -837,6 +879,8 @@ upstream:
         cfg.performance.h2_pool_idle_timeout_ms = 120_000;
         cfg.performance.per_backend_inflight_limit = 32;
         cfg.resilience.route_queue.default_cap = 256;
+        cfg.resilience.route_queue.global_cap = 2048;
+        cfg.resilience.route_queue.shed_retry_after_seconds = 2;
         cfg.resilience.retry_budget.ratio_percent = 30;
         cfg.observability = Observability {
             metrics: MetricsEndpoint {

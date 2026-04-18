@@ -14,6 +14,7 @@ use crate::default::{
     perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
     perf_default_h2_pool_max_idle_per_backend, perf_default_max_response_body_bytes,
     perf_default_new_connections_burst, perf_default_new_connections_per_sec,
+    perf_default_packet_shard_queue_capacity, perf_default_packet_shards_per_worker,
     perf_default_per_backend_inflight_limit, perf_default_per_upstream_inflight_limit,
     perf_default_pin_workers, perf_default_quic_initial_max_data,
     perf_default_quic_initial_max_stream_data, perf_default_quic_initial_max_streams_bidi,
@@ -29,6 +30,8 @@ use crate::default::{
     resilience_default_cb_open_ms, resilience_default_hedging_delay_ms,
     resilience_default_hedging_enabled, resilience_default_retry_budget_enabled,
     resilience_default_retry_budget_ratio_percent, resilience_default_route_queue_default_cap,
+    resilience_default_route_queue_global_cap,
+    resilience_default_route_queue_shed_retry_after_seconds,
     resilience_default_watchdog_check_interval_ms, resilience_default_watchdog_drain_grace_ms,
     resilience_default_watchdog_enabled, resilience_default_watchdog_min_requests_per_window,
     resilience_default_watchdog_overload_inflight_percent,
@@ -180,6 +183,15 @@ pub struct Performance {
     #[serde(default = "perf_default_control_plane_threads")]
     pub control_plane_threads: usize,
 
+    /// Number of packet-processing shards per bound UDP worker socket.
+    /// `1` preserves single-loop behavior; values >1 enable parallel shard workers.
+    #[serde(default = "perf_default_packet_shards_per_worker")]
+    pub packet_shards_per_worker: usize,
+
+    /// Capacity of bounded ingress queue per shard.
+    #[serde(default = "perf_default_packet_shard_queue_capacity")]
+    pub packet_shard_queue_capacity: usize,
+
     #[serde(default = "perf_default_reuseport")]
     pub reuseport: bool,
 
@@ -268,6 +280,8 @@ impl Default for Performance {
         Self {
             worker_threads: perf_default_worker_threads(),
             control_plane_threads: perf_default_control_plane_threads(),
+            packet_shards_per_worker: perf_default_packet_shards_per_worker(),
+            packet_shard_queue_capacity: perf_default_packet_shard_queue_capacity(),
             reuseport: perf_default_reuseport(),
             pin_workers: perf_default_pin_workers(),
             global_inflight_limit: perf_default_global_inflight_limit(),
@@ -357,6 +371,10 @@ impl Default for AdaptiveAdmission {
 pub struct RouteQueue {
     #[serde(default = "resilience_default_route_queue_default_cap")]
     pub default_cap: usize,
+    #[serde(default = "resilience_default_route_queue_global_cap")]
+    pub global_cap: usize,
+    #[serde(default = "resilience_default_route_queue_shed_retry_after_seconds")]
+    pub shed_retry_after_seconds: u32,
     #[serde(default)]
     pub caps: HashMap<String, usize>,
 }
@@ -365,6 +383,8 @@ impl Default for RouteQueue {
     fn default() -> Self {
         Self {
             default_cap: resilience_default_route_queue_default_cap(),
+            global_cap: resilience_default_route_queue_global_cap(),
+            shed_retry_after_seconds: resilience_default_route_queue_shed_retry_after_seconds(),
             caps: HashMap::new(),
         }
     }

@@ -248,7 +248,6 @@ impl QUICListener {
                 Duration::from_millis(config.performance.h2_pool_idle_timeout_ms.max(1)),
                 Duration::from_millis(config.performance.backend_connect_timeout_ms.max(1)),
             )),
-            Arc::clone(&shared_state.h2_pool),
             Arc::clone(&shared_state.metrics),
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
@@ -3168,7 +3167,6 @@ impl QUICListener {
     fn spawn_health_checks(
         upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
         health_client: Arc<H2Client>,
-        h2_pool: Arc<H2Pool>,
         metrics: Arc<Metrics>,
     ) {
         let entries = {
@@ -3204,10 +3202,10 @@ impl QUICListener {
 
         for (upstream_pool, index, address, health) in entries {
             let health_client = Arc::clone(&health_client);
-            let metrics = Arc::clone(&metrics);
+            let task_metrics = Arc::clone(&metrics);
             let handle = handle.clone();
-            let metrics = Arc::clone(&metrics);
-            spawn_supervised_async_task(&handle, "health-check", Some(metrics), async move {
+            let supervise_metrics = Arc::clone(&task_metrics);
+            spawn_supervised_async_task(&handle, "health-check", Some(supervise_metrics), async move {
                 let interval = Duration::from_millis(health.interval.max(1));
                 let timeout = Duration::from_millis(health.timeout_ms.max(1));
                 let path: &str = if health.path.is_empty() {
@@ -3246,9 +3244,9 @@ impl QUICListener {
                         _ => false,
                     };
                     if healthy {
-                        metrics.inc_health_check_success();
+                        task_metrics.inc_health_check_success();
                     } else {
-                        metrics.inc_health_check_failure();
+                        task_metrics.inc_health_check_failure();
                     }
 
                     let transition = match upstream_pool.lock() {

@@ -1142,14 +1142,16 @@ return backends[position]
 <h3 id="health-checking">Health Checking</h3>
 <p>Each backend has an independent health checker that:</p>
 <ol>
-<li>Issues periodic HTTP GET to configured path</li>
-<li>Evaluates response status (2xx = healthy)</li>
-<li>Updates backend state on success/failure</li>
+<li>Issues periodic HTTP/2 GET to configured path over TLS (cert verification skipped; self-signed certs accepted)</li>
+<li>Classifies response status: 2xx/3xx = Success, 4xx = Neutral (no effect), 5xx = Failure</li>
+<li>Transport errors and timeouts also count as Failure</li>
+<li>Updates backend state on Success/Failure; Neutral outcomes are ignored</li>
 <li>Applies threshold-based state transitions</li>
 </ol>
+<p>Real traffic responses update the same health state — a 5xx from a proxied request counts as a failure, a 2xx counts as a success.</p>
 <p><strong>State Transitions</strong>:</p>
-<pre><code>Healthy ─[failure_threshold fails]─&gt; Unhealthy
-Unhealthy ─[cooldown expires + success_threshold succeeds]─&gt; Healthy
+<pre><code>Healthy ─[failure_threshold consecutive Failures]─&gt; Unhealthy
+Unhealthy ─[cooldown_ms elapsed + success_threshold consecutive Successes]─&gt; Healthy
 </code></pre>
 <h2 id="data-structures">Data Structures</h2>
 <h3 id="quiclistener">QUICListener</h3>
@@ -1373,10 +1375,8 @@ connections sharing the thread. Instead:</p>
 <h2 id="security">Security</h2>
 <h3 id="tls-configuration">TLS Configuration</h3>
 <ul>
-<li>TLS 1.3 only (via quiche)</li>
-<li>ALPN: h3 (HTTP/3)</li>
-<li>Peer verification disabled (development mode)</li>
-<li>Certificate chain loaded from PEM files</li>
+<li><strong>Client-facing</strong>: TLS 1.3 only (via quiche), ALPN <code>h3</code>, certificate loaded from PEM files</li>
+<li><strong>Backend-facing</strong>: TLS over HTTP/2 (via hyper + rustls), cert verification disabled — self-signed backend certificates are accepted; <code>ring</code> is the active crypto provider</li>
 </ul>
 <h3 id="attack-mitigation">Attack Mitigation</h3>
 <p>Current protections:</p>

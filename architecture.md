@@ -270,15 +270,18 @@ return backends[position]
 
 Each backend has an independent health checker that:
 
-1. Issues periodic HTTP GET to configured path
-2. Evaluates response status (2xx = healthy)
-3. Updates backend state on success/failure
-4. Applies threshold-based state transitions
+1. Issues periodic HTTP/2 GET to configured path over TLS (cert verification skipped; self-signed certs accepted)
+2. Classifies response status: 2xx/3xx = Success, 4xx = Neutral (no effect), 5xx = Failure
+3. Transport errors and timeouts also count as Failure
+4. Updates backend state on Success/Failure; Neutral outcomes are ignored
+5. Applies threshold-based state transitions
+
+Real traffic responses update the same health state — a 5xx from a proxied request counts as a failure, a 2xx counts as a success.
 
 **State Transitions**:
 ```
-Healthy ─[failure_threshold fails]─> Unhealthy
-Unhealthy ─[cooldown expires + success_threshold succeeds]─> Healthy
+Healthy ─[failure_threshold consecutive Failures]─> Unhealthy
+Unhealthy ─[cooldown_ms elapsed + success_threshold consecutive Successes]─> Healthy
 ```
 
 ## Data Structures
@@ -468,10 +471,8 @@ See [roadmap](roadmap.md) for planned improvements.
 
 ### TLS Configuration
 
-- TLS 1.3 only (via quiche)
-- ALPN: h3 (HTTP/3)
-- Peer verification disabled (development mode)
-- Certificate chain loaded from PEM files
+- **Client-facing**: TLS 1.3 only (via quiche), ALPN `h3`, certificate loaded from PEM files
+- **Backend-facing**: TLS over HTTP/2 (via hyper + rustls), cert verification disabled — self-signed backend certificates are accepted; `ring` is the active crypto provider
 
 ### Attack Mitigation
 

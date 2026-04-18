@@ -77,6 +77,12 @@ pub struct SharedRuntimeState {
     pub(crate) watchdog: Arc<WatchdogCoordinator>,
 }
 
+impl SharedRuntimeState {
+    pub fn inc_ingress_queue_drop(&self) {
+        self.metrics.inc_ingress_queue_drop();
+    }
+}
+
 pub struct QUICListener {
     pub socket: UdpSocket,
     pub config: Config,
@@ -416,7 +422,9 @@ impl Metrics {
             self.overload_shed.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_ingress_packets_total Total UDP packets processed by ingress.\n");
+        out.push_str(
+            "# HELP spooky_ingress_packets_total Total UDP packets processed by ingress.\n",
+        );
         out.push_str("# TYPE spooky_ingress_packets_total counter\n");
         out.push_str(&format!(
             "spooky_ingress_packets_total {}\n",

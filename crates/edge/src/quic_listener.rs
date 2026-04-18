@@ -768,7 +768,7 @@ impl QUICListener {
         primary
     }
 
-    pub fn poll(&mut self) {
+    fn poll_preamble(&mut self) -> bool {
         self.watchdog.mark_poll_progress();
         if !self.watchdog.restart_requested() {
             self.watchdog_worker_drained = false;
@@ -782,6 +782,13 @@ impl QUICListener {
                 self.watchdog.mark_worker_drained();
                 self.watchdog_worker_drained = true;
             }
+            return false;
+        }
+        true
+    }
+
+    pub fn poll(&mut self) {
+        if !self.poll_preamble() {
             return;
         }
 
@@ -805,9 +812,28 @@ impl QUICListener {
             Err(_) => return,
         };
 
-        // let mut recv_data = self.recv_buf[..len].to_vec();
-        let mut recv_data = BytesMut::from(&self.recv_buf[..len]);
+        let packet = self.recv_buf[..len].to_vec();
+        self.process_datagram_inner(peer, local_addr, &packet);
+    }
 
+    pub fn poll_idle(&mut self) {
+        if !self.poll_preamble() {
+            return;
+        }
+        self.handle_timeouts();
+    }
+
+    pub fn process_datagram(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+        if !self.poll_preamble() {
+            return;
+        }
+        self.process_datagram_inner(peer, local_addr, packet);
+    }
+
+    fn process_datagram_inner(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+        self.metrics.inc_ingress_packet();
+
+        let mut recv_data = BytesMut::from(packet);
         let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => {

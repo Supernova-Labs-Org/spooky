@@ -313,6 +313,77 @@ fn resolve_primary_from_radix_prefix<T>(
     None
 }
 
+/// Remove all routing index entries for a connection that is being torn down.
+///
+/// Cleans `cid_routes`, `cid_radix`, and `peer_routes` for both the primary
+/// SCID and every alias SCID in `routing_scids`.  Extracted as a free
+/// function so it can be exercised in unit tests without a full
+/// `QUICListener` instance.
+pub(crate) fn purge_connection_routes(
+    cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+    cid_radix: &mut CidRadix,
+    peer_routes: &mut HashMap<std::net::SocketAddr, Arc<[u8]>>,
+    primary_scid: &Arc<[u8]>,
+    routing_scids: &std::collections::HashSet<Arc<[u8]>>,
+    peer_address: &std::net::SocketAddr,
+) {
+    cid_radix.remove(primary_scid.as_ref());
+    cid_routes.remove(primary_scid.as_ref());
+    for cid in routing_scids {
+        cid_radix.remove(cid.as_ref());
+        cid_routes.remove(cid.as_ref());
+    }
+    peer_routes.remove(peer_address);
+}
+
+/// Routing metadata extracted from a connection for use during cleanup.
+/// Kept as a plain struct so `sweep_closed_connections` is testable without
+/// a real `quiche::Connection`.
+pub(crate) struct ConnectionRoutes {
+    pub primary_scid: Arc<[u8]>,
+    pub routing_scids: std::collections::HashSet<Arc<[u8]>>,
+    pub peer_address: std::net::SocketAddr,
+}
+
+impl From<&crate::QuicConnection> for ConnectionRoutes {
+    fn from(c: &crate::QuicConnection) -> Self {
+        Self {
+            primary_scid: Arc::clone(&c.primary_scid),
+            routing_scids: c.routing_scids.clone(),
+            peer_address: c.peer_address,
+        }
+    }
+}
+
+/// Remove every SCID in `to_remove` from `connections` and all routing
+/// indexes.  Called from `handle_timeouts` after the closed-connection scan
+/// and extracted here so the removal sweep can be tested without a live
+/// `QUICListener`.
+pub(crate) fn sweep_closed_connections<C, F>(
+    connections: &mut HashMap<Arc<[u8]>, C>,
+    cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+    cid_radix: &mut CidRadix,
+    peer_routes: &mut HashMap<std::net::SocketAddr, Arc<[u8]>>,
+    to_remove: Vec<Arc<[u8]>>,
+    routes_of: F,
+) where
+    F: Fn(&C) -> ConnectionRoutes,
+{
+    for scid in to_remove {
+        if let Some(connection) = connections.remove(&scid) {
+            let routes = routes_of(&connection);
+            purge_connection_routes(
+                cid_routes,
+                cid_radix,
+                peer_routes,
+                &routes.primary_scid,
+                &routes.routing_scids,
+                &routes.peer_address,
+            );
+        }
+    }
+}
+
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let shared_state = Arc::new(Self::build_shared_state(&config)?);
@@ -874,13 +945,14 @@ impl QUICListener {
     }
 
     fn remove_connection_routes(&mut self, connection: &QuicConnection) {
-        self.cid_radix.remove(connection.primary_scid.as_ref());
-        self.cid_routes.remove(connection.primary_scid.as_ref());
-        for cid in &connection.routing_scids {
-            self.cid_radix.remove(cid.as_ref());
-            self.cid_routes.remove(cid.as_ref());
-        }
-        self.peer_routes.remove(&connection.peer_address);
+        purge_connection_routes(
+            &mut self.cid_routes,
+            &mut self.cid_radix,
+            &mut self.peer_routes,
+            &connection.primary_scid,
+            &connection.routing_scids,
+            &connection.peer_address,
+        );
     }
 
     fn sync_connection_routes(&mut self, connection: &mut QuicConnection) -> Arc<[u8]> {
@@ -1217,7 +1289,10 @@ impl QUICListener {
 
             if connection.last_activity.elapsed() >= timeout {
                 connection.quic.on_timeout();
-                connection.last_activity = Instant::now();
+                // Do NOT reset last_activity here: only real packet I/O
+                // resets it.  Resetting on timeout would prevent quiche
+                // from receiving on_timeout() again during the drain
+                // period, causing draining connections to linger.
                 Self::flush_send(&self.socket, &mut send_buf, connection);
             }
 
@@ -1248,11 +1323,14 @@ impl QUICListener {
             }
         }
 
-        for scid in to_remove {
-            if let Some(connection) = self.connections.remove(&scid) {
-                self.remove_connection_routes(&connection);
-            }
-        }
+        sweep_closed_connections(
+            &mut self.connections,
+            &mut self.cid_routes,
+            &mut self.cid_radix,
+            &mut self.peer_routes,
+            to_remove,
+            |c| ConnectionRoutes::from(c),
+        );
     }
 
     fn handle_timeout(socket: &UdpSocket, send_buf: &mut [u8], connection: &mut QuicConnection) {
@@ -3555,7 +3633,13 @@ mod tests {
 
     use crate::cid_radix::CidRadix;
 
-    use super::{TokenBucket, resolve_primary_from_radix_prefix};
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+
+    use super::{
+        ConnectionRoutes, TokenBucket, purge_connection_routes,
+        resolve_primary_from_radix_prefix, sweep_closed_connections,
+    };
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
@@ -3691,6 +3775,379 @@ mod tests {
             consumed, burst as usize,
             "fresh bucket must yield exactly burst={} tokens in a tight loop, got {}",
             burst, consumed
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // purge_connection_routes / idle-timeout cleanup regression tests
+    // -----------------------------------------------------------------------
+
+    fn peer(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    fn populated_routing_maps(
+        primary: &Arc<[u8]>,
+        aliases: &[Arc<[u8]>],
+        addr: SocketAddr,
+    ) -> (
+        HashMap<Arc<[u8]>, Arc<[u8]>>,
+        CidRadix,
+        HashMap<SocketAddr, Arc<[u8]>>,
+    ) {
+        let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
+
+        cid_radix.insert(Arc::clone(primary));
+        for alias in aliases {
+            cid_routes.insert(Arc::clone(alias), Arc::clone(primary));
+            cid_radix.insert(Arc::clone(alias));
+        }
+        peer_routes.insert(addr, Arc::clone(primary));
+
+        (cid_routes, cid_radix, peer_routes)
+    }
+
+    #[test]
+    fn purge_removes_primary_radix_entry() {
+        let primary = cid(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let addr = peer(4433);
+        let (mut cid_routes, mut cid_radix, mut peer_routes) =
+            populated_routing_maps(&primary, &[], addr);
+
+        purge_connection_routes(
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            &primary,
+            &HashSet::new(),
+            &addr,
+        );
+
+        assert!(
+            cid_radix.longest_prefix_match(primary.as_ref()).is_none(),
+            "primary SCID must be removed from radix after cleanup"
+        );
+        assert!(
+            peer_routes.get(&addr).is_none(),
+            "peer_routes entry must be removed after cleanup"
+        );
+    }
+
+    #[test]
+    fn purge_removes_all_alias_entries() {
+        let primary = cid(&[0xAA; 8]);
+        let alias1 = cid(&[0xBB; 8]);
+        let alias2 = cid(&[0xCC; 8]);
+        let addr = peer(4434);
+
+        let aliases = [Arc::clone(&alias1), Arc::clone(&alias2)];
+        let (mut cid_routes, mut cid_radix, mut peer_routes) =
+            populated_routing_maps(&primary, &aliases, addr);
+
+        let routing_scids: HashSet<Arc<[u8]>> = aliases.iter().cloned().collect();
+        purge_connection_routes(
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            &primary,
+            &routing_scids,
+            &addr,
+        );
+
+        assert!(
+            cid_routes.get(alias1.as_ref()).is_none(),
+            "alias1 must be removed from cid_routes"
+        );
+        assert!(
+            cid_routes.get(alias2.as_ref()).is_none(),
+            "alias2 must be removed from cid_routes"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias1.as_ref()).is_none(),
+            "alias1 must be removed from radix"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias2.as_ref()).is_none(),
+            "alias2 must be removed from radix"
+        );
+        assert!(
+            peer_routes.get(&addr).is_none(),
+            "peer_routes entry must be removed"
+        );
+    }
+
+    #[test]
+    fn repeated_purge_churn_leaves_no_stale_entries() {
+        // Simulate repeated connect/timeout/disconnect cycles on distinct
+        // connections to verify no entries from prior connections bleed
+        // across cycles.
+        let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
+
+        for i in 0u8..20 {
+            let primary = cid(&[i, i, i, i, i, i, i, i]);
+            let alias = cid(&[i | 0x80, i | 0x80, i | 0x80, i | 0x80,
+                               i | 0x80, i | 0x80, i | 0x80, i | 0x80]);
+            let addr = peer(5000 + u16::from(i));
+
+            // Register
+            cid_radix.insert(Arc::clone(&primary));
+            cid_radix.insert(Arc::clone(&alias));
+            cid_routes.insert(Arc::clone(&alias), Arc::clone(&primary));
+            peer_routes.insert(addr, Arc::clone(&primary));
+
+            // Tear down
+            let routing_scids: HashSet<Arc<[u8]>> = [Arc::clone(&alias)].into_iter().collect();
+            purge_connection_routes(
+                &mut cid_routes,
+                &mut cid_radix,
+                &mut peer_routes,
+                &primary,
+                &routing_scids,
+                &addr,
+            );
+        }
+
+        assert!(cid_routes.is_empty(), "cid_routes must be empty after all connections torn down");
+        assert!(peer_routes.is_empty(), "peer_routes must be empty after all connections torn down");
+    }
+
+    #[test]
+    fn purge_is_idempotent() {
+        // Calling purge twice for the same connection must not panic or leave
+        // phantom entries.
+        let primary = cid(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]);
+        let alias = cid(&[0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71, 0x81]);
+        let addr = peer(4440);
+
+        let (mut cid_routes, mut cid_radix, mut peer_routes) =
+            populated_routing_maps(&primary, &[Arc::clone(&alias)], addr);
+
+        let routing_scids: HashSet<Arc<[u8]>> = [Arc::clone(&alias)].into_iter().collect();
+
+        for _ in 0..2 {
+            purge_connection_routes(
+                &mut cid_routes,
+                &mut cid_radix,
+                &mut peer_routes,
+                &primary,
+                &routing_scids,
+                &addr,
+            );
+        }
+
+        assert!(cid_routes.is_empty(), "cid_routes must be empty after double purge");
+        assert!(peer_routes.is_empty(), "peer_routes must be empty after double purge");
+    }
+
+    // -----------------------------------------------------------------------
+    // sweep_closed_connections churn tests
+    //
+    // These tests simulate the handle_timeouts removal sweep end-to-end:
+    // connections are registered in all routing maps, marked as timed-out
+    // (placed in to_remove), and swept via sweep_closed_connections.  After
+    // each cycle the invariant is that no stale entries remain in any map.
+    // -----------------------------------------------------------------------
+
+    /// Minimal stand-in for QuicConnection — holds only the routing fields
+    /// that sweep_closed_connections needs.
+    struct StubConn {
+        primary_scid: Arc<[u8]>,
+        routing_scids: HashSet<Arc<[u8]>>,
+        peer_address: SocketAddr,
+    }
+
+    fn stub_routes(c: &StubConn) -> ConnectionRoutes {
+        ConnectionRoutes {
+            primary_scid: Arc::clone(&c.primary_scid),
+            routing_scids: c.routing_scids.clone(),
+            peer_address: c.peer_address,
+        }
+    }
+
+    fn register_stub(
+        conn: &StubConn,
+        connections: &mut HashMap<Arc<[u8]>, StubConn>,
+        cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+        cid_radix: &mut CidRadix,
+        peer_routes: &mut HashMap<SocketAddr, Arc<[u8]>>,
+    ) {
+        cid_radix.insert(Arc::clone(&conn.primary_scid));
+        for alias in &conn.routing_scids {
+            if alias.as_ref() != conn.primary_scid.as_ref() {
+                cid_routes.insert(Arc::clone(alias), Arc::clone(&conn.primary_scid));
+                cid_radix.insert(Arc::clone(alias));
+            }
+        }
+        peer_routes.insert(conn.peer_address, Arc::clone(&conn.primary_scid));
+    }
+
+    fn assert_maps_empty(
+        label: &str,
+        connections: &HashMap<Arc<[u8]>, StubConn>,
+        cid_routes: &HashMap<Arc<[u8]>, Arc<[u8]>>,
+        peer_routes: &HashMap<SocketAddr, Arc<[u8]>>,
+    ) {
+        assert!(connections.is_empty(), "{}: connections must be empty", label);
+        assert!(cid_routes.is_empty(), "{}: cid_routes must be empty", label);
+        assert!(peer_routes.is_empty(), "{}: peer_routes must be empty", label);
+    }
+
+    #[test]
+    fn sweep_removes_timed_out_connection_and_all_routes() {
+        let primary = cid(&[0x01; 8]);
+        let alias = cid(&[0x02; 8]);
+        let addr = peer(6000);
+
+        let conn = StubConn {
+            primary_scid: Arc::clone(&primary),
+            routing_scids: [Arc::clone(&primary), Arc::clone(&alias)].into_iter().collect(),
+            peer_address: addr,
+        };
+
+        let mut connections: HashMap<Arc<[u8]>, StubConn> = HashMap::new();
+        let mut cid_routes = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes = HashMap::new();
+
+        register_stub(&conn, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        connections.insert(Arc::clone(&primary), conn);
+
+        sweep_closed_connections(
+            &mut connections,
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            vec![Arc::clone(&primary)],
+            stub_routes,
+        );
+
+        assert_maps_empty("after single sweep", &connections, &cid_routes, &peer_routes);
+        assert!(
+            cid_radix.longest_prefix_match(primary.as_ref()).is_none(),
+            "primary must be removed from radix"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias.as_ref()).is_none(),
+            "alias must be removed from radix"
+        );
+    }
+
+    #[test]
+    fn sweep_repeated_timeout_churn_leaves_no_stale_entries() {
+        // Simulate N rounds of: connect → timeout → sweep.  After every round
+        // all four routing maps must be fully empty — no entries from prior
+        // connections bleed into subsequent rounds.
+        let rounds = 30usize;
+
+        let mut connections: HashMap<Arc<[u8]>, StubConn> = HashMap::new();
+        let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
+
+        for i in 0..rounds {
+            let b = i as u8;
+            let primary = cid(&[b, b, b, b, b, b, b, b]);
+            let alias1 = cid(&[b | 0x80, b | 0x80, b | 0x80, b | 0x80,
+                                b | 0x80, b | 0x80, b | 0x80, b | 0x80]);
+            let addr = peer(7000 + i as u16);
+
+            let conn = StubConn {
+                primary_scid: Arc::clone(&primary),
+                routing_scids: [Arc::clone(&primary), Arc::clone(&alias1)]
+                    .into_iter()
+                    .collect(),
+                peer_address: addr,
+            };
+
+            register_stub(&conn, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+            connections.insert(Arc::clone(&primary), conn);
+
+            // Simulate handle_timeouts detecting this connection as closed.
+            sweep_closed_connections(
+                &mut connections,
+                &mut cid_routes,
+                &mut cid_radix,
+                &mut peer_routes,
+                vec![Arc::clone(&primary)],
+                stub_routes,
+            );
+
+            assert_maps_empty(
+                &format!("round {}", i),
+                &connections,
+                &cid_routes,
+                &peer_routes,
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_partial_batch_clears_only_removed_entries() {
+        // Two connections registered; only one timed out.  After sweep the
+        // surviving connection's entries must remain intact.
+        let p1 = cid(&[0xA1; 8]);
+        let p2 = cid(&[0xB1; 8]);
+        let addr1 = peer(8001);
+        let addr2 = peer(8002);
+
+        let conn1 = StubConn {
+            primary_scid: Arc::clone(&p1),
+            routing_scids: [Arc::clone(&p1)].into_iter().collect(),
+            peer_address: addr1,
+        };
+        let conn2 = StubConn {
+            primary_scid: Arc::clone(&p2),
+            routing_scids: [Arc::clone(&p2)].into_iter().collect(),
+            peer_address: addr2,
+        };
+
+        let mut connections: HashMap<Arc<[u8]>, StubConn> = HashMap::new();
+        let mut cid_routes = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes = HashMap::new();
+
+        register_stub(&conn1, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        register_stub(&conn2, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        connections.insert(Arc::clone(&p1), conn1);
+        connections.insert(Arc::clone(&p2), conn2);
+
+        // Only p1 times out.
+        sweep_closed_connections(
+            &mut connections,
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            vec![Arc::clone(&p1)],
+            stub_routes,
+        );
+
+        assert!(
+            !connections.contains_key(p1.as_ref()),
+            "timed-out connection must be removed"
+        );
+        assert!(
+            connections.contains_key(p2.as_ref()),
+            "surviving connection must remain in connections"
+        );
+        assert!(
+            peer_routes.get(&addr2).is_some(),
+            "surviving connection peer_route must remain"
+        );
+        assert!(
+            peer_routes.get(&addr1).is_none(),
+            "timed-out connection peer_route must be removed"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(p2.as_ref()).is_some(),
+            "surviving connection must remain in radix"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(p1.as_ref()).is_none(),
+            "timed-out connection must be removed from radix"
         );
     }
 }

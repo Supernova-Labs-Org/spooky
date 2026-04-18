@@ -965,7 +965,7 @@ log:
 <h3 id="upstream">upstream</h3>
 <p>Named upstream pool definitions. Each key represents a unique upstream pool with its own routing rules, load balancing strategy, and backend servers.</p>
 <h3 id="load_balancing">load_balancing</h3>
-<p><strong>Deprecated.</strong> This top-level field is accepted by the parser for backward compatibility but has no effect at runtime. Configure load balancing strategy per upstream pool via <code>upstream.&lt;name&gt;.load_balancing</code> instead.</p>
+<p>Optional global fallback for upstream load balancing. If an upstream omits <code>upstream.&lt;name&gt;.load_balancing</code>, the top-level <code>load_balancing</code> value is applied to that upstream during config load.</p>
 <h3 id="log">log</h3>
 <p>Logging configuration. Controls log level and output formatting.</p>
 <h2 id="default-values">Default Values</h2>
@@ -1290,7 +1290,7 @@ listen:
 <li>If <code>path_prefix</code> is specified, the request path must start with the prefix</li>
 <li>If both are specified, both conditions must match</li>
 <li>Routes are evaluated by longest-prefix matching - the route with the most specific (longest) path prefix is selected</li>
-<li>For routes with equal-length prefixes, selection depends on HashMap iteration order (not deterministic by configuration order)</li>
+<li>For equal-length prefixes, ties are deterministic: host-specific routes win over host-agnostic routes, then lexicographically smaller upstream name wins</li>
 </ol>
 <h4 id="route-examples">Route Examples</h4>
 <pre><code class="language-yaml"># Host-based routing
@@ -1733,7 +1733,7 @@ log:
 <td>integer</td>
 <td>No</td>
 <td><code>30000</code></td>
-<td>Maximum total time to receive the full response body (ms)</td>
+<td>Maximum wait for first upstream body bytes (ms); after body progress, idle timeout governs chunk pacing</td>
 </tr>
 <tr>
 <td><code>backend_total_request_timeout_ms</code></td>

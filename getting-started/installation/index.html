@@ -885,7 +885,8 @@
 - Operating System: Linux, macOS, or Windows
 - Build tools: CMake, pkg-config, C compiler toolchain</p>
 <p><strong>Permissions:</strong>
-- Spooky must run as root (required for QUIC/UDP socket binding)</p>
+- Root is only required when binding privileged ports (<code>&lt;1024</code>).
+- For typical deployments, run Spooky as an unprivileged user on a non-privileged port.</p>
 <h2 id="installation-methods">Installation Methods</h2>
 <h3 id="pre-built-binaries">Pre-built Binaries</h3>
 <p>Download the latest release from <a href="https://github.com/nishujangra/spooky/releases">GitHub Releases</a>.</p>

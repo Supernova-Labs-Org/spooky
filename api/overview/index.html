@@ -1022,15 +1022,14 @@ log:                          # Logging configuration (optional, defaults applie
 <li><code>inc_timeout()</code> - Increment backend timeout counter</li>
 <li><code>inc_backend_error()</code> - Increment backend error counter</li>
 </ul>
-<h3 id="future-metrics-api-endpoint">Future: Metrics API Endpoint</h3>
-<p><strong>Status</strong>: Planned feature</p>
-<p>A metrics exposition endpoint is planned for future implementation that will expose collected metrics for monitoring and observability systems.</p>
-<h4 id="planned-endpoint">Planned Endpoint</h4>
+<h3 id="metrics-api-endpoint">Metrics API Endpoint</h3>
+<p><strong>Status</strong>: Available</p>
+<p>Spooky exposes a Prometheus-compatible metrics endpoint in the runtime control plane when metrics are enabled in configuration.</p>
+<h4 id="endpoint">Endpoint</h4>
 <pre><code>GET /metrics
 </code></pre>
-<p>The endpoint will provide Prometheus-compatible metric exposition format, making Spooky metrics accessible to standard monitoring and alerting infrastructure.</p>
-<h4 id="planned-metric-categories">Planned Metric Categories</h4>
-<p>Future implementations may include:</p>
+<p>The metrics path is configurable (<code>observability.metrics.path</code>) and defaults to <code>/metrics</code>.</p>
+<h4 id="metric-categories">Metric Categories</h4>
 <ul>
 <li><strong>Request metrics</strong>: Total requests, success/failure rates, request duration histograms</li>
 <li><strong>Connection metrics</strong>: Active QUIC connections, HTTP/2 connection pool statistics</li>
@@ -1541,10 +1540,10 @@ RUST_LOG=trace spooky --config config.yaml
             Metrics Implementation Details
         </a>
         
-        <a href="#future-metrics-api-endpoint"
+        <a href="#metrics-api-endpoint"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#future-metrics-api-endpoint');">
-            Future: Metrics API Endpoint
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#metrics-api-endpoint');">
+            Metrics API Endpoint
         </a>
         
         <a href="#admin-api"

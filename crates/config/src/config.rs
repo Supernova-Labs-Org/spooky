@@ -28,9 +28,11 @@ use crate::default::{
     resilience_default_brownout_trigger_inflight_percent, resilience_default_cb_enabled,
     resilience_default_cb_failure_threshold, resilience_default_cb_half_open_max_probes,
     resilience_default_cb_open_ms, resilience_default_hedging_delay_ms,
-    resilience_default_hedging_enabled, resilience_default_retry_budget_enabled,
-    resilience_default_retry_budget_ratio_percent, resilience_default_route_queue_default_cap,
-    resilience_default_route_queue_global_cap,
+    resilience_default_hedging_enabled, resilience_default_protocol_allow_0rtt,
+    resilience_default_protocol_enforce_authority_host_match,
+    resilience_default_protocol_max_headers_bytes, resilience_default_protocol_max_headers_count,
+    resilience_default_retry_budget_enabled, resilience_default_retry_budget_ratio_percent,
+    resilience_default_route_queue_default_cap, resilience_default_route_queue_global_cap,
     resilience_default_route_queue_shed_retry_after_seconds,
     resilience_default_watchdog_check_interval_ms, resilience_default_watchdog_drain_grace_ms,
     resilience_default_watchdog_enabled, resilience_default_watchdog_min_requests_per_window,
@@ -316,6 +318,8 @@ pub struct Resilience {
     #[serde(default)]
     pub route_queue: RouteQueue,
     #[serde(default)]
+    pub protocol: ProtocolPolicy,
+    #[serde(default)]
     pub circuit_breaker: CircuitBreaker,
     #[serde(default)]
     pub hedging: Hedging,
@@ -332,6 +336,7 @@ impl Default for Resilience {
         Self {
             adaptive_admission: AdaptiveAdmission::default(),
             route_queue: RouteQueue::default(),
+            protocol: ProtocolPolicy::default(),
             circuit_breaker: CircuitBreaker::default(),
             hedging: Hedging::default(),
             retry_budget: RetryBudget::default(),
@@ -386,6 +391,39 @@ impl Default for RouteQueue {
             global_cap: resilience_default_route_queue_global_cap(),
             shed_retry_after_seconds: resilience_default_route_queue_shed_retry_after_seconds(),
             caps: HashMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ProtocolPolicy {
+    #[serde(default = "resilience_default_protocol_allow_0rtt")]
+    pub allow_0rtt: bool,
+    #[serde(default)]
+    pub early_data_safe_methods: Vec<String>,
+    #[serde(default = "resilience_default_protocol_max_headers_count")]
+    pub max_headers_count: usize,
+    #[serde(default = "resilience_default_protocol_max_headers_bytes")]
+    pub max_headers_bytes: usize,
+    #[serde(default = "resilience_default_protocol_enforce_authority_host_match")]
+    pub enforce_authority_host_match: bool,
+    #[serde(default)]
+    pub allowed_methods: Vec<String>,
+    #[serde(default)]
+    pub denied_path_prefixes: Vec<String>,
+}
+
+impl Default for ProtocolPolicy {
+    fn default() -> Self {
+        Self {
+            allow_0rtt: resilience_default_protocol_allow_0rtt(),
+            early_data_safe_methods: vec!["GET".to_string(), "HEAD".to_string()],
+            max_headers_count: resilience_default_protocol_max_headers_count(),
+            max_headers_bytes: resilience_default_protocol_max_headers_bytes(),
+            enforce_authority_host_match: resilience_default_protocol_enforce_authority_host_match(
+            ),
+            allowed_methods: Vec::new(),
+            denied_path_prefixes: Vec::new(),
         }
     }
 }

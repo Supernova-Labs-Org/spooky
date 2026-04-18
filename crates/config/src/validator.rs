@@ -286,6 +286,62 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.resilience.protocol.max_headers_count == 0 {
+        error!("resilience.protocol.max_headers_count must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.protocol.max_headers_bytes == 0 {
+        error!("resilience.protocol.max_headers_bytes must be greater than 0");
+        return false;
+    }
+
+    if config
+        .resilience
+        .protocol
+        .early_data_safe_methods
+        .iter()
+        .any(|method| method.trim().is_empty())
+    {
+        error!("resilience.protocol.early_data_safe_methods must not contain empty values");
+        return false;
+    }
+
+    if config
+        .resilience
+        .protocol
+        .allowed_methods
+        .iter()
+        .any(|method| method.trim().is_empty())
+    {
+        error!("resilience.protocol.allowed_methods must not contain empty values");
+        return false;
+    }
+
+    if config
+        .resilience
+        .protocol
+        .denied_path_prefixes
+        .iter()
+        .any(|prefix| prefix.is_empty() || !prefix.starts_with('/'))
+    {
+        error!("resilience.protocol.denied_path_prefixes must contain '/'-prefixed paths");
+        return false;
+    }
+
+    if config.resilience.protocol.allow_0rtt
+        && config
+            .resilience
+            .protocol
+            .early_data_safe_methods
+            .is_empty()
+    {
+        error!(
+            "resilience.protocol.early_data_safe_methods must be non-empty when allow_0rtt=true"
+        );
+        return false;
+    }
+
     if config.resilience.circuit_breaker.failure_threshold == 0 {
         error!("resilience.circuit_breaker.failure_threshold must be greater than 0");
         return false;
@@ -703,6 +759,10 @@ upstream:
         assert_eq!(cfg.resilience.route_queue.default_cap, 512);
         assert_eq!(cfg.resilience.route_queue.global_cap, 2048);
         assert_eq!(cfg.resilience.route_queue.shed_retry_after_seconds, 1);
+        assert!(!cfg.resilience.protocol.allow_0rtt);
+        assert_eq!(cfg.resilience.protocol.max_headers_count, 128);
+        assert_eq!(cfg.resilience.protocol.max_headers_bytes, 16 * 1024);
+        assert!(cfg.resilience.protocol.enforce_authority_host_match);
         assert!(!cfg.resilience.watchdog.enabled);
         assert_eq!(cfg.resilience.watchdog.check_interval_ms, 1_000);
     }
@@ -822,6 +882,27 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.protocol.max_headers_count = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.protocol.max_headers_bytes = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.protocol.allow_0rtt = true;
+        cfg.resilience.protocol.early_data_safe_methods.clear();
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.protocol.denied_path_prefixes = vec!["admin".to_string()];
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.protocol.allowed_methods = vec!["".to_string()];
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.resilience.retry_budget.ratio_percent = 101;
         assert!(!validate(&cfg));
 
@@ -881,6 +962,12 @@ upstream:
         cfg.resilience.route_queue.default_cap = 256;
         cfg.resilience.route_queue.global_cap = 2048;
         cfg.resilience.route_queue.shed_retry_after_seconds = 2;
+        cfg.resilience.protocol.allow_0rtt = true;
+        cfg.resilience.protocol.early_data_safe_methods = vec!["GET".to_string()];
+        cfg.resilience.protocol.max_headers_count = 64;
+        cfg.resilience.protocol.max_headers_bytes = 8 * 1024;
+        cfg.resilience.protocol.allowed_methods = vec!["GET".to_string(), "POST".to_string()];
+        cfg.resilience.protocol.denied_path_prefixes = vec!["/admin".to_string()];
         cfg.resilience.retry_budget.ratio_percent = 30;
         cfg.observability = Observability {
             metrics: MetricsEndpoint {

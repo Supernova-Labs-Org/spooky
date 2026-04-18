@@ -421,9 +421,16 @@ pub struct RuntimeResilience {
     pub retry_budget: Arc<RetryBudget>,
     pub brownout: Arc<BrownoutController>,
     pub shed_retry_after_seconds: u32,
+    pub allow_0rtt: bool,
+    pub max_headers_count: usize,
+    pub max_headers_bytes: usize,
+    pub enforce_authority_host_match: bool,
     pub hedging_enabled: bool,
     pub hedging_delay: Duration,
-    safe_methods: HashSet<String>,
+    hedge_safe_methods: HashSet<String>,
+    early_data_safe_methods: HashSet<String>,
+    allowed_methods: HashSet<String>,
+    denied_path_prefixes: Vec<String>,
     route_allowlist: HashSet<String>,
 }
 
@@ -462,9 +469,21 @@ impl RuntimeResilience {
             config.brownout.core_routes.clone(),
         ));
 
-        let safe_methods = config
+        let hedge_safe_methods = config
             .hedging
             .safe_methods
+            .iter()
+            .map(|method| method.to_ascii_uppercase())
+            .collect::<HashSet<_>>();
+        let early_data_safe_methods = config
+            .protocol
+            .early_data_safe_methods
+            .iter()
+            .map(|method| method.to_ascii_uppercase())
+            .collect::<HashSet<_>>();
+        let allowed_methods = config
+            .protocol
+            .allowed_methods
             .iter()
             .map(|method| method.to_ascii_uppercase())
             .collect::<HashSet<_>>();
@@ -482,9 +501,16 @@ impl RuntimeResilience {
             retry_budget,
             brownout,
             shed_retry_after_seconds: config.route_queue.shed_retry_after_seconds.max(1),
+            allow_0rtt: config.protocol.allow_0rtt,
+            max_headers_count: config.protocol.max_headers_count.max(1),
+            max_headers_bytes: config.protocol.max_headers_bytes.max(1),
+            enforce_authority_host_match: config.protocol.enforce_authority_host_match,
             hedging_enabled: config.hedging.enabled,
             hedging_delay: Duration::from_millis(config.hedging.delay_ms.max(1)),
-            safe_methods,
+            hedge_safe_methods,
+            early_data_safe_methods,
+            allowed_methods,
+            denied_path_prefixes: config.protocol.denied_path_prefixes.clone(),
             route_allowlist,
         }
     }
@@ -493,11 +519,31 @@ impl RuntimeResilience {
         if !self.hedging_enabled || self.brownout.is_active() || !bodyless {
             return false;
         }
-        let safe_method = self.safe_methods.contains(&method.to_ascii_uppercase());
+        let safe_method = self
+            .hedge_safe_methods
+            .contains(&method.to_ascii_uppercase());
         if !safe_method {
             return false;
         }
         self.route_allowlist.is_empty() || self.route_allowlist.contains(route)
+    }
+
+    pub fn early_data_allowed_for(&self, method: &str) -> bool {
+        self.allow_0rtt
+            && self
+                .early_data_safe_methods
+                .contains(&method.to_ascii_uppercase())
+    }
+
+    pub fn method_allowed(&self, method: &str) -> bool {
+        self.allowed_methods.is_empty()
+            || self.allowed_methods.contains(&method.to_ascii_uppercase())
+    }
+
+    pub fn path_denied(&self, path: &str) -> bool {
+        self.denied_path_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
     }
 }
 
@@ -561,5 +607,22 @@ mod tests {
         assert!(controller.is_active());
         assert!(controller.route_allowed("core"));
         assert!(!controller.route_allowed("non_core"));
+    }
+
+    #[test]
+    fn runtime_resilience_method_and_path_policy_checks() {
+        let mut cfg = ResilienceConfig::default();
+        cfg.protocol.allowed_methods = vec!["GET".to_string()];
+        cfg.protocol.denied_path_prefixes = vec!["/admin".to_string()];
+        cfg.protocol.allow_0rtt = true;
+        cfg.protocol.early_data_safe_methods = vec!["GET".to_string()];
+
+        let runtime = RuntimeResilience::from_config(&cfg, 64);
+        assert!(runtime.method_allowed("GET"));
+        assert!(!runtime.method_allowed("POST"));
+        assert!(runtime.path_denied("/admin/secret"));
+        assert!(!runtime.path_denied("/api"));
+        assert!(runtime.early_data_allowed_for("GET"));
+        assert!(!runtime.early_data_allowed_for("POST"));
     }
 }

@@ -103,6 +103,14 @@ resilience:
         global_cap: 2048
         shed_retry_after_seconds: 1
         caps: {}
+    protocol:
+        allow_0rtt: false
+        early_data_safe_methods: ["GET", "HEAD"]
+        max_headers_count: 128
+        max_headers_bytes: 16384
+        enforce_authority_host_match: true
+        allowed_methods: []
+        denied_path_prefixes: []
     circuit_breaker:
         enabled: true
         failure_threshold: 5

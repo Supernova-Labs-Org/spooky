@@ -91,7 +91,7 @@ Named upstream pool definitions. Each key represents a unique upstream pool with
 
 ### load_balancing
 
-**Deprecated.** This top-level field is accepted by the parser for backward compatibility but has no effect at runtime. Configure load balancing strategy per upstream pool via `upstream.<name>.load_balancing` instead.
+Optional global fallback for upstream load balancing. If an upstream omits `upstream.<name>.load_balancing`, the top-level `load_balancing` value is applied to that upstream during config load.
 
 ### log
 
@@ -216,7 +216,7 @@ Route matching rules:
 2. If `path_prefix` is specified, the request path must start with the prefix
 3. If both are specified, both conditions must match
 4. Routes are evaluated by longest-prefix matching - the route with the most specific (longest) path prefix is selected
-5. For routes with equal-length prefixes, selection depends on HashMap iteration order (not deterministic by configuration order)
+5. For equal-length prefixes, ties are deterministic: host-specific routes win over host-agnostic routes, then lexicographically smaller upstream name wins
 
 #### Route Examples
 
@@ -496,7 +496,7 @@ Controls resource limits, tuning knobs, and connection-flood protection. All fie
 | `backend_timeout_ms` | integer | No | `2000` | Initial backend response timeout (ms) |
 | `backend_connect_timeout_ms` | integer | No | `500` | Backend TCP/TLS handshake timeout (ms); must be ≤ `backend_timeout_ms` |
 | `backend_body_idle_timeout_ms` | integer | No | `2000` | Idle timeout while streaming response body (ms); must be ≥ `backend_timeout_ms` |
-| `backend_body_total_timeout_ms` | integer | No | `30000` | Maximum total time to receive the full response body (ms) |
+| `backend_body_total_timeout_ms` | integer | No | `30000` | Maximum wait for first upstream body bytes (ms); after body progress, idle timeout governs chunk pacing |
 | `backend_total_request_timeout_ms` | integer | No | `35000` | Hard deadline for an entire request round-trip (ms); must be ≥ `backend_body_total_timeout_ms` |
 | `shutdown_drain_timeout_ms` | integer | No | `5000` | Graceful-shutdown drain timeout in ms; active connections are force-closed once this deadline is reached |
 | `udp_recv_buffer_bytes` | integer | No | `8388608` | UDP socket receive buffer size (bytes) |

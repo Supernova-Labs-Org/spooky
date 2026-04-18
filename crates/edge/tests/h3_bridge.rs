@@ -1022,6 +1022,19 @@ async fn start_h2_backend_with_regression_routes() -> SocketAddr {
                             .insert(CONTENT_LENGTH, HeaderValue::from_static("21"));
                         response
                     }
+                    "/long-stream" => {
+                        let (tx, body) = DelayedChunkBody::channel(8);
+                        tokio::spawn(async move {
+                            let _ = tx.send(Bytes::from_static(b"part-1")).await;
+                            tokio::time::sleep(Duration::from_millis(220)).await;
+                            let _ = tx.send(Bytes::from_static(b"part-2")).await;
+                            tokio::time::sleep(Duration::from_millis(220)).await;
+                            let _ = tx.send(Bytes::from_static(b"part-3")).await;
+                            tokio::time::sleep(Duration::from_millis(220)).await;
+                            let _ = tx.send(Bytes::from_static(b"part-4")).await;
+                        });
+                        Response::new(body.boxed())
+                    }
                     _ => Response::new(Full::new(Bytes::from_static(b"default\n")).boxed()),
                 };
                 Ok::<_, hyper::Error>(response)
@@ -1934,6 +1947,34 @@ fn response_body_is_streamed_progressively() {
     assert!(
         span >= Duration::from_millis(200),
         "expected delayed progressive delivery across chunks, got span {span:?}"
+    );
+}
+
+#[test]
+fn long_stream_survives_body_total_timeout_after_progress() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.backend_body_total_timeout_ms = 250;
+    config.performance.backend_body_idle_timeout_ms = 500;
+    config.performance.backend_total_request_timeout_ms = 5_000;
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/long-stream"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
+    )
+    .expect("long stream request failed");
+    let stream = observation_for(&observations, "/long-stream");
+    assert_eq!(stream.status.as_deref(), Some("200"));
+    assert_eq!(
+        String::from_utf8_lossy(&stream.body),
+        "part-1part-2part-3part-4"
     );
 }
 

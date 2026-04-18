@@ -26,6 +26,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::build_h2_request;
 use spooky_errors::{PoolError, ProxyError};
 use spooky_lb::{HealthTransition, UpstreamPool};
+use spooky_transport::h2_client::H2Client;
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
 use tokio::sync::{
@@ -242,7 +243,11 @@ impl QUICListener {
             .set_expected_workers(worker_count.max(1));
         Self::spawn_health_checks(
             shared_state.upstream_pools.clone(),
-            Arc::clone(&shared_state.h2_pool),
+            Arc::new(H2Client::new(
+                config.performance.h2_pool_max_idle_per_backend.max(1),
+                Duration::from_millis(config.performance.h2_pool_idle_timeout_ms.max(1)),
+                Duration::from_millis(config.performance.backend_connect_timeout_ms.max(1)),
+            )),
             Arc::clone(&shared_state.metrics),
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
@@ -2115,7 +2120,10 @@ impl QUICListener {
                         let (chunk_tx, chunk_rx) =
                             mpsc::channel::<ResponseChunk>(RESPONSE_CHUNK_CHANNEL_CAPACITY);
                         let fail_tx = chunk_tx.clone();
-                        let total_deadline =
+                        // `backend_body_total_timeout` is used as a pre-first-byte guard:
+                        // once the upstream starts making body progress, the idle timeout
+                        // governs pacing and the stream may continue until request deadline.
+                        let first_byte_deadline =
                             tokio::time::Instant::now() + backend_body_total_timeout;
                         let deferred_status = status;
                         let deferred_headers = owned_h3_headers.clone();
@@ -2124,17 +2132,23 @@ impl QUICListener {
                             let mut body: hyper::body::Incoming = body;
                             let mut response_bytes_received: usize = 0;
                             let mut buffered_chunks: Vec<Bytes> = Vec::new();
+                            let mut saw_body_progress = false;
                             loop {
                                 let frame_fut = BodyExt::frame(&mut body);
                                 let now = tokio::time::Instant::now();
-                                if now >= total_deadline {
+                                if !saw_body_progress && now >= first_byte_deadline {
                                     let _ = chunk_tx
                                         .send(ResponseChunk::Error(ProxyError::Timeout))
                                         .await;
                                     return;
                                 }
-                                let remaining_total = total_deadline.saturating_duration_since(now);
-                                let wait_timeout = remaining_total.min(backend_body_idle_timeout);
+                                let wait_timeout = if saw_body_progress {
+                                    backend_body_idle_timeout
+                                } else {
+                                    first_byte_deadline
+                                        .saturating_duration_since(now)
+                                        .min(backend_body_idle_timeout)
+                                };
                                 let result = tokio::time::timeout(wait_timeout, frame_fut).await;
                                 match result {
                                     Err(_elapsed) => {
@@ -2146,6 +2160,9 @@ impl QUICListener {
                                     }
                                     Ok(Some(Ok(f))) => {
                                         if let Ok(data) = f.into_data() {
+                                            if !data.is_empty() {
+                                                saw_body_progress = true;
+                                            }
                                             if defer_headers_until_body_validated {
                                                 response_bytes_received = response_bytes_received
                                                     .saturating_add(data.len());
@@ -3149,7 +3166,7 @@ impl QUICListener {
 
     fn spawn_health_checks(
         upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
-        h2_pool: Arc<H2Pool>,
+        health_client: Arc<H2Client>,
         metrics: Arc<Metrics>,
     ) {
         let entries = {
@@ -3184,10 +3201,11 @@ impl QUICListener {
         };
 
         for (upstream_pool, index, address, health) in entries {
-            let h2_pool = h2_pool.clone();
+            let health_client = Arc::clone(&health_client);
+            let task_metrics = Arc::clone(&metrics);
             let handle = handle.clone();
-            let metrics = Arc::clone(&metrics);
-            spawn_supervised_async_task(&handle, "health-check", Some(metrics), async move {
+            let supervise_metrics = Arc::clone(&task_metrics);
+            spawn_supervised_async_task(&handle, "health-check", Some(supervise_metrics), async move {
                 let interval = Duration::from_millis(health.interval.max(1));
                 let timeout = Duration::from_millis(health.timeout_ms.max(1));
                 let path: &str = if health.path.is_empty() {
@@ -3219,13 +3237,17 @@ impl QUICListener {
                         Err(_) => continue,
                     };
 
-                    let result =
-                        tokio::time::timeout(timeout, h2_pool.send(&address, request)).await;
+                    let result = tokio::time::timeout(timeout, health_client.send(request)).await;
 
                     let healthy = match result {
                         Ok(Ok(response)) => response.status().is_success(),
                         _ => false,
                     };
+                    if healthy {
+                        task_metrics.inc_health_check_success();
+                    } else {
+                        task_metrics.inc_health_check_failure();
+                    }
 
                     let transition = match upstream_pool.lock() {
                         Ok(mut pool) => {

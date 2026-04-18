@@ -599,7 +599,7 @@ done
 
 ```yaml
 # Global load balancing strategy (applies to all upstream pools)
-# Per-upstream load_balancing is planned but not currently active
+# Upstream pools can override this with upstream.<name>.load_balancing
 load_balancing:
   type: "round-robin"
 

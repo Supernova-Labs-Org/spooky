@@ -36,7 +36,7 @@ curl --http3-only -k \
 
 - **Rust**: 1.85 or later (edition 2024)
 - **OS**: Linux
-- **Permissions**: Must run as root (required for QUIC/UDP socket binding)
+- **Permissions**: Root is only required for privileged ports (`<1024`); non-privileged ports run unprivileged
 - **Network**: UDP port access for QUIC traffic
 - **Memory**: 256MB minimum, 1GB recommended
 

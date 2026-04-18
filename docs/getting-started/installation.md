@@ -14,7 +14,8 @@
 - Build tools: CMake, pkg-config, C compiler toolchain
 
 **Permissions:**
-- Spooky must run as root (required for QUIC/UDP socket binding)
+- Root is only required when binding privileged ports (`<1024`).
+- For typical deployments, run Spooky as an unprivileged user on a non-privileged port.
 
 ## Installation Methods
 

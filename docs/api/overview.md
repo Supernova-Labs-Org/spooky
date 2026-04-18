@@ -167,23 +167,21 @@ All metrics use atomic operations with relaxed ordering for high-performance loc
 - `inc_timeout()` - Increment backend timeout counter
 - `inc_backend_error()` - Increment backend error counter
 
-### Future: Metrics API Endpoint
+### Metrics API Endpoint
 
-**Status**: Planned feature
+**Status**: Available
 
-A metrics exposition endpoint is planned for future implementation that will expose collected metrics for monitoring and observability systems.
+Spooky exposes a Prometheus-compatible metrics endpoint in the runtime control plane when metrics are enabled in configuration.
 
-#### Planned Endpoint
+#### Endpoint
 
 ```
 GET /metrics
 ```
 
-The endpoint will provide Prometheus-compatible metric exposition format, making Spooky metrics accessible to standard monitoring and alerting infrastructure.
+The metrics path is configurable (`observability.metrics.path`) and defaults to `/metrics`.
 
-#### Planned Metric Categories
-
-Future implementations may include:
+#### Metric Categories
 
 - **Request metrics**: Total requests, success/failure rates, request duration histograms
 - **Connection metrics**: Active QUIC connections, HTTP/2 connection pool statistics

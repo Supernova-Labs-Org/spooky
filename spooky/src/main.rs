@@ -42,8 +42,9 @@ async fn main() {
     let uid = unsafe { libc::getuid() };
     if uid != 0 && config_yaml.listen.port < 1024 {
         eprintln!(
-            "Binding port {} requires root privileges.",
-            config_yaml.listen.port
+            "Binding privileged port {} requires root or CAP_NET_BIND_SERVICE. \
+Use a port >= 1024 for unprivileged startup.",
+            config_yaml.listen.port,
         );
         std::process::exit(1);
     }

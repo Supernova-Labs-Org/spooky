@@ -219,6 +219,9 @@ pub struct Metrics {
     pub requests_total: AtomicU64,
     pub requests_success: AtomicU64,
     pub requests_failure: AtomicU64,
+    pub health_checks_total: AtomicU64,
+    pub health_checks_success: AtomicU64,
+    pub health_checks_failure: AtomicU64,
     pub backend_timeouts: AtomicU64,
     pub backend_errors: AtomicU64,
     pub overload_shed: AtomicU64,
@@ -263,6 +266,9 @@ impl Default for Metrics {
             requests_total: AtomicU64::new(0),
             requests_success: AtomicU64::new(0),
             requests_failure: AtomicU64::new(0),
+            health_checks_total: AtomicU64::new(0),
+            health_checks_success: AtomicU64::new(0),
+            health_checks_failure: AtomicU64::new(0),
             backend_timeouts: AtomicU64::new(0),
             backend_errors: AtomicU64::new(0),
             overload_shed: AtomicU64::new(0),
@@ -286,6 +292,16 @@ impl Metrics {
 
     pub fn inc_failure(&self) {
         self.requests_failure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_health_check_success(&self) {
+        self.health_checks_total.fetch_add(1, Ordering::Relaxed);
+        self.health_checks_success.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_health_check_failure(&self) {
+        self.health_checks_total.fetch_add(1, Ordering::Relaxed);
+        self.health_checks_failure.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn inc_timeout(&self) {
@@ -379,6 +395,29 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_requests_failure {}\n",
             self.requests_failure.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_health_checks_total Total active health checks executed.\n");
+        out.push_str("# TYPE spooky_health_checks_total counter\n");
+        out.push_str(&format!(
+            "spooky_health_checks_total {}\n",
+            self.health_checks_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_health_checks_success Total successful active health checks.\n",
+        );
+        out.push_str("# TYPE spooky_health_checks_success counter\n");
+        out.push_str(&format!(
+            "spooky_health_checks_success {}\n",
+            self.health_checks_success.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_health_checks_failure Total failed active health checks.\n");
+        out.push_str("# TYPE spooky_health_checks_failure counter\n");
+        out.push_str(&format!(
+            "spooky_health_checks_failure {}\n",
+            self.health_checks_failure.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP spooky_backend_timeouts Total backend timeout events.\n");

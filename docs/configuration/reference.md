@@ -274,9 +274,14 @@ Each backend represents an upstream server that can handle requests.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `id` | string | Yes | - | Unique identifier for the backend |
-| `address` | string | Yes | - | Backend server address in `host:port` format |
+| `address` | string | Yes | - | Backend server address. Accepted forms: `host:port` (defaults to `https://`), `https://host:port`, `http://host:port` |
 | `weight` | integer | No | `100` | Load balancing weight (higher values receive more traffic) |
 | `health_check` | object | Yes | - | Health check configuration |
+
+**Address format notes:**
+- `host:port` — shorthand, treated as `https://host:port`
+- `https://host:port` — TLS connection; certificate verification is currently skipped (self-signed certs are accepted)
+- `http://host:port` — plain HTTP/1.1 only; HTTP/2 over cleartext (h2c) is not supported
 
 #### Health Check Configuration
 
@@ -606,14 +611,14 @@ upstream:
 
     backends:
       - id: "backend1"
-        address: "127.0.0.1:7001"
+        address: "https://127.0.0.1:7001"
         weight: 100
         health_check:
           path: "/health"
           interval: 5000
 
       - id: "backend2"
-        address: "127.0.0.1:7002"
+        address: "https://127.0.0.1:7002"
         weight: 50
         health_check:
           path: "/status"
@@ -628,7 +633,7 @@ upstream:
 
     backends:
       - id: "auth1"
-        address: "127.0.0.1:8001"
+        address: "https://127.0.0.1:8001"
         weight: 100
         health_check:
           path: "/health"

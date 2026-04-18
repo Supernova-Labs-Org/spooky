@@ -517,6 +517,7 @@ impl QUICListener {
                 config.performance.h2_pool_max_idle_per_backend.max(1),
                 Duration::from_millis(config.performance.h2_pool_idle_timeout_ms.max(1)),
                 Duration::from_millis(config.performance.backend_connect_timeout_ms.max(1)),
+                false,
             )),
             Arc::clone(&shared_state.metrics),
         );

@@ -35,7 +35,7 @@ impl H2Pool {
             map.insert(
                 backend,
                 BackendHandle {
-                    client: H2Client::new(max_idle_per_backend, pool_idle_timeout, connect_timeout),
+                    client: H2Client::new(max_idle_per_backend, pool_idle_timeout, connect_timeout, false),
                     inflight: Arc::new(Semaphore::new(inflight)),
                 },
             );

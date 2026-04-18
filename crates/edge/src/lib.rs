@@ -225,6 +225,10 @@ pub struct Metrics {
     pub requests_total: AtomicU64,
     pub requests_success: AtomicU64,
     pub requests_failure: AtomicU64,
+    pub request_validation_rejects: AtomicU64,
+    pub policy_denied: AtomicU64,
+    pub early_data_accepted: AtomicU64,
+    pub early_data_rejected: AtomicU64,
     pub health_checks_total: AtomicU64,
     pub health_checks_success: AtomicU64,
     pub health_checks_failure: AtomicU64,
@@ -275,6 +279,10 @@ impl Default for Metrics {
             requests_total: AtomicU64::new(0),
             requests_success: AtomicU64::new(0),
             requests_failure: AtomicU64::new(0),
+            request_validation_rejects: AtomicU64::new(0),
+            policy_denied: AtomicU64::new(0),
+            early_data_accepted: AtomicU64::new(0),
+            early_data_rejected: AtomicU64::new(0),
             health_checks_total: AtomicU64::new(0),
             health_checks_success: AtomicU64::new(0),
             health_checks_failure: AtomicU64::new(0),
@@ -304,6 +312,23 @@ impl Metrics {
 
     pub fn inc_failure(&self) {
         self.requests_failure.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_request_validation_reject(&self) {
+        self.request_validation_rejects
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_policy_denied(&self) {
+        self.policy_denied.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_early_data_accepted(&self) {
+        self.early_data_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_early_data_rejected(&self) {
+        self.early_data_rejected.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn inc_health_check_success(&self) {
@@ -419,6 +444,38 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_requests_failure {}\n",
             self.requests_failure.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_request_validation_rejects Total requests rejected by protocol validation.\n",
+        );
+        out.push_str("# TYPE spooky_request_validation_rejects counter\n");
+        out.push_str(&format!(
+            "spooky_request_validation_rejects {}\n",
+            self.request_validation_rejects.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_policy_denied Total requests denied by runtime method/path policies.\n",
+        );
+        out.push_str("# TYPE spooky_policy_denied counter\n");
+        out.push_str(&format!(
+            "spooky_policy_denied {}\n",
+            self.policy_denied.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_early_data_accepted Total requests accepted in early data.\n");
+        out.push_str("# TYPE spooky_early_data_accepted counter\n");
+        out.push_str(&format!(
+            "spooky_early_data_accepted {}\n",
+            self.early_data_accepted.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_early_data_rejected Total requests rejected in early data.\n");
+        out.push_str("# TYPE spooky_early_data_rejected counter\n");
+        out.push_str(&format!(
+            "spooky_early_data_rejected {}\n",
+            self.early_data_rejected.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP spooky_health_checks_total Total active health checks executed.\n");

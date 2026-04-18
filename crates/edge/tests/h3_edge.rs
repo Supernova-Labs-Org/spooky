@@ -988,3 +988,209 @@ fn normal_traffic_below_rate_limit_is_unaffected() {
         REQUEST_COUNT
     );
 }
+
+// ---------------------------------------------------------------------------
+// Connection-lifecycle churn stress test (task 4.3)
+//
+// Runs many connect/request/disconnect cycles and asserts that no orphaned
+// entries are left in connections, cid_routes, peer_routes, or the radix trie.
+// ---------------------------------------------------------------------------
+
+/// Build a QUIC client config suitable for stress rounds.
+fn make_quic_client_config() -> quiche::Config {
+    let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).expect("quiche config");
+    cfg.verify_peer(false);
+    cfg.set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .expect("alpn");
+    // Use a short idle timeout so dropped sockets get cleaned up quickly.
+    cfg.set_max_idle_timeout(500);
+    cfg.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    cfg.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    cfg.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    cfg.set_initial_max_stream_data_bidi_local(QUIC_INITIAL_STREAM_DATA);
+    cfg.set_initial_max_stream_data_bidi_remote(QUIC_INITIAL_STREAM_DATA);
+    cfg.set_initial_max_stream_data_uni(QUIC_INITIAL_STREAM_DATA);
+    cfg.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    cfg.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+    cfg.set_disable_active_migration(true);
+    cfg
+}
+
+/// Connect to `server_addr` and drive the QUIC handshake until established.
+/// Returns `(socket, local_addr, conn, h3)` on success, or an error string.
+fn stress_connect(
+    server_addr: std::net::SocketAddr,
+) -> Result<
+    (
+        UdpSocket,
+        std::net::SocketAddr,
+        quiche::Connection,
+        quiche::h3::Connection,
+    ),
+    String,
+> {
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let local_addr = socket.local_addr().map_err(|e| e.to_string())?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .map_err(|e| e.to_string())?;
+
+    let mut cfg = make_quic_client_config();
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+
+    let mut conn =
+        quiche::connect(Some("localhost"), &scid, local_addr, server_addr, &mut cfg)
+            .map_err(|e| format!("connect: {e:?}"))?;
+
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    let (w, si) = conn.send(&mut out).map_err(|e| format!("send: {e:?}"))?;
+    socket
+        .send_to(&out[..w], si.to)
+        .map_err(|e| format!("send_to: {e:?}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        loop {
+            match conn.send(&mut out) {
+                Ok((w, si)) => {
+                    let _ = socket.send_to(&out[..w], si.to);
+                }
+                Err(quiche::Error::Done) => break,
+                Err(e) => return Err(format!("send: {e:?}")),
+            }
+        }
+
+        if conn.is_established() {
+            break;
+        }
+
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr })
+                    .map_err(|e| format!("recv: {e:?}"))?;
+            }
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                conn.on_timeout();
+            }
+            Err(e) => return Err(format!("recv: {e:?}")),
+        }
+
+        if Instant::now() > deadline {
+            return Err("handshake timeout".to_string());
+        }
+    }
+
+    let h3_cfg = quiche::h3::Config::new().map_err(|e| format!("h3 cfg: {e:?}"))?;
+    let h3 = quiche::h3::Connection::with_transport(&mut conn, &h3_cfg)
+        .map_err(|e| format!("h3 conn: {e:?}"))?;
+
+    Ok((socket, local_addr, conn, h3))
+}
+
+/// Send a graceful QUIC CONNECTION_CLOSE and flush.
+fn stress_close_gracefully(
+    socket: &UdpSocket,
+    conn: &mut quiche::Connection,
+) {
+    let _ = conn.close(false, 0, b"done");
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    loop {
+        match conn.send(&mut out) {
+            Ok((w, si)) => {
+                let _ = socket.send_to(&out[..w], si.to);
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+/// Stress test: repeatedly connect, optionally complete a request, then close
+/// or abruptly drop.  After all rounds the listener maps must be fully empty.
+#[test]
+fn lifecycle_churn_leaves_no_orphaned_state() {
+    const ROUNDS: usize = 30;
+    // Idle timeout matches the client config (500 ms).
+    const IDLE_MS: u64 = 500;
+
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend("ok\n"));
+
+    let mut config = make_config(0, cert, key, backend_addr.to_string());
+    // Match the client-side idle timeout so both sides agree.
+    config.performance.quic_max_idle_timeout_ms = IDLE_MS;
+    // Generous limits so the stress loop is never rate-limited.
+    config.performance.new_connections_per_sec = 10_000;
+    config.performance.new_connections_burst = 1_000;
+
+    let listener = Arc::new(Mutex::new(
+        QUICListener::new(config).expect("failed to create listener"),
+    ));
+    let server_addr = listener.lock().unwrap().socket.local_addr().unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = stop.clone();
+    let listener_poll = listener.clone();
+    let poll_handle = thread::spawn(move || {
+        while !stop_flag.load(Ordering::Relaxed) {
+            if let Ok(mut g) = listener_poll.lock() {
+                g.poll();
+            }
+        }
+    });
+
+    for round in 0..ROUNDS {
+        let (socket, _local_addr, mut conn, _h3) =
+            stress_connect(server_addr).unwrap_or_else(|e| panic!("round {round}: connect: {e}"));
+
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .expect("set_read_timeout");
+
+        // Even rounds close gracefully; odd rounds abruptly drop the socket.
+        if round % 2 == 0 {
+            stress_close_gracefully(&socket, &mut conn);
+        }
+        // Odd rounds: drop socket and conn; server detects via idle timeout.
+    }
+
+    // Allow the idle timeout (500 ms) to fire and the listener to sweep all
+    // timed-out connections.  We wait 3× idle timeout for safety margin.
+    thread::sleep(Duration::from_millis(IDLE_MS * 3));
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = poll_handle.join();
+
+    // Drive one final poll to flush any remaining close/sweep work.
+    if let Ok(mut g) = listener.lock() {
+        for _ in 0..20 {
+            g.poll();
+        }
+    }
+
+    let guard = listener.lock().expect("listener lock");
+    assert_cid_sync_invariants(&guard);
+    assert!(
+        guard.connections.is_empty(),
+        "connections must be empty after churn, found {} entries",
+        guard.connections.len()
+    );
+    assert!(
+        guard.cid_routes.is_empty(),
+        "cid_routes must be empty after churn, found {} entries",
+        guard.cid_routes.len()
+    );
+    assert!(
+        guard.peer_routes.is_empty(),
+        "peer_routes must be empty after churn, found {} entries",
+        guard.peer_routes.len()
+    );
+}

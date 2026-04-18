@@ -313,6 +313,108 @@ fn resolve_primary_from_radix_prefix<T>(
     None
 }
 
+/// Remove all routing index entries for a connection that is being torn down.
+///
+/// Cleans `cid_routes`, `cid_radix`, and `peer_routes` for both the primary
+/// SCID and every alias SCID in `routing_scids`.  Extracted as a free
+/// function so it can be exercised in unit tests without a full
+/// `QUICListener` instance.
+pub(crate) fn purge_connection_routes(
+    cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+    cid_radix: &mut CidRadix,
+    peer_routes: &mut HashMap<std::net::SocketAddr, Arc<[u8]>>,
+    primary_scid: &Arc<[u8]>,
+    routing_scids: &std::collections::HashSet<Arc<[u8]>>,
+    peer_address: &std::net::SocketAddr,
+) {
+    cid_radix.remove(primary_scid.as_ref());
+    cid_routes.remove(primary_scid.as_ref());
+    for cid in routing_scids {
+        cid_radix.remove(cid.as_ref());
+        cid_routes.remove(cid.as_ref());
+    }
+    peer_routes.remove(peer_address);
+}
+
+/// Routing metadata extracted from a connection for use during cleanup.
+/// Kept as a plain struct so `sweep_closed_connections` is testable without
+/// a real `quiche::Connection`.
+pub(crate) struct ConnectionRoutes {
+    pub primary_scid: Arc<[u8]>,
+    pub routing_scids: std::collections::HashSet<Arc<[u8]>>,
+    pub peer_address: std::net::SocketAddr,
+}
+
+impl From<&crate::QuicConnection> for ConnectionRoutes {
+    fn from(c: &crate::QuicConnection) -> Self {
+        Self {
+            primary_scid: Arc::clone(&c.primary_scid),
+            routing_scids: c.routing_scids.clone(),
+            peer_address: c.peer_address,
+        }
+    }
+}
+
+/// Remove every SCID in `to_remove` from `connections` and all routing
+/// indexes.  Called from `handle_timeouts` after the closed-connection scan
+/// and extracted here so the removal sweep can be tested without a live
+/// `QUICListener`.
+pub(crate) fn sweep_closed_connections<C, F>(
+    connections: &mut HashMap<Arc<[u8]>, C>,
+    cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+    cid_radix: &mut CidRadix,
+    peer_routes: &mut HashMap<std::net::SocketAddr, Arc<[u8]>>,
+    to_remove: Vec<Arc<[u8]>>,
+    routes_of: F,
+) where
+    F: Fn(&C) -> ConnectionRoutes,
+{
+    for scid in to_remove {
+        if let Some(connection) = connections.remove(&scid) {
+            let routes = routes_of(&connection);
+            purge_connection_routes(
+                cid_routes,
+                cid_radix,
+                peer_routes,
+                &routes.primary_scid,
+                &routes.routing_scids,
+                &routes.peer_address,
+            );
+        }
+    }
+}
+
+/// Deterministically tear down a single stream's in-flight resources.
+///
+/// Drops resources in an order that minimises wasted work:
+/// 1. `body_tx` — signals EOF/cancellation to the upstream H2 task so it
+///    stops reading the request body and exits promptly.
+/// 2. `upstream_result_rx` — dropping the oneshot receiver tells the
+///    upstream task that nobody is listening; `result_tx.send()` in the
+///    spawned task returns `Err` and the task exits.
+/// 3. `response_chunk_rx` — dropping the mpsc receiver causes the
+///    body-pump task's next `chunk_tx.send().await` to return `Err`
+///    and the task exits.
+/// 4. `pending_chunk` — discard any backpressured chunk.
+/// 5. All permits (`global`, `upstream`, `adaptive`, `route_queue`) —
+///    released last so the concurrency slots open up only after we know
+///    no more work is queued.
+///
+/// Returns the phase the stream was in at the time of abort (useful for
+/// logging and metrics at the call site).
+pub(crate) fn abort_stream(req: &mut RequestEnvelope) -> StreamPhase {
+    let phase = req.phase.clone();
+    req.body_tx = None;
+    req.upstream_result_rx = None;
+    req.response_chunk_rx = None;
+    req.pending_chunk = None;
+    req.global_inflight_permit = None;
+    req.upstream_inflight_permit = None;
+    req.adaptive_admission_permit = None;
+    req.route_queue_permit = None;
+    phase
+}
+
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let shared_state = Arc::new(Self::build_shared_state(&config)?);
@@ -874,13 +976,14 @@ impl QUICListener {
     }
 
     fn remove_connection_routes(&mut self, connection: &QuicConnection) {
-        self.cid_radix.remove(connection.primary_scid.as_ref());
-        self.cid_routes.remove(connection.primary_scid.as_ref());
-        for cid in &connection.routing_scids {
-            self.cid_radix.remove(cid.as_ref());
-            self.cid_routes.remove(cid.as_ref());
-        }
-        self.peer_routes.remove(&connection.peer_address);
+        purge_connection_routes(
+            &mut self.cid_routes,
+            &mut self.cid_radix,
+            &mut self.peer_routes,
+            &connection.primary_scid,
+            &connection.routing_scids,
+            &connection.peer_address,
+        );
     }
 
     fn sync_connection_routes(&mut self, connection: &mut QuicConnection) -> Arc<[u8]> {
@@ -1217,7 +1320,10 @@ impl QUICListener {
 
             if connection.last_activity.elapsed() >= timeout {
                 connection.quic.on_timeout();
-                connection.last_activity = Instant::now();
+                // Do NOT reset last_activity here: only real packet I/O
+                // resets it.  Resetting on timeout would prevent quiche
+                // from receiving on_timeout() again during the drain
+                // period, causing draining connections to linger.
                 Self::flush_send(&self.socket, &mut send_buf, connection);
             }
 
@@ -1248,11 +1354,14 @@ impl QUICListener {
             }
         }
 
-        for scid in to_remove {
-            if let Some(connection) = self.connections.remove(&scid) {
-                self.remove_connection_routes(&connection);
-            }
-        }
+        sweep_closed_connections(
+            &mut self.connections,
+            &mut self.cid_routes,
+            &mut self.cid_radix,
+            &mut self.peer_routes,
+            to_remove,
+            |c| ConnectionRoutes::from(c),
+        );
     }
 
     fn handle_timeout(socket: &UdpSocket, send_buf: &mut [u8], connection: &mut QuicConnection) {
@@ -2083,7 +2192,14 @@ impl QUICListener {
                         // by advance_streams_non_blocking, called unconditionally below.
                     }
                 }
-                Ok((stream_id, quiche::h3::Event::Reset(_))) => {
+                Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
+                    if let Some(req) = connection.streams.get_mut(&stream_id) {
+                        let phase = abort_stream(req);
+                        debug!(
+                            "stream {} reset by client (error_code={}, phase={:?}): resources released",
+                            stream_id, error_code, phase
+                        );
+                    }
                     connection.streams.remove(&stream_id);
                 }
                 Ok((_stream_id, quiche::h3::Event::PriorityUpdate)) => {}
@@ -2167,6 +2283,9 @@ impl QUICListener {
                 resilience
                     .adaptive_admission
                     .observe(req.start.elapsed(), true);
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    abort_stream(req);
+                }
                 streams.remove(&stream_id);
                 continue;
             }
@@ -2519,6 +2638,9 @@ impl QUICListener {
                                 .adaptive_admission
                                 .observe(req.start.elapsed(), true);
                         }
+                        if let Some(req) = streams.get_mut(&stream_id) {
+                            abort_stream(req);
+                        }
                         streams.remove(&stream_id);
                         continue;
                     }
@@ -2734,6 +2856,9 @@ impl QUICListener {
 
             // ── 5: remove terminal streams ────────────────────────────────────
             if terminal {
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    abort_stream(req);
+                }
                 streams.remove(&stream_id);
             }
         }
@@ -3555,7 +3680,13 @@ mod tests {
 
     use crate::cid_radix::CidRadix;
 
-    use super::{TokenBucket, resolve_primary_from_radix_prefix};
+    use std::collections::HashSet;
+    use std::net::SocketAddr;
+
+    use super::{
+        ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,
+        resolve_primary_from_radix_prefix, sweep_closed_connections,
+    };
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
@@ -3692,5 +3823,567 @@ mod tests {
             "fresh bucket must yield exactly burst={} tokens in a tight loop, got {}",
             burst, consumed
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // purge_connection_routes / idle-timeout cleanup regression tests
+    // -----------------------------------------------------------------------
+
+    fn peer(port: u16) -> SocketAddr {
+        format!("127.0.0.1:{}", port).parse().unwrap()
+    }
+
+    fn populated_routing_maps(
+        primary: &Arc<[u8]>,
+        aliases: &[Arc<[u8]>],
+        addr: SocketAddr,
+    ) -> (
+        HashMap<Arc<[u8]>, Arc<[u8]>>,
+        CidRadix,
+        HashMap<SocketAddr, Arc<[u8]>>,
+    ) {
+        let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
+
+        cid_radix.insert(Arc::clone(primary));
+        for alias in aliases {
+            cid_routes.insert(Arc::clone(alias), Arc::clone(primary));
+            cid_radix.insert(Arc::clone(alias));
+        }
+        peer_routes.insert(addr, Arc::clone(primary));
+
+        (cid_routes, cid_radix, peer_routes)
+    }
+
+    #[test]
+    fn purge_removes_primary_radix_entry() {
+        let primary = cid(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let addr = peer(4433);
+        let (mut cid_routes, mut cid_radix, mut peer_routes) =
+            populated_routing_maps(&primary, &[], addr);
+
+        purge_connection_routes(
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            &primary,
+            &HashSet::new(),
+            &addr,
+        );
+
+        assert!(
+            cid_radix.longest_prefix_match(primary.as_ref()).is_none(),
+            "primary SCID must be removed from radix after cleanup"
+        );
+        assert!(
+            peer_routes.get(&addr).is_none(),
+            "peer_routes entry must be removed after cleanup"
+        );
+    }
+
+    #[test]
+    fn purge_removes_all_alias_entries() {
+        let primary = cid(&[0xAA; 8]);
+        let alias1 = cid(&[0xBB; 8]);
+        let alias2 = cid(&[0xCC; 8]);
+        let addr = peer(4434);
+
+        let aliases = [Arc::clone(&alias1), Arc::clone(&alias2)];
+        let (mut cid_routes, mut cid_radix, mut peer_routes) =
+            populated_routing_maps(&primary, &aliases, addr);
+
+        let routing_scids: HashSet<Arc<[u8]>> = aliases.iter().cloned().collect();
+        purge_connection_routes(
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            &primary,
+            &routing_scids,
+            &addr,
+        );
+
+        assert!(
+            cid_routes.get(alias1.as_ref()).is_none(),
+            "alias1 must be removed from cid_routes"
+        );
+        assert!(
+            cid_routes.get(alias2.as_ref()).is_none(),
+            "alias2 must be removed from cid_routes"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias1.as_ref()).is_none(),
+            "alias1 must be removed from radix"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias2.as_ref()).is_none(),
+            "alias2 must be removed from radix"
+        );
+        assert!(
+            peer_routes.get(&addr).is_none(),
+            "peer_routes entry must be removed"
+        );
+    }
+
+    #[test]
+    fn repeated_purge_churn_leaves_no_stale_entries() {
+        // Simulate repeated connect/timeout/disconnect cycles on distinct
+        // connections to verify no entries from prior connections bleed
+        // across cycles.
+        let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
+
+        for i in 0u8..20 {
+            let primary = cid(&[i, i, i, i, i, i, i, i]);
+            let alias = cid(&[i | 0x80, i | 0x80, i | 0x80, i | 0x80,
+                               i | 0x80, i | 0x80, i | 0x80, i | 0x80]);
+            let addr = peer(5000 + u16::from(i));
+
+            // Register
+            cid_radix.insert(Arc::clone(&primary));
+            cid_radix.insert(Arc::clone(&alias));
+            cid_routes.insert(Arc::clone(&alias), Arc::clone(&primary));
+            peer_routes.insert(addr, Arc::clone(&primary));
+
+            // Tear down
+            let routing_scids: HashSet<Arc<[u8]>> = [Arc::clone(&alias)].into_iter().collect();
+            purge_connection_routes(
+                &mut cid_routes,
+                &mut cid_radix,
+                &mut peer_routes,
+                &primary,
+                &routing_scids,
+                &addr,
+            );
+        }
+
+        assert!(cid_routes.is_empty(), "cid_routes must be empty after all connections torn down");
+        assert!(peer_routes.is_empty(), "peer_routes must be empty after all connections torn down");
+    }
+
+    #[test]
+    fn purge_is_idempotent() {
+        // Calling purge twice for the same connection must not panic or leave
+        // phantom entries.
+        let primary = cid(&[0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80]);
+        let alias = cid(&[0x11, 0x21, 0x31, 0x41, 0x51, 0x61, 0x71, 0x81]);
+        let addr = peer(4440);
+
+        let (mut cid_routes, mut cid_radix, mut peer_routes) =
+            populated_routing_maps(&primary, &[Arc::clone(&alias)], addr);
+
+        let routing_scids: HashSet<Arc<[u8]>> = [Arc::clone(&alias)].into_iter().collect();
+
+        for _ in 0..2 {
+            purge_connection_routes(
+                &mut cid_routes,
+                &mut cid_radix,
+                &mut peer_routes,
+                &primary,
+                &routing_scids,
+                &addr,
+            );
+        }
+
+        assert!(cid_routes.is_empty(), "cid_routes must be empty after double purge");
+        assert!(peer_routes.is_empty(), "peer_routes must be empty after double purge");
+    }
+
+    // -----------------------------------------------------------------------
+    // sweep_closed_connections churn tests
+    //
+    // These tests simulate the handle_timeouts removal sweep end-to-end:
+    // connections are registered in all routing maps, marked as timed-out
+    // (placed in to_remove), and swept via sweep_closed_connections.  After
+    // each cycle the invariant is that no stale entries remain in any map.
+    // -----------------------------------------------------------------------
+
+    /// Minimal stand-in for QuicConnection — holds only the routing fields
+    /// that sweep_closed_connections needs.
+    struct StubConn {
+        primary_scid: Arc<[u8]>,
+        routing_scids: HashSet<Arc<[u8]>>,
+        peer_address: SocketAddr,
+    }
+
+    fn stub_routes(c: &StubConn) -> ConnectionRoutes {
+        ConnectionRoutes {
+            primary_scid: Arc::clone(&c.primary_scid),
+            routing_scids: c.routing_scids.clone(),
+            peer_address: c.peer_address,
+        }
+    }
+
+    fn register_stub(
+        conn: &StubConn,
+        connections: &mut HashMap<Arc<[u8]>, StubConn>,
+        cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
+        cid_radix: &mut CidRadix,
+        peer_routes: &mut HashMap<SocketAddr, Arc<[u8]>>,
+    ) {
+        cid_radix.insert(Arc::clone(&conn.primary_scid));
+        for alias in &conn.routing_scids {
+            if alias.as_ref() != conn.primary_scid.as_ref() {
+                cid_routes.insert(Arc::clone(alias), Arc::clone(&conn.primary_scid));
+                cid_radix.insert(Arc::clone(alias));
+            }
+        }
+        peer_routes.insert(conn.peer_address, Arc::clone(&conn.primary_scid));
+    }
+
+    fn assert_maps_empty(
+        label: &str,
+        connections: &HashMap<Arc<[u8]>, StubConn>,
+        cid_routes: &HashMap<Arc<[u8]>, Arc<[u8]>>,
+        peer_routes: &HashMap<SocketAddr, Arc<[u8]>>,
+    ) {
+        assert!(connections.is_empty(), "{}: connections must be empty", label);
+        assert!(cid_routes.is_empty(), "{}: cid_routes must be empty", label);
+        assert!(peer_routes.is_empty(), "{}: peer_routes must be empty", label);
+    }
+
+    #[test]
+    fn sweep_removes_timed_out_connection_and_all_routes() {
+        let primary = cid(&[0x01; 8]);
+        let alias = cid(&[0x02; 8]);
+        let addr = peer(6000);
+
+        let conn = StubConn {
+            primary_scid: Arc::clone(&primary),
+            routing_scids: [Arc::clone(&primary), Arc::clone(&alias)].into_iter().collect(),
+            peer_address: addr,
+        };
+
+        let mut connections: HashMap<Arc<[u8]>, StubConn> = HashMap::new();
+        let mut cid_routes = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes = HashMap::new();
+
+        register_stub(&conn, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        connections.insert(Arc::clone(&primary), conn);
+
+        sweep_closed_connections(
+            &mut connections,
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            vec![Arc::clone(&primary)],
+            stub_routes,
+        );
+
+        assert_maps_empty("after single sweep", &connections, &cid_routes, &peer_routes);
+        assert!(
+            cid_radix.longest_prefix_match(primary.as_ref()).is_none(),
+            "primary must be removed from radix"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(alias.as_ref()).is_none(),
+            "alias must be removed from radix"
+        );
+    }
+
+    #[test]
+    fn sweep_repeated_timeout_churn_leaves_no_stale_entries() {
+        // Simulate N rounds of: connect → timeout → sweep.  After every round
+        // all four routing maps must be fully empty — no entries from prior
+        // connections bleed into subsequent rounds.
+        let rounds = 30usize;
+
+        let mut connections: HashMap<Arc<[u8]>, StubConn> = HashMap::new();
+        let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
+
+        for i in 0..rounds {
+            let b = i as u8;
+            let primary = cid(&[b, b, b, b, b, b, b, b]);
+            let alias1 = cid(&[b | 0x80, b | 0x80, b | 0x80, b | 0x80,
+                                b | 0x80, b | 0x80, b | 0x80, b | 0x80]);
+            let addr = peer(7000 + i as u16);
+
+            let conn = StubConn {
+                primary_scid: Arc::clone(&primary),
+                routing_scids: [Arc::clone(&primary), Arc::clone(&alias1)]
+                    .into_iter()
+                    .collect(),
+                peer_address: addr,
+            };
+
+            register_stub(&conn, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+            connections.insert(Arc::clone(&primary), conn);
+
+            // Simulate handle_timeouts detecting this connection as closed.
+            sweep_closed_connections(
+                &mut connections,
+                &mut cid_routes,
+                &mut cid_radix,
+                &mut peer_routes,
+                vec![Arc::clone(&primary)],
+                stub_routes,
+            );
+
+            assert_maps_empty(
+                &format!("round {}", i),
+                &connections,
+                &cid_routes,
+                &peer_routes,
+            );
+        }
+    }
+
+    #[test]
+    fn sweep_partial_batch_clears_only_removed_entries() {
+        // Two connections registered; only one timed out.  After sweep the
+        // surviving connection's entries must remain intact.
+        let p1 = cid(&[0xA1; 8]);
+        let p2 = cid(&[0xB1; 8]);
+        let addr1 = peer(8001);
+        let addr2 = peer(8002);
+
+        let conn1 = StubConn {
+            primary_scid: Arc::clone(&p1),
+            routing_scids: [Arc::clone(&p1)].into_iter().collect(),
+            peer_address: addr1,
+        };
+        let conn2 = StubConn {
+            primary_scid: Arc::clone(&p2),
+            routing_scids: [Arc::clone(&p2)].into_iter().collect(),
+            peer_address: addr2,
+        };
+
+        let mut connections: HashMap<Arc<[u8]>, StubConn> = HashMap::new();
+        let mut cid_routes = HashMap::new();
+        let mut cid_radix = CidRadix::new();
+        let mut peer_routes = HashMap::new();
+
+        register_stub(&conn1, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        register_stub(&conn2, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        connections.insert(Arc::clone(&p1), conn1);
+        connections.insert(Arc::clone(&p2), conn2);
+
+        // Only p1 times out.
+        sweep_closed_connections(
+            &mut connections,
+            &mut cid_routes,
+            &mut cid_radix,
+            &mut peer_routes,
+            vec![Arc::clone(&p1)],
+            stub_routes,
+        );
+
+        assert!(
+            !connections.contains_key(p1.as_ref()),
+            "timed-out connection must be removed"
+        );
+        assert!(
+            connections.contains_key(p2.as_ref()),
+            "surviving connection must remain in connections"
+        );
+        assert!(
+            peer_routes.get(&addr2).is_some(),
+            "surviving connection peer_route must remain"
+        );
+        assert!(
+            peer_routes.get(&addr1).is_none(),
+            "timed-out connection peer_route must be removed"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(p2.as_ref()).is_some(),
+            "surviving connection must remain in radix"
+        );
+        assert!(
+            cid_radix.longest_prefix_match(p1.as_ref()).is_none(),
+            "timed-out connection must be removed from radix"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // abort_stream / stream teardown path tests (4.2)
+    //
+    // These tests exercise the three teardown paths defined in the
+    // connection-lifecycle spec:
+    //   (A) client reset before upstream response  (ReceivingRequest /
+    //       AwaitingUpstream phase)
+    //   (B) client reset during upstream body streaming (SendingResponse)
+    //   (C) upstream timeout / error
+    //
+    // Each test asserts that abort_stream releases all held resources
+    // deterministically: permits are dropped, channels are closed, and
+    // pending chunks are discarded.
+    // -----------------------------------------------------------------------
+
+    use crate::{RequestEnvelope, StreamPhase};
+    use crate::resilience::{AdaptiveAdmission, RouteQueueLimiter};
+    use std::time::Instant;
+    use tokio::sync::{Semaphore, mpsc, oneshot};
+
+    fn make_envelope(phase: StreamPhase) -> RequestEnvelope {
+        RequestEnvelope {
+            method: "GET".into(),
+            path: "/".into(),
+            authority: None,
+            body_tx: None,
+            body_buf: std::collections::VecDeque::new(),
+            body_buf_bytes: 0,
+            body_bytes_received: 0,
+            backend_addr: None,
+            backend_index: None,
+            upstream_name: None,
+            global_inflight_permit: None,
+            upstream_inflight_permit: None,
+            adaptive_admission_permit: None,
+            route_queue_permit: None,
+            start: Instant::now(),
+            total_request_deadline: Instant::now() + std::time::Duration::from_secs(30),
+            bodyless_mode: false,
+            phase,
+            request_fin_received: false,
+            upstream_result_rx: None,
+            response_chunk_rx: None,
+            response_headers_sent: false,
+            pending_chunk: None,
+        }
+    }
+
+    /// Path A: client reset before upstream response (ReceivingRequest phase).
+    /// Verifies permits are released and body_tx is dropped.
+    #[test]
+    fn abort_stream_receiving_request_releases_permits() {
+        let global_sem = Arc::new(Semaphore::new(1));
+        let upstream_sem = Arc::new(Semaphore::new(1));
+        let adaptive = Arc::new(AdaptiveAdmission::new(false, 1, 100, 1, 1, 1000));
+        let route_limiter = Arc::new(RouteQueueLimiter::new(100, 1000, Default::default()));
+
+        let global_permit = global_sem.clone().try_acquire_owned().unwrap();
+        let upstream_permit = upstream_sem.clone().try_acquire_owned().unwrap();
+        let adaptive_permit = adaptive.try_acquire().unwrap();
+        let route_permit = route_limiter.try_acquire("test").unwrap();
+
+        let (body_tx, body_rx) = mpsc::channel::<bytes::Bytes>(4);
+
+        let mut req = make_envelope(StreamPhase::ReceivingRequest);
+        req.global_inflight_permit = Some(global_permit);
+        req.upstream_inflight_permit = Some(upstream_permit);
+        req.adaptive_admission_permit = Some(adaptive_permit);
+        req.route_queue_permit = Some(route_permit);
+        req.body_tx = Some(body_tx);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::ReceivingRequest);
+
+        // Permits released: semaphores should be available again.
+        assert_eq!(global_sem.available_permits(), 1, "global semaphore must be freed");
+        assert_eq!(upstream_sem.available_permits(), 1, "upstream semaphore must be freed");
+
+        // body_tx dropped: body_rx should see the channel as disconnected.
+        drop(body_rx); // safe to drop receiver — just checking channel is closed
+
+        // All option fields cleared.
+        assert!(req.global_inflight_permit.is_none());
+        assert!(req.upstream_inflight_permit.is_none());
+        assert!(req.adaptive_admission_permit.is_none());
+        assert!(req.route_queue_permit.is_none());
+        assert!(req.body_tx.is_none());
+    }
+
+    /// Path A (variant): client reset while awaiting upstream response.
+    /// Dropping upstream_result_rx cancels the oneshot — the upstream task's
+    /// send will return Err and it will exit.
+    #[test]
+    fn abort_stream_awaiting_upstream_cancels_oneshot() {
+        let (result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
+
+        let mut req = make_envelope(StreamPhase::AwaitingUpstream);
+        req.upstream_result_rx = Some(result_rx);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::AwaitingUpstream);
+        assert!(req.upstream_result_rx.is_none(), "oneshot receiver must be cleared");
+
+        // Sending on the now-orphaned sender should return Err (closed).
+        let send_result = result_tx.send(Err(spooky_errors::ProxyError::Transport(
+            "test".into(),
+        )));
+        assert!(
+            send_result.is_err(),
+            "upstream task send must fail after receiver dropped"
+        );
+    }
+
+    /// Path B: client reset during body streaming (SendingResponse phase).
+    /// Dropping response_chunk_rx causes the body-pump task's next send to
+    /// return Err, making the task exit promptly.
+    #[test]
+    fn abort_stream_sending_response_closes_chunk_channel() {
+        let (chunk_tx, chunk_rx) = mpsc::channel::<crate::ResponseChunk>(4);
+
+        let mut req = make_envelope(StreamPhase::SendingResponse);
+        req.response_chunk_rx = Some(chunk_rx);
+        req.pending_chunk = Some(crate::ResponseChunk::End);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::SendingResponse);
+        assert!(req.response_chunk_rx.is_none(), "chunk receiver must be cleared");
+        assert!(req.pending_chunk.is_none(), "pending chunk must be discarded");
+
+        // The body-pump task's sender should observe a closed channel.
+        let send_result = chunk_tx.try_send(crate::ResponseChunk::End);
+        assert!(
+            send_result.is_err(),
+            "body-pump task send must fail after receiver dropped"
+        );
+    }
+
+    /// Path C: upstream timeout / error tears down all resources regardless
+    /// of which fields are populated.
+    #[test]
+    fn abort_stream_upstream_error_releases_all_resources() {
+        let global_sem = Arc::new(Semaphore::new(2));
+        let upstream_sem = Arc::new(Semaphore::new(2));
+
+        let global_permit = global_sem.clone().try_acquire_owned().unwrap();
+        let upstream_permit = upstream_sem.clone().try_acquire_owned().unwrap();
+
+        let (_result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
+        let (chunk_tx, chunk_rx) = mpsc::channel::<crate::ResponseChunk>(4);
+
+        let mut req = make_envelope(StreamPhase::SendingResponse);
+        req.global_inflight_permit = Some(global_permit);
+        req.upstream_inflight_permit = Some(upstream_permit);
+        req.upstream_result_rx = Some(result_rx);
+        req.response_chunk_rx = Some(chunk_rx);
+        req.pending_chunk = Some(crate::ResponseChunk::End);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::SendingResponse);
+        assert_eq!(global_sem.available_permits(), 2, "global semaphore must be fully freed");
+        assert_eq!(upstream_sem.available_permits(), 2, "upstream semaphore must be fully freed");
+        assert!(req.upstream_result_rx.is_none());
+        assert!(req.response_chunk_rx.is_none());
+        assert!(req.pending_chunk.is_none());
+
+        // Body-pump task sender sees closed channel.
+        assert!(chunk_tx.try_send(crate::ResponseChunk::End).is_err());
+    }
+
+    /// Verify abort_stream is idempotent: calling it twice must not panic or
+    /// double-decrement any semaphore.
+    #[test]
+    fn abort_stream_is_idempotent() {
+        let global_sem = Arc::new(Semaphore::new(1));
+        let permit = global_sem.clone().try_acquire_owned().unwrap();
+
+        let mut req = make_envelope(StreamPhase::ReceivingRequest);
+        req.global_inflight_permit = Some(permit);
+
+        abort_stream(&mut req);
+        abort_stream(&mut req); // second call must be a no-op
+
+        assert_eq!(global_sem.available_permits(), 1, "must not double-release permit");
     }
 }

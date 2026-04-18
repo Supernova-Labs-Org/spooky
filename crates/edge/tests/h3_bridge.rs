@@ -2967,3 +2967,460 @@ fn response_body_cap_returns_503_on_unknown_length_breach() {
         "unknown-length cap breach should terminate with HTTP error, not stream reset"
     );
 }
+
+// ── Teardown path integration tests (4.2) ───────────────────────────────────
+//
+// These tests exercise the three wire-level teardown paths at the real QUIC
+// protocol layer.  Each test sends a real QUIC+H3 request, triggers a reset
+// or error mid-stream, then verifies the server recovers cleanly by serving a
+// subsequent request on the same connection without any stuck-stream symptoms.
+
+/// Helper: build a minimal quiche QUIC client connected to `addr`.
+/// Returns (socket, quic conn, h3 conn).  The h3 layer is negotiated inside.
+fn make_quic_client(
+    addr: SocketAddr,
+) -> Result<
+    (
+        std::net::UdpSocket,
+        std::net::SocketAddr,
+        quiche::Connection,
+        quiche::h3::Connection,
+    ),
+    String,
+> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+    let local_addr = socket.local_addr().map_err(|e| e.to_string())?;
+
+    let mut qconfig =
+        quiche::Config::new(quiche::PROTOCOL_VERSION).map_err(|e| format!("config: {e:?}"))?;
+    qconfig.verify_peer(false);
+    qconfig
+        .set_application_protos(quiche::h3::APPLICATION_PROTOCOL)
+        .map_err(|e| format!("alpn: {e:?}"))?;
+    qconfig.set_max_idle_timeout(QUIC_IDLE_TIMEOUT_MS);
+    qconfig.set_max_recv_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_max_send_udp_payload_size(MAX_UDP_PAYLOAD_BYTES);
+    qconfig.set_initial_max_data(QUIC_INITIAL_MAX_DATA);
+    let stream_win = QUIC_INITIAL_STREAM_DATA.saturating_add(128 * 1024);
+    qconfig.set_initial_max_stream_data_bidi_local(stream_win);
+    qconfig.set_initial_max_stream_data_bidi_remote(stream_win);
+    qconfig.set_initial_max_stream_data_uni(stream_win);
+    qconfig.set_initial_max_streams_bidi(QUIC_INITIAL_MAX_STREAMS_BIDI);
+    qconfig.set_initial_max_streams_uni(QUIC_INITIAL_MAX_STREAMS_UNI);
+    qconfig.set_disable_active_migration(true);
+
+    let mut scid_bytes = [0u8; quiche::MAX_CONN_ID_LEN];
+    rand::thread_rng().fill_bytes(&mut scid_bytes);
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+    let mut conn = quiche::connect(Some("localhost"), &scid, local_addr, addr, &mut qconfig)
+        .map_err(|e| format!("connect: {e:?}"))?;
+
+    let h3_config = quiche::h3::Config::new().map_err(|e| format!("h3: {e:?}"))?;
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    // Initial packet.
+    let (w, si) = conn.send(&mut out).map_err(|e| format!("initial send: {e:?}"))?;
+    socket.send_to(&out[..w], si.to).map_err(|e| e.to_string())?;
+
+    let deadline = Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS);
+    loop {
+        loop {
+            match conn.send(&mut out) {
+                Ok((w, si)) => { let _ = socket.send_to(&out[..w], si.to); }
+                Err(quiche::Error::Done) => break,
+                Err(e) => return Err(format!("send: {e:?}")),
+            }
+        }
+        if conn.is_established() {
+            break;
+        }
+        socket.set_read_timeout(Some(quic_read_timeout(&conn))).ok();
+        match socket.recv_from(&mut buf) {
+            Ok((len, from)) => {
+                conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr })
+                    .map_err(|e| format!("recv: {e:?}"))?;
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                conn.on_timeout();
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+        if Instant::now() > deadline {
+            return Err("handshake timeout".into());
+        }
+    }
+
+    let h3 = quiche::h3::Connection::with_transport(&mut conn, &h3_config)
+        .map_err(|e| format!("h3 layer: {e:?}"))?;
+    Ok((socket, local_addr, conn, h3))
+}
+
+/// Flush QUIC send buffer to the socket.
+fn flush_quic(
+    conn: &mut quiche::Connection,
+    socket: &std::net::UdpSocket,
+    out: &mut [u8],
+) {
+    loop {
+        match conn.send(out) {
+            Ok((w, si)) => { let _ = socket.send_to(&out[..w], si.to); }
+            Err(quiche::Error::Done) => break,
+            Err(_) => break,
+        }
+    }
+}
+
+/// Pump the QUIC event loop until `target_sid` finishes/resets OR `deadline`
+/// passes.  Collects H3 status/finished/reset events.  Returns true if done.
+fn pump_h3_until(
+    conn: &mut quiche::Connection,
+    h3: &mut quiche::h3::Connection,
+    socket: &std::net::UdpSocket,
+    local_addr: std::net::SocketAddr,
+    out: &mut [u8],
+    buf: &mut [u8],
+    target_sid: u64,
+    deadline: Instant,
+    events: &mut Vec<String>,
+) -> bool {
+    while Instant::now() < deadline {
+        flush_quic(conn, socket, out);
+        socket.set_read_timeout(Some(quic_read_timeout(conn))).ok();
+        match socket.recv_from(buf) {
+            Ok((len, from)) => {
+                let _ = conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr });
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                conn.on_timeout();
+            }
+            Err(_) => {}
+        }
+        loop {
+            match h3.poll(conn) {
+                Ok((sid, quiche::h3::Event::Headers { list, .. })) if sid == target_sid => {
+                    for h in &list {
+                        if h.name() == b":status" {
+                            events.push(format!("status:{}", String::from_utf8_lossy(h.value())));
+                        }
+                    }
+                }
+                Ok((sid, quiche::h3::Event::Data)) if sid == target_sid => {
+                    // consume body without storing
+                    let mut tmp = [0u8; 4096];
+                    while h3.recv_body(conn, sid, &mut tmp).is_ok() {}
+                    events.push("data".into());
+                }
+                Ok((sid, quiche::h3::Event::Finished)) if sid == target_sid => {
+                    events.push("finished".into());
+                    return true;
+                }
+                Ok((sid, quiche::h3::Event::Reset(_))) if sid == target_sid => {
+                    events.push("reset".into());
+                    return true;
+                }
+                Ok(_) => {}
+                Err(quiche::h3::Error::Done) => break,
+                Err(_) => break,
+            }
+        }
+    }
+    false
+}
+
+/// Teardown path A: client sends RESET_STREAM before the upstream has responded.
+///
+/// Uses `global_inflight_limit = 1` so the inflight permit is the only one
+/// available.  If `abort_stream` does not release it on reset, the follow-up
+/// `/fast` request on a fresh connection is rejected with 503 (inflight full)
+/// instead of 200. Passing means the wire-level reset propagated and resources
+/// were freed.
+#[test]
+fn teardown_client_reset_before_upstream_response() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    // Single inflight slot: a leaked permit means the follow-up is rejected.
+    config.performance.global_inflight_limit = 1;
+
+    let listener = QUICListener::new(config).expect("listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _guard = ListenerTaskGuard::spawn(&rt, listener);
+
+    let (socket, local_addr, mut conn, mut h3) =
+        make_quic_client(listen_addr).expect("quic client");
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    // POST to /slow with fin=false so the write side stays open.
+    // Then immediately call stream_shutdown(Write) to send RESET_STREAM.
+    // The server is in ReceivingRequest at reset time (before it forwards to
+    // upstream), which exercises the AwaitingUpstream/ReceivingRequest teardown path.
+    let slow_headers = vec![
+        quiche::h3::Header::new(b":method", b"POST"),
+        quiche::h3::Header::new(b":scheme", b"https"),
+        quiche::h3::Header::new(b":authority", b"localhost"),
+        quiche::h3::Header::new(b":path", b"/slow"),
+        quiche::h3::Header::new(b"content-length", b"100"),
+    ];
+    let slow_sid = h3
+        .send_request(&mut conn, &slow_headers, false) // fin=false: write side stays open
+        .expect("send_request /slow");
+
+    // Flush so headers reach the server, then shut down the write side.
+    // This sends RESET_STREAM while the server is still in ReceivingRequest.
+    flush_quic(&mut conn, &socket, &mut out);
+    conn.stream_shutdown(slow_sid, quiche::Shutdown::Write, 0)
+        .expect("stream_shutdown");
+    flush_quic(&mut conn, &socket, &mut out);
+
+    // Pump briefly so the listener processes the reset and calls abort_stream.
+    let pump_end = Instant::now() + Duration::from_millis(200);
+    let mut discard = Vec::new();
+    pump_h3_until(
+        &mut conn, &mut h3, &socket, local_addr,
+        &mut out, &mut buf, slow_sid, pump_end, &mut discard,
+    );
+
+    // Follow-up /fast on a fresh connection. This avoids coupling the assertion
+    // to the original stream state machine on the same connection while still
+    // proving the inflight permit was released.
+    let followup = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/fast"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("follow-up /fast request failed");
+    let fast = observation_for(&followup, "/fast");
+    assert!(
+        fast.status.as_deref() == Some("200"),
+        "expected 200 from /fast; 503/timeout means the inflight permit was not released on reset. \
+         observed status={:?}",
+        fast.status
+    );
+}
+
+/// Teardown path B: connection dropped while the server is streaming the
+/// response body (SendingResponse phase).
+///
+/// Uses `global_inflight_limit = 1` and `/long-stream` (4×220ms chunks).
+/// The first QUIC connection receives response headers (server now in
+/// SendingResponse) then drops abruptly — simulating the client disappearing
+/// mid-stream.  The server must release the inflight permit via the timeout/
+/// connection-close path so a *new* connection can immediately serve a request.
+/// If the permit leaks, the second connection's /fast request gets 503.
+#[test]
+fn teardown_client_reset_during_response_streaming() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    // Single inflight slot: a leaked permit means the follow-up is rejected.
+    config.performance.global_inflight_limit = 1;
+    // Short QUIC idle timeout so the server tears down the abandoned stream fast.
+    config.performance.quic_max_idle_timeout_ms = 300;
+
+    let listener = QUICListener::new(config).expect("listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _guard = ListenerTaskGuard::spawn(&rt, listener);
+
+    // ── First connection: GET /stream, receive first body chunk, then drop ────
+    {
+        let (socket, local_addr, mut conn, mut h3) =
+            make_quic_client(listen_addr).expect("quic client");
+        let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+        let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+        let headers = vec![
+            quiche::h3::Header::new(b":method", b"GET"),
+            quiche::h3::Header::new(b":scheme", b"https"),
+            quiche::h3::Header::new(b":authority", b"localhost"),
+            quiche::h3::Header::new(b":path", b"/stream"),
+        ];
+        let stream_sid = h3
+            .send_request(&mut conn, &headers, true)
+            .expect("send_request /stream");
+        flush_quic(&mut conn, &socket, &mut out);
+
+        // Wait for first response data chunk — this guarantees the server is in
+        // SendingResponse and actively streaming.
+        let data_deadline = Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS);
+        let mut got_data = false;
+        'wait: loop {
+            flush_quic(&mut conn, &socket, &mut out);
+            socket.set_read_timeout(Some(quic_read_timeout(&conn))).ok();
+            match socket.recv_from(&mut buf) {
+                Ok((len, from)) => {
+                    let _ = conn.recv(
+                        &mut buf[..len],
+                        quiche::RecvInfo { from, to: local_addr },
+                    );
+                }
+                Err(ref e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    conn.on_timeout();
+                }
+                Err(_) => {}
+            }
+            loop {
+                match h3.poll(&mut conn) {
+                    Ok((sid, quiche::h3::Event::Data)) if sid == stream_sid => {
+                        let mut tmp = [0u8; 4096];
+                        while h3.recv_body(&mut conn, sid, &mut tmp).is_ok() {}
+                        got_data = true;
+                        break 'wait;
+                    }
+                    Ok((sid, quiche::h3::Event::Finished)) if sid == stream_sid => {
+                        panic!("stream finished before teardown point");
+                    }
+                    Ok(_) => {}
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(_) => break,
+                }
+            }
+            if Instant::now() > data_deadline {
+                panic!("timed out waiting for /stream response data");
+            }
+        }
+        assert!(got_data, "must receive response data before dropping connection");
+        // Connection drops here (socket + conn out of scope) — server is left
+        // in SendingResponse with an orphaned body-pump task.
+    }
+
+    // Wait for the server to detect the idle timeout and tear down the stream.
+    // quic_max_idle_timeout_ms=300ms + some margin for the poll loop.
+    std::thread::sleep(Duration::from_millis(600));
+
+    // ── Second connection: /fast must succeed ──────────────────────────────
+    // If the inflight permit was not released, this request gets 503.
+    let (socket2, local_addr2, mut conn2, mut h3_2) =
+        make_quic_client(listen_addr).expect("second quic client");
+    let mut out2 = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf2 = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    let fast_headers = vec![
+        quiche::h3::Header::new(b":method", b"GET"),
+        quiche::h3::Header::new(b":scheme", b"https"),
+        quiche::h3::Header::new(b":authority", b"localhost"),
+        quiche::h3::Header::new(b":path", b"/fast"),
+    ];
+    let fast_sid = h3_2
+        .send_request(&mut conn2, &fast_headers, true)
+        .expect("send_request /fast on second connection");
+
+    let mut events = Vec::new();
+    let done = pump_h3_until(
+        &mut conn2, &mut h3_2, &socket2, local_addr2,
+        &mut out2, &mut buf2, fast_sid,
+        Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS + 2),
+        &mut events,
+    );
+
+    assert!(
+        done,
+        "second-connection /fast must complete; timeout means inflight permit leaked \
+         from the abandoned SendingResponse stream"
+    );
+    assert!(
+        events.iter().any(|e| e.starts_with("status:200")),
+        "expected 200; 503 means the global inflight permit was not released. \
+         events={events:?}"
+    );
+}
+
+/// Teardown path C: upstream connection times out.
+///
+/// The client requests `/timeout` which sleeps longer than the configured
+/// backend timeout.  The server must send a 503 and clean up all stream
+/// resources.  A subsequent /fast request on the same connection must succeed.
+#[test]
+fn teardown_upstream_timeout_cleans_up_stream() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    // Use a short timeout so the test doesn't wait long.
+    config.performance.backend_timeout_ms = 200;
+
+    let listener = QUICListener::new(config).expect("listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _guard = ListenerTaskGuard::spawn(&rt, listener);
+
+    let (socket, local_addr, mut conn, mut h3) =
+        make_quic_client(listen_addr).expect("quic client");
+    let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
+    let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
+
+    // Step 1: send /timeout request and wait for the 503 error response.
+    let timeout_headers = vec![
+        quiche::h3::Header::new(b":method", b"GET"),
+        quiche::h3::Header::new(b":scheme", b"https"),
+        quiche::h3::Header::new(b":authority", b"localhost"),
+        quiche::h3::Header::new(b":path", b"/timeout"),
+    ];
+    let timeout_sid = h3
+        .send_request(&mut conn, &timeout_headers, true)
+        .expect("send_request /timeout");
+
+    let mut timeout_events = Vec::new();
+    // backend_timeout_ms=200ms + some margin for the listener to respond
+    let done = pump_h3_until(
+        &mut conn,
+        &mut h3,
+        &socket,
+        local_addr,
+        &mut out,
+        &mut buf,
+        timeout_sid,
+        Instant::now() + Duration::from_secs(5),
+        &mut timeout_events,
+    );
+    assert!(done, "timeout stream must finish (with 503)");
+    assert!(
+        timeout_events.iter().any(|e| e.starts_with("status:503")),
+        "timeout must produce 503, got: {timeout_events:?}"
+    );
+
+    // Step 2: follow-up /fast on the same connection — proves the timeout
+    // teardown released all resources and the connection is still alive.
+    let fast_headers = vec![
+        quiche::h3::Header::new(b":method", b"GET"),
+        quiche::h3::Header::new(b":scheme", b"https"),
+        quiche::h3::Header::new(b":authority", b"localhost"),
+        quiche::h3::Header::new(b":path", b"/fast"),
+    ];
+    let fast_sid = h3
+        .send_request(&mut conn, &fast_headers, true)
+        .expect("send_request /fast after timeout");
+
+    let mut fast_events = Vec::new();
+    let done = pump_h3_until(
+        &mut conn,
+        &mut h3,
+        &socket,
+        local_addr,
+        &mut out,
+        &mut buf,
+        fast_sid,
+        Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS + 2),
+        &mut fast_events,
+    );
+    assert!(done, "follow-up /fast request must complete after timeout teardown");
+    assert!(
+        fast_events.iter().any(|e| e.starts_with("status:200")),
+        "follow-up request must receive 200, got: {fast_events:?}"
+    );
+}

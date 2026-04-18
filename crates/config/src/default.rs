@@ -194,6 +194,14 @@ pub fn resilience_default_route_queue_default_cap() -> usize {
     512
 }
 
+pub fn resilience_default_route_queue_global_cap() -> usize {
+    2048
+}
+
+pub fn resilience_default_route_queue_shed_retry_after_seconds() -> u32 {
+    1
+}
+
 pub fn resilience_default_cb_enabled() -> bool {
     true
 }

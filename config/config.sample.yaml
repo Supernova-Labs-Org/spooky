@@ -98,6 +98,8 @@ resilience:
         high_latency_ms: 250
     route_queue:
         default_cap: 512
+        global_cap: 2048
+        shed_retry_after_seconds: 1
         caps: {}
     circuit_breaker:
         enabled: true

@@ -29,6 +29,8 @@ use crate::default::{
     resilience_default_cb_open_ms, resilience_default_hedging_delay_ms,
     resilience_default_hedging_enabled, resilience_default_retry_budget_enabled,
     resilience_default_retry_budget_ratio_percent, resilience_default_route_queue_default_cap,
+    resilience_default_route_queue_global_cap,
+    resilience_default_route_queue_shed_retry_after_seconds,
     resilience_default_watchdog_check_interval_ms, resilience_default_watchdog_drain_grace_ms,
     resilience_default_watchdog_enabled, resilience_default_watchdog_min_requests_per_window,
     resilience_default_watchdog_overload_inflight_percent,
@@ -357,6 +359,10 @@ impl Default for AdaptiveAdmission {
 pub struct RouteQueue {
     #[serde(default = "resilience_default_route_queue_default_cap")]
     pub default_cap: usize,
+    #[serde(default = "resilience_default_route_queue_global_cap")]
+    pub global_cap: usize,
+    #[serde(default = "resilience_default_route_queue_shed_retry_after_seconds")]
+    pub shed_retry_after_seconds: u32,
     #[serde(default)]
     pub caps: HashMap<String, usize>,
 }
@@ -365,6 +371,8 @@ impl Default for RouteQueue {
     fn default() -> Self {
         Self {
             default_cap: resilience_default_route_queue_default_cap(),
+            global_cap: resilience_default_route_queue_global_cap(),
+            shed_retry_after_seconds: resilience_default_route_queue_shed_retry_after_seconds(),
             caps: HashMap::new(),
         }
     }

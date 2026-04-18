@@ -105,33 +105,57 @@ impl Drop for AdaptivePermit {
 
 pub struct RouteQueueLimiter {
     default_cap: usize,
+    global_cap: usize,
     caps: HashMap<String, usize>,
-    inflight: Mutex<HashMap<String, usize>>,
+    inflight: Mutex<RouteQueueState>,
+}
+
+#[derive(Default)]
+struct RouteQueueState {
+    total: usize,
+    by_route: HashMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RouteQueueRejection {
+    GlobalCap,
+    RouteCap,
 }
 
 impl RouteQueueLimiter {
-    pub fn new(default_cap: usize, caps: HashMap<String, usize>) -> Self {
+    pub fn new(default_cap: usize, global_cap: usize, caps: HashMap<String, usize>) -> Self {
         Self {
             default_cap: default_cap.max(1),
+            global_cap: global_cap.max(1),
             caps,
-            inflight: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(RouteQueueState::default()),
         }
     }
 
-    pub fn try_acquire(self: &Arc<Self>, route: &str) -> Option<RouteQueuePermit> {
+    pub fn try_acquire(
+        self: &Arc<Self>,
+        route: &str,
+    ) -> Result<RouteQueuePermit, RouteQueueRejection> {
         let cap = self
             .caps
             .get(route)
             .copied()
             .unwrap_or(self.default_cap)
             .max(1);
-        let mut guard = self.inflight.lock().ok()?;
-        let current = guard.get(route).copied().unwrap_or(0);
-        if current >= cap {
-            return None;
+        let mut guard = self
+            .inflight
+            .lock()
+            .map_err(|_| RouteQueueRejection::GlobalCap)?;
+        if guard.total >= self.global_cap {
+            return Err(RouteQueueRejection::GlobalCap);
         }
-        guard.insert(route.to_string(), current + 1);
-        Some(RouteQueuePermit {
+        let current = guard.by_route.get(route).copied().unwrap_or(0);
+        if current >= cap {
+            return Err(RouteQueueRejection::RouteCap);
+        }
+        guard.total = guard.total.saturating_add(1);
+        guard.by_route.insert(route.to_string(), current + 1);
+        Ok(RouteQueuePermit {
             limiter: Arc::clone(self),
             route: route.to_string(),
         })
@@ -146,12 +170,13 @@ pub struct RouteQueuePermit {
 impl Drop for RouteQueuePermit {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.limiter.inflight.lock()
-            && let Some(current) = guard.get_mut(&self.route)
+            && let Some(current) = guard.by_route.get_mut(&self.route)
         {
             *current = current.saturating_sub(1);
             if *current == 0 {
-                guard.remove(&self.route);
+                guard.by_route.remove(&self.route);
             }
+            guard.total = guard.total.saturating_sub(1);
         }
     }
 }
@@ -395,6 +420,7 @@ pub struct RuntimeResilience {
     pub circuit_breakers: Arc<CircuitBreakers>,
     pub retry_budget: Arc<RetryBudget>,
     pub brownout: Arc<BrownoutController>,
+    pub shed_retry_after_seconds: u32,
     pub hedging_enabled: bool,
     pub hedging_delay: Duration,
     safe_methods: HashSet<String>,
@@ -414,6 +440,7 @@ impl RuntimeResilience {
         ));
         let route_queue = Arc::new(RouteQueueLimiter::new(
             config.route_queue.default_cap,
+            config.route_queue.global_cap,
             config.route_queue.caps.clone(),
         ));
         let cb = &config.circuit_breaker;
@@ -454,6 +481,7 @@ impl RuntimeResilience {
             circuit_breakers,
             retry_budget,
             brownout,
+            shed_retry_after_seconds: config.route_queue.shed_retry_after_seconds.max(1),
             hedging_enabled: config.hedging.enabled,
             hedging_delay: Duration::from_millis(config.hedging.delay_ms.max(1)),
             safe_methods,
@@ -489,9 +517,23 @@ mod tests {
 
     #[test]
     fn route_queue_cap_enforced() {
-        let limiter = Arc::new(RouteQueueLimiter::new(1, HashMap::new()));
+        let limiter = Arc::new(RouteQueueLimiter::new(1, 10, HashMap::new()));
         let _p1 = limiter.try_acquire("api").expect("first permit");
-        assert!(limiter.try_acquire("api").is_none());
+        assert!(matches!(
+            limiter.try_acquire("api"),
+            Err(RouteQueueRejection::RouteCap)
+        ));
+    }
+
+    #[test]
+    fn route_queue_global_cap_enforced() {
+        let limiter = Arc::new(RouteQueueLimiter::new(10, 2, HashMap::new()));
+        let _p1 = limiter.try_acquire("api").expect("first permit");
+        let _p2 = limiter.try_acquire("admin").expect("second permit");
+        assert!(matches!(
+            limiter.try_acquire("api"),
+            Err(RouteQueueRejection::GlobalCap)
+        ));
     }
 
     #[test]

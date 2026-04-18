@@ -49,7 +49,7 @@ use crate::{
         scid_rotation_interval,
     },
     outcome_from_status,
-    resilience::RuntimeResilience,
+    resilience::{RouteQueueRejection, RuntimeResilience},
     route_index::RouteIndex,
     watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
@@ -1215,12 +1215,12 @@ impl QUICListener {
                                     request_start.elapsed(),
                                     RouteOutcome::OverloadShed,
                                 );
-                                Self::send_simple_response(
+                                Self::send_overload_response(
                                     h3,
                                     &mut connection.quic,
                                     stream_id,
-                                    http::StatusCode::SERVICE_UNAVAILABLE,
                                     b"brownout active, non-core route shed\n",
+                                    resilience.shed_retry_after_seconds,
                                 )?;
                                 resilience
                                     .adaptive_admission
@@ -1239,12 +1239,12 @@ impl QUICListener {
                                         request_start.elapsed(),
                                         RouteOutcome::OverloadShed,
                                     );
-                                    Self::send_simple_response(
+                                    Self::send_overload_response(
                                         h3,
                                         &mut connection.quic,
                                         stream_id,
-                                        http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"adaptive admission overload\n",
+                                        resilience.shed_retry_after_seconds,
                                     )?;
                                     resilience
                                         .adaptive_admission
@@ -1255,8 +1255,8 @@ impl QUICListener {
 
                             let route_queue_permit =
                                 match resilience.route_queue.try_acquire(&upstream_name) {
-                                    Some(permit) => permit,
-                                    None => {
+                                    Ok(permit) => permit,
+                                    Err(RouteQueueRejection::RouteCap) => {
                                         metrics.inc_failure();
                                         metrics.inc_overload_shed();
                                         metrics.record_route(
@@ -1264,12 +1264,32 @@ impl QUICListener {
                                             request_start.elapsed(),
                                             RouteOutcome::OverloadShed,
                                         );
-                                        Self::send_simple_response(
+                                        Self::send_overload_response(
                                             h3,
                                             &mut connection.quic,
                                             stream_id,
-                                            http::StatusCode::SERVICE_UNAVAILABLE,
                                             b"route queue cap exceeded\n",
+                                            resilience.shed_retry_after_seconds,
+                                        )?;
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(request_start.elapsed(), true);
+                                        continue;
+                                    }
+                                    Err(RouteQueueRejection::GlobalCap) => {
+                                        metrics.inc_failure();
+                                        metrics.inc_overload_shed();
+                                        metrics.record_route(
+                                            &upstream_name,
+                                            request_start.elapsed(),
+                                            RouteOutcome::OverloadShed,
+                                        );
+                                        Self::send_overload_response(
+                                            h3,
+                                            &mut connection.quic,
+                                            stream_id,
+                                            b"global queue cap exceeded\n",
+                                            resilience.shed_retry_after_seconds,
                                         )?;
                                         resilience
                                             .adaptive_admission
@@ -1289,12 +1309,12 @@ impl QUICListener {
                                             request_start.elapsed(),
                                             RouteOutcome::OverloadShed,
                                         );
-                                        Self::send_simple_response(
+                                        Self::send_overload_response(
                                             h3,
                                             &mut connection.quic,
                                             stream_id,
-                                            http::StatusCode::SERVICE_UNAVAILABLE,
                                             b"overloaded, retry later\n",
+                                            resilience.shed_retry_after_seconds,
                                         )?;
                                         resilience
                                             .adaptive_admission
@@ -1316,12 +1336,12 @@ impl QUICListener {
                                                 request_start.elapsed(),
                                                 RouteOutcome::OverloadShed,
                                             );
-                                            Self::send_simple_response(
+                                            Self::send_overload_response(
                                                 h3,
                                                 &mut connection.quic,
                                                 stream_id,
-                                                http::StatusCode::SERVICE_UNAVAILABLE,
                                                 b"upstream overloaded, retry later\n",
+                                                resilience.shed_retry_after_seconds,
                                             )?;
                                             resilience
                                                 .adaptive_admission
@@ -1364,12 +1384,12 @@ impl QUICListener {
                                         request_start.elapsed(),
                                         RouteOutcome::OverloadShed,
                                     );
-                                    Self::send_simple_response(
+                                    Self::send_overload_response(
                                         h3,
                                         &mut connection.quic,
                                         stream_id,
-                                        http::StatusCode::SERVICE_UNAVAILABLE,
                                         b"backend overloaded, retry later\n",
+                                        resilience.shed_retry_after_seconds,
                                     )?;
                                     resilience
                                         .adaptive_admission
@@ -1775,12 +1795,12 @@ impl QUICListener {
                                     req.start.elapsed(),
                                     RouteOutcome::OverloadShed,
                                 );
-                                Self::send_simple_response(
+                                Self::send_overload_response(
                                     h3,
                                     &mut connection.quic,
                                     stream_id,
-                                    http::StatusCode::SERVICE_UNAVAILABLE,
                                     b"request body backpressure overload\n",
+                                    resilience.shed_retry_after_seconds,
                                 )?;
                                 resilience
                                     .adaptive_admission
@@ -1907,6 +1927,7 @@ impl QUICListener {
                     upstream_pools,
                     routing_index,
                     metrics,
+                    resilience.shed_retry_after_seconds,
                 ) {
                     error!(
                         "failed to emit timeout response for stream {}: {:?}",
@@ -2045,6 +2066,7 @@ impl QUICListener {
                                         upstream_pools,
                                         routing_index,
                                         metrics,
+                                        resilience.shed_retry_after_seconds,
                                     ) {
                                         error!(
                                             "failed to emit protocol recovery response on stream {}: {:?}",
@@ -2244,6 +2266,7 @@ impl QUICListener {
                                 upstream_pools,
                                 routing_index,
                                 metrics,
+                                resilience.shed_retry_after_seconds,
                             ) {
                                 error!(
                                     "failed to emit recoverable forward error response on stream {}: {:?}",
@@ -2555,6 +2578,7 @@ impl QUICListener {
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
         metrics: &Metrics,
+        overload_retry_after_seconds: u32,
     ) -> Result<(), quiche::h3::Error> {
         let start = req.start;
         let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
@@ -2624,12 +2648,12 @@ impl QUICListener {
                     backend_addr,
                     start.elapsed().as_millis()
                 );
-                Self::send_simple_response(
+                Self::send_overload_response(
                     h3,
                     quic,
                     stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
                     b"backend overloaded, retry later\n",
+                    overload_retry_after_seconds,
                 )
             }
             Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
@@ -2642,12 +2666,12 @@ impl QUICListener {
                     backend_addr,
                     start.elapsed().as_millis()
                 );
-                Self::send_simple_response(
+                Self::send_overload_response(
                     h3,
                     quic,
                     stream_id,
-                    http::StatusCode::SERVICE_UNAVAILABLE,
                     b"backend circuit open, retry later\n",
+                    overload_retry_after_seconds,
                 )
             }
             Err(ProxyError::Transport(_))
@@ -2748,6 +2772,29 @@ impl QUICListener {
         let resp_headers = vec![
             quiche::h3::Header::new(b":status", status.as_str().as_bytes()),
             quiche::h3::Header::new(b"content-type", b"text/plain"),
+            quiche::h3::Header::new(b"content-length", body.len().to_string().as_bytes()),
+        ];
+
+        h3.send_response(quic, stream_id, &resp_headers, false)?;
+        h3.send_body(quic, stream_id, body, true)?;
+        Ok(())
+    }
+
+    fn send_overload_response(
+        h3: &mut quiche::h3::Connection,
+        quic: &mut quiche::Connection,
+        stream_id: u64,
+        body: &[u8],
+        retry_after_seconds: u32,
+    ) -> Result<(), quiche::h3::Error> {
+        let retry_after = retry_after_seconds.max(1).to_string();
+        let resp_headers = vec![
+            quiche::h3::Header::new(
+                b":status",
+                http::StatusCode::SERVICE_UNAVAILABLE.as_str().as_bytes(),
+            ),
+            quiche::h3::Header::new(b"content-type", b"text/plain"),
+            quiche::h3::Header::new(b"retry-after", retry_after.as_bytes()),
             quiche::h3::Header::new(b"content-length", body.len().to_string().as_bytes()),
         ];
 

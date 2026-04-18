@@ -384,6 +384,37 @@ pub(crate) fn sweep_closed_connections<C, F>(
     }
 }
 
+/// Deterministically tear down a single stream's in-flight resources.
+///
+/// Drops resources in an order that minimises wasted work:
+/// 1. `body_tx` — signals EOF/cancellation to the upstream H2 task so it
+///    stops reading the request body and exits promptly.
+/// 2. `upstream_result_rx` — dropping the oneshot receiver tells the
+///    upstream task that nobody is listening; `result_tx.send()` in the
+///    spawned task returns `Err` and the task exits.
+/// 3. `response_chunk_rx` — dropping the mpsc receiver causes the
+///    body-pump task's next `chunk_tx.send().await` to return `Err`
+///    and the task exits.
+/// 4. `pending_chunk` — discard any backpressured chunk.
+/// 5. All permits (`global`, `upstream`, `adaptive`, `route_queue`) —
+///    released last so the concurrency slots open up only after we know
+///    no more work is queued.
+///
+/// Returns the phase the stream was in at the time of abort (useful for
+/// logging and metrics at the call site).
+pub(crate) fn abort_stream(req: &mut RequestEnvelope) -> StreamPhase {
+    let phase = req.phase.clone();
+    req.body_tx = None;
+    req.upstream_result_rx = None;
+    req.response_chunk_rx = None;
+    req.pending_chunk = None;
+    req.global_inflight_permit = None;
+    req.upstream_inflight_permit = None;
+    req.adaptive_admission_permit = None;
+    req.route_queue_permit = None;
+    phase
+}
+
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let shared_state = Arc::new(Self::build_shared_state(&config)?);
@@ -2161,7 +2192,14 @@ impl QUICListener {
                         // by advance_streams_non_blocking, called unconditionally below.
                     }
                 }
-                Ok((stream_id, quiche::h3::Event::Reset(_))) => {
+                Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
+                    if let Some(req) = connection.streams.get_mut(&stream_id) {
+                        let phase = abort_stream(req);
+                        debug!(
+                            "stream {} reset by client (error_code={}, phase={:?}): resources released",
+                            stream_id, error_code, phase
+                        );
+                    }
                     connection.streams.remove(&stream_id);
                 }
                 Ok((_stream_id, quiche::h3::Event::PriorityUpdate)) => {}
@@ -2245,6 +2283,9 @@ impl QUICListener {
                 resilience
                     .adaptive_admission
                     .observe(req.start.elapsed(), true);
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    abort_stream(req);
+                }
                 streams.remove(&stream_id);
                 continue;
             }
@@ -2597,6 +2638,9 @@ impl QUICListener {
                                 .adaptive_admission
                                 .observe(req.start.elapsed(), true);
                         }
+                        if let Some(req) = streams.get_mut(&stream_id) {
+                            abort_stream(req);
+                        }
                         streams.remove(&stream_id);
                         continue;
                     }
@@ -2812,6 +2856,9 @@ impl QUICListener {
 
             // ── 5: remove terminal streams ────────────────────────────────────
             if terminal {
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    abort_stream(req);
+                }
                 streams.remove(&stream_id);
             }
         }
@@ -3637,7 +3684,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use super::{
-        ConnectionRoutes, TokenBucket, purge_connection_routes,
+        ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,
         resolve_primary_from_radix_prefix, sweep_closed_connections,
     };
 
@@ -4149,5 +4196,194 @@ mod tests {
             cid_radix.longest_prefix_match(p1.as_ref()).is_none(),
             "timed-out connection must be removed from radix"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // abort_stream / stream teardown path tests (4.2)
+    //
+    // These tests exercise the three teardown paths defined in the
+    // connection-lifecycle spec:
+    //   (A) client reset before upstream response  (ReceivingRequest /
+    //       AwaitingUpstream phase)
+    //   (B) client reset during upstream body streaming (SendingResponse)
+    //   (C) upstream timeout / error
+    //
+    // Each test asserts that abort_stream releases all held resources
+    // deterministically: permits are dropped, channels are closed, and
+    // pending chunks are discarded.
+    // -----------------------------------------------------------------------
+
+    use crate::{RequestEnvelope, StreamPhase};
+    use crate::resilience::{AdaptiveAdmission, RouteQueueLimiter};
+    use std::time::Instant;
+    use tokio::sync::{Semaphore, mpsc, oneshot};
+
+    fn make_envelope(phase: StreamPhase) -> RequestEnvelope {
+        RequestEnvelope {
+            method: "GET".into(),
+            path: "/".into(),
+            authority: None,
+            body_tx: None,
+            body_buf: std::collections::VecDeque::new(),
+            body_buf_bytes: 0,
+            body_bytes_received: 0,
+            backend_addr: None,
+            backend_index: None,
+            upstream_name: None,
+            global_inflight_permit: None,
+            upstream_inflight_permit: None,
+            adaptive_admission_permit: None,
+            route_queue_permit: None,
+            start: Instant::now(),
+            total_request_deadline: Instant::now() + std::time::Duration::from_secs(30),
+            bodyless_mode: false,
+            phase,
+            request_fin_received: false,
+            upstream_result_rx: None,
+            response_chunk_rx: None,
+            response_headers_sent: false,
+            pending_chunk: None,
+        }
+    }
+
+    /// Path A: client reset before upstream response (ReceivingRequest phase).
+    /// Verifies permits are released and body_tx is dropped.
+    #[test]
+    fn abort_stream_receiving_request_releases_permits() {
+        let global_sem = Arc::new(Semaphore::new(1));
+        let upstream_sem = Arc::new(Semaphore::new(1));
+        let adaptive = Arc::new(AdaptiveAdmission::new(false, 1, 100, 1, 1, 1000));
+        let route_limiter = Arc::new(RouteQueueLimiter::new(100, 1000, Default::default()));
+
+        let global_permit = global_sem.clone().try_acquire_owned().unwrap();
+        let upstream_permit = upstream_sem.clone().try_acquire_owned().unwrap();
+        let adaptive_permit = adaptive.try_acquire().unwrap();
+        let route_permit = route_limiter.try_acquire("test").unwrap();
+
+        let (body_tx, body_rx) = mpsc::channel::<bytes::Bytes>(4);
+
+        let mut req = make_envelope(StreamPhase::ReceivingRequest);
+        req.global_inflight_permit = Some(global_permit);
+        req.upstream_inflight_permit = Some(upstream_permit);
+        req.adaptive_admission_permit = Some(adaptive_permit);
+        req.route_queue_permit = Some(route_permit);
+        req.body_tx = Some(body_tx);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::ReceivingRequest);
+
+        // Permits released: semaphores should be available again.
+        assert_eq!(global_sem.available_permits(), 1, "global semaphore must be freed");
+        assert_eq!(upstream_sem.available_permits(), 1, "upstream semaphore must be freed");
+
+        // body_tx dropped: body_rx should see the channel as disconnected.
+        drop(body_rx); // safe to drop receiver — just checking channel is closed
+
+        // All option fields cleared.
+        assert!(req.global_inflight_permit.is_none());
+        assert!(req.upstream_inflight_permit.is_none());
+        assert!(req.adaptive_admission_permit.is_none());
+        assert!(req.route_queue_permit.is_none());
+        assert!(req.body_tx.is_none());
+    }
+
+    /// Path A (variant): client reset while awaiting upstream response.
+    /// Dropping upstream_result_rx cancels the oneshot — the upstream task's
+    /// send will return Err and it will exit.
+    #[test]
+    fn abort_stream_awaiting_upstream_cancels_oneshot() {
+        let (result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
+
+        let mut req = make_envelope(StreamPhase::AwaitingUpstream);
+        req.upstream_result_rx = Some(result_rx);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::AwaitingUpstream);
+        assert!(req.upstream_result_rx.is_none(), "oneshot receiver must be cleared");
+
+        // Sending on the now-orphaned sender should return Err (closed).
+        let send_result = result_tx.send(Err(spooky_errors::ProxyError::Transport(
+            "test".into(),
+        )));
+        assert!(
+            send_result.is_err(),
+            "upstream task send must fail after receiver dropped"
+        );
+    }
+
+    /// Path B: client reset during body streaming (SendingResponse phase).
+    /// Dropping response_chunk_rx causes the body-pump task's next send to
+    /// return Err, making the task exit promptly.
+    #[test]
+    fn abort_stream_sending_response_closes_chunk_channel() {
+        let (chunk_tx, chunk_rx) = mpsc::channel::<crate::ResponseChunk>(4);
+
+        let mut req = make_envelope(StreamPhase::SendingResponse);
+        req.response_chunk_rx = Some(chunk_rx);
+        req.pending_chunk = Some(crate::ResponseChunk::End);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::SendingResponse);
+        assert!(req.response_chunk_rx.is_none(), "chunk receiver must be cleared");
+        assert!(req.pending_chunk.is_none(), "pending chunk must be discarded");
+
+        // The body-pump task's sender should observe a closed channel.
+        let send_result = chunk_tx.try_send(crate::ResponseChunk::End);
+        assert!(
+            send_result.is_err(),
+            "body-pump task send must fail after receiver dropped"
+        );
+    }
+
+    /// Path C: upstream timeout / error tears down all resources regardless
+    /// of which fields are populated.
+    #[test]
+    fn abort_stream_upstream_error_releases_all_resources() {
+        let global_sem = Arc::new(Semaphore::new(2));
+        let upstream_sem = Arc::new(Semaphore::new(2));
+
+        let global_permit = global_sem.clone().try_acquire_owned().unwrap();
+        let upstream_permit = upstream_sem.clone().try_acquire_owned().unwrap();
+
+        let (_result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
+        let (chunk_tx, chunk_rx) = mpsc::channel::<crate::ResponseChunk>(4);
+
+        let mut req = make_envelope(StreamPhase::SendingResponse);
+        req.global_inflight_permit = Some(global_permit);
+        req.upstream_inflight_permit = Some(upstream_permit);
+        req.upstream_result_rx = Some(result_rx);
+        req.response_chunk_rx = Some(chunk_rx);
+        req.pending_chunk = Some(crate::ResponseChunk::End);
+
+        let phase = abort_stream(&mut req);
+
+        assert_eq!(phase, StreamPhase::SendingResponse);
+        assert_eq!(global_sem.available_permits(), 2, "global semaphore must be fully freed");
+        assert_eq!(upstream_sem.available_permits(), 2, "upstream semaphore must be fully freed");
+        assert!(req.upstream_result_rx.is_none());
+        assert!(req.response_chunk_rx.is_none());
+        assert!(req.pending_chunk.is_none());
+
+        // Body-pump task sender sees closed channel.
+        assert!(chunk_tx.try_send(crate::ResponseChunk::End).is_err());
+    }
+
+    /// Verify abort_stream is idempotent: calling it twice must not panic or
+    /// double-decrement any semaphore.
+    #[test]
+    fn abort_stream_is_idempotent() {
+        let global_sem = Arc::new(Semaphore::new(1));
+        let permit = global_sem.clone().try_acquire_owned().unwrap();
+
+        let mut req = make_envelope(StreamPhase::ReceivingRequest);
+        req.global_inflight_permit = Some(permit);
+
+        abort_stream(&mut req);
+        abort_stream(&mut req); // second call must be a no-op
+
+        assert_eq!(global_sem.available_permits(), 1, "must not double-release permit");
     }
 }

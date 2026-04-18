@@ -108,6 +108,12 @@ fn is_hop_header(name: &str) -> bool {
 
 type ResolvedBackend = (String, String, usize, Arc<Mutex<UpstreamPool>>);
 
+struct RequestValidationResult {
+    method: String,
+    path: String,
+    authority: Option<String>,
+}
+
 fn request_content_length(headers: &[quiche::h3::Header]) -> Option<usize> {
     for header in headers {
         if !header.name().eq_ignore_ascii_case(b"content-length") {
@@ -118,6 +124,168 @@ fn request_content_length(headers: &[quiche::h3::Header]) -> Option<usize> {
         return Some(parsed);
     }
     None
+}
+
+fn validate_request_headers(
+    list: &[quiche::h3::Header],
+    resilience: &RuntimeResilience,
+) -> Result<RequestValidationResult, (http::StatusCode, &'static [u8], bool)> {
+    if list.len() > resilience.max_headers_count {
+        return Err((
+            http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            b"too many request headers\n",
+            false,
+        ));
+    }
+
+    let mut header_bytes = 0usize;
+    let mut method = None::<String>;
+    let mut path = None::<String>;
+    let mut authority = None::<String>;
+    let mut host = None::<String>;
+    let mut scheme_seen = false;
+
+    for header in list {
+        header_bytes = header_bytes.saturating_add(header.name().len() + header.value().len());
+        if header_bytes > resilience.max_headers_bytes {
+            return Err((
+                http::StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                b"request headers exceed size limit\n",
+                false,
+            ));
+        }
+
+        match header.name() {
+            b":method" => {
+                if method.is_some() {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        b"duplicate :method header\n",
+                        false,
+                    ));
+                }
+                method = Some(String::from_utf8_lossy(header.value()).to_string());
+            }
+            b":path" => {
+                if path.is_some() {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        b"duplicate :path header\n",
+                        false,
+                    ));
+                }
+                path = Some(String::from_utf8_lossy(header.value()).to_string());
+            }
+            b":authority" => {
+                if authority.is_some() {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        b"duplicate :authority header\n",
+                        false,
+                    ));
+                }
+                authority = Some(String::from_utf8_lossy(header.value()).to_string());
+            }
+            b"host" => {
+                if host.is_some() {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        b"duplicate host header\n",
+                        false,
+                    ));
+                }
+                host = Some(String::from_utf8_lossy(header.value()).to_string());
+            }
+            b":scheme" => {
+                if scheme_seen {
+                    return Err((
+                        http::StatusCode::BAD_REQUEST,
+                        b"duplicate :scheme header\n",
+                        false,
+                    ));
+                }
+                scheme_seen = true;
+            }
+            name if name.starts_with(b":") => {
+                return Err((
+                    http::StatusCode::BAD_REQUEST,
+                    b"unsupported pseudo-header\n",
+                    false,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let method = match method {
+        Some(method) => method,
+        None => {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                b"missing :method header\n",
+                false,
+            ));
+        }
+    };
+    let path = match path {
+        Some(path) => path,
+        None => {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                b"missing :path header\n",
+                false,
+            ));
+        }
+    };
+
+    if method.trim().is_empty() || method.as_bytes().iter().any(|b| b.is_ascii_whitespace()) {
+        return Err((
+            http::StatusCode::BAD_REQUEST,
+            b"invalid :method header\n",
+            false,
+        ));
+    }
+
+    if path.is_empty() || !path.starts_with('/') {
+        return Err((
+            http::StatusCode::BAD_REQUEST,
+            b"invalid :path header\n",
+            false,
+        ));
+    }
+
+    if resilience.enforce_authority_host_match
+        && let (Some(authority_value), Some(host_value)) = (authority.as_deref(), host.as_deref())
+        && !authority_value.eq_ignore_ascii_case(host_value)
+    {
+        return Err((
+            http::StatusCode::BAD_REQUEST,
+            b":authority and host headers must match\n",
+            false,
+        ));
+    }
+
+    if !resilience.method_allowed(&method) {
+        return Err((
+            http::StatusCode::METHOD_NOT_ALLOWED,
+            b"request method blocked by policy\n",
+            true,
+        ));
+    }
+
+    if resilience.path_denied(&path) {
+        return Err((
+            http::StatusCode::FORBIDDEN,
+            b"request path blocked by policy\n",
+            true,
+        ));
+    }
+
+    Ok(RequestValidationResult {
+        method,
+        path,
+        authority: authority.or(host),
+    })
 }
 
 fn resolve_primary_from_radix_prefix<T>(
@@ -553,7 +721,7 @@ impl QUICListener {
         let header = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => {
-                error!("Wrong QUIC HEADER");
+                error!("Failed to parse QUIC packet header");
                 return None;
             }
         };
@@ -843,7 +1011,7 @@ impl QUICListener {
         let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => {
-                error!("Wrong QUIC HEADER");
+                error!("Failed to parse QUIC packet header");
                 return;
             }
         };
@@ -964,11 +1132,11 @@ impl QUICListener {
         }
 
         if let Some(err) = connection.quic.peer_error() {
-            error!("🔴 Peer error: {:?}", err);
+            error!("QUIC peer error: {:?}", err);
         }
 
         if let Some(err) = connection.quic.local_error() {
-            error!("🔴 Local error: {:?}", err);
+            error!("QUIC local error: {:?}", err);
         }
 
         connection.last_activity = Instant::now();
@@ -1188,30 +1356,60 @@ impl QUICListener {
         loop {
             match h3.poll(&mut connection.quic) {
                 Ok((stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                    let mut method = String::new();
-                    let mut path = String::new();
-                    let mut authority = None;
-
-                    for header in &list {
-                        match header.name() {
-                            b":method" => {
-                                method = String::from_utf8_lossy(header.value()).to_string()
+                    let request = match validate_request_headers(&list, resilience) {
+                        Ok(request) => request,
+                        Err((status, body, is_policy)) => {
+                            metrics.inc_failure();
+                            metrics.inc_request_validation_reject();
+                            if is_policy {
+                                metrics.inc_policy_denied();
                             }
-                            b":path" => path = String::from_utf8_lossy(header.value()).to_string(),
-                            b":authority" | b"host" => {
-                                authority =
-                                    Some(String::from_utf8_lossy(header.value()).to_string())
-                            }
-                            _ => {}
+                            metrics.record_route(
+                                "unrouted",
+                                Duration::from_millis(0),
+                                RouteOutcome::Failure,
+                            );
+                            let _ = Self::send_simple_response(
+                                h3,
+                                &mut connection.quic,
+                                stream_id,
+                                status,
+                                body,
+                            );
+                            continue;
                         }
-                    }
+                    };
+                    let method = request.method;
+                    let path = request.path;
+                    let authority = request.authority;
 
-                    if !method.is_empty() && !path.is_empty() {
-                        info!("HTTP/3 request {} {}", method, path);
-                    }
+                    debug!("HTTP/3 request {} {}", method, path);
 
                     metrics.inc_total();
                     let request_start = Instant::now();
+
+                    if connection.quic.is_in_early_data() {
+                        if resilience.early_data_allowed_for(&method) {
+                            metrics.inc_early_data_accepted();
+                        } else {
+                            metrics.inc_failure();
+                            metrics.inc_early_data_rejected();
+                            metrics.inc_policy_denied();
+                            metrics.record_route(
+                                "unrouted",
+                                request_start.elapsed(),
+                                RouteOutcome::Failure,
+                            );
+                            Self::send_simple_response(
+                                h3,
+                                &mut connection.quic,
+                                stream_id,
+                                http::StatusCode::TOO_EARLY,
+                                b"request blocked by early-data policy\n",
+                            )?;
+                            continue;
+                        }
+                    }
 
                     // Route lookup — needed to start the H2 request immediately.
                     let resolved = Self::resolve_backend(
@@ -1395,7 +1593,7 @@ impl QUICListener {
                                             &mut connection.quic,
                                             stream_id,
                                             http::StatusCode::SERVICE_UNAVAILABLE,
-                                            b"no upstream throttle configured\n",
+                                            b"upstream admission limiter unavailable\n",
                                         )?;
                                         resilience
                                             .adaptive_admission
@@ -2289,7 +2487,7 @@ impl QUICListener {
                             resilience
                                 .adaptive_admission
                                 .observe(req.start.elapsed(), false);
-                            info!(
+                            debug!(
                                 "Upstream {} status {} latency_ms {}",
                                 req.backend_addr.as_deref().unwrap_or("?"),
                                 status,
@@ -2501,7 +2699,7 @@ impl QUICListener {
                                     resilience
                                         .adaptive_admission
                                         .observe(req.start.elapsed(), true);
-                                    info!(
+                                    debug!(
                                         "Upstream {} body timeout latency_ms {}",
                                         req.backend_addr.as_deref().unwrap_or("?"),
                                         req.start.elapsed().as_millis()
@@ -2584,7 +2782,7 @@ impl QUICListener {
             (idx, lb_type, backend_addr)
         };
 
-        info!("Selected backend {} via {}", backend_addr, lb_type);
+        debug!("Selected backend {} via {}", backend_addr, lb_type);
         Ok((
             upstream_name.to_string(),
             backend_addr,
@@ -2669,7 +2867,7 @@ impl QUICListener {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
-                info!(
+                debug!(
                     "Upstream {} status 400 latency_ms {}",
                     backend_addr,
                     start.elapsed().as_millis()
@@ -2683,11 +2881,11 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Pool(PoolError::BackendOverloaded(_))) => {
-                info!("Backend overloaded");
+                debug!("Backend overloaded");
                 metrics.inc_failure();
                 metrics.inc_overload_shed();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
-                info!(
+                debug!(
                     "Upstream {} status 503 latency_ms {}",
                     backend_addr,
                     start.elapsed().as_millis()
@@ -2701,11 +2899,11 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
-                info!("Backend circuit open");
+                debug!("Backend circuit open");
                 metrics.inc_failure();
                 metrics.inc_overload_shed();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
-                info!(
+                debug!(
                     "Upstream {} status 503 latency_ms {}",
                     backend_addr,
                     start.elapsed().as_millis()
@@ -2722,7 +2920,7 @@ impl QUICListener {
             | Err(ProxyError::Pool(PoolError::Send(_)))
             | Err(ProxyError::Pool(PoolError::InflightLimiterClosed))
             | Err(ProxyError::Pool(PoolError::UnknownBackend(_))) => {
-                error!("Transport error");
+                error!("Upstream transport error");
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
                         .lock()
@@ -2734,7 +2932,7 @@ impl QUICListener {
                 metrics.inc_failure();
                 metrics.inc_backend_error();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
-                info!(
+                debug!(
                     "Upstream {} status 502 latency_ms {}",
                     backend_addr,
                     start.elapsed().as_millis()
@@ -2761,7 +2959,7 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Timeout) => {
-                error!("Server timeout");
+                error!("Upstream request timed out");
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
                         .lock()
@@ -2773,7 +2971,7 @@ impl QUICListener {
                 metrics.inc_failure();
                 metrics.inc_timeout();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Timeout);
-                info!(
+                debug!(
                     "Upstream {} status 503 latency_ms {}",
                     backend_addr,
                     start.elapsed().as_millis()
@@ -2790,7 +2988,7 @@ impl QUICListener {
                 error!("TLS error: {}", err);
                 metrics.inc_failure();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
-                info!(
+                debug!(
                     "TLS error for stream {} latency_ms {}",
                     stream_id,
                     start.elapsed().as_millis()
@@ -3205,66 +3403,72 @@ impl QUICListener {
             let task_metrics = Arc::clone(&metrics);
             let handle = handle.clone();
             let supervise_metrics = Arc::clone(&task_metrics);
-            spawn_supervised_async_task(&handle, "health-check", Some(supervise_metrics), async move {
-                let interval = Duration::from_millis(health.interval.max(1));
-                let timeout = Duration::from_millis(health.timeout_ms.max(1));
-                let path: &str = if health.path.is_empty() {
-                    "/"
-                } else {
-                    &health.path
-                };
-                let endpoint = match BackendEndpoint::parse(&address) {
-                    Ok(endpoint) => endpoint,
-                    Err(err) => {
-                        error!(
-                            "disabling health checks for backend '{}' due to invalid endpoint: {}",
-                            address, err
-                        );
-                        return;
-                    }
-                };
-                let health_uri = endpoint.uri_for_path(path);
-
-                loop {
-                    tokio::time::sleep(interval).await;
-
-                    let request = match http::Request::builder()
-                        .method("GET")
-                        .uri(&health_uri)
-                        .body(BoxBody::new(Full::new(Bytes::new())))
-                    {
-                        Ok(req) => req,
-                        Err(_) => continue,
-                    };
-
-                    let result = tokio::time::timeout(timeout, health_client.send(request)).await;
-
-                    let healthy = match result {
-                        Ok(Ok(response)) => response.status().is_success(),
-                        _ => false,
-                    };
-                    if healthy {
-                        task_metrics.inc_health_check_success();
+            spawn_supervised_async_task(
+                &handle,
+                "health-check",
+                Some(supervise_metrics),
+                async move {
+                    let interval = Duration::from_millis(health.interval.max(1));
+                    let timeout = Duration::from_millis(health.timeout_ms.max(1));
+                    let path: &str = if health.path.is_empty() {
+                        "/"
                     } else {
-                        task_metrics.inc_health_check_failure();
-                    }
-
-                    let transition = match upstream_pool.lock() {
-                        Ok(mut pool) => {
-                            if healthy {
-                                pool.pool.mark_success(index)
-                            } else {
-                                pool.pool.mark_failure(index)
-                            }
-                        }
-                        Err(_) => None,
+                        &health.path
                     };
+                    let endpoint = match BackendEndpoint::parse(&address) {
+                        Ok(endpoint) => endpoint,
+                        Err(err) => {
+                            error!(
+                                "disabling health checks for backend '{}' due to invalid endpoint: {}",
+                                address, err
+                            );
+                            return;
+                        }
+                    };
+                    let health_uri = endpoint.uri_for_path(path);
 
-                    if let Some(transition) = transition {
-                        Self::log_health_transition(&address, transition);
+                    loop {
+                        tokio::time::sleep(interval).await;
+
+                        let request = match http::Request::builder()
+                            .method("GET")
+                            .uri(&health_uri)
+                            .body(BoxBody::new(Full::new(Bytes::new())))
+                        {
+                            Ok(req) => req,
+                            Err(_) => continue,
+                        };
+
+                        let result =
+                            tokio::time::timeout(timeout, health_client.send(request)).await;
+
+                        let healthy = match result {
+                            Ok(Ok(response)) => response.status().is_success(),
+                            _ => false,
+                        };
+                        if healthy {
+                            task_metrics.inc_health_check_success();
+                        } else {
+                            task_metrics.inc_health_check_failure();
+                        }
+
+                        let transition = match upstream_pool.lock() {
+                            Ok(mut pool) => {
+                                if healthy {
+                                    pool.pool.mark_success(index)
+                                } else {
+                                    pool.pool.mark_failure(index)
+                                }
+                            }
+                            Err(_) => None,
+                        };
+
+                        if let Some(transition) = transition {
+                            Self::log_health_transition(&address, transition);
+                        }
                     }
-                }
-            });
+                },
+            );
         }
     }
 }

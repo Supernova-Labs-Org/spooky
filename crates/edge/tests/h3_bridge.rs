@@ -2177,6 +2177,65 @@ fn route_queue_global_cap_sheds_excess_requests() {
 }
 
 #[test]
+fn protocol_policy_denies_disallowed_method() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.resilience.protocol.allowed_methods = vec!["GET".to_string()];
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let (status, body, _got_reset) = run_h3_client_chunked_post(
+        listen_addr,
+        "/fast",
+        0,
+        1,
+        Duration::ZERO,
+        Duration::ZERO,
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("method policy request should complete");
+    assert_eq!(status, "405");
+    assert!(
+        String::from_utf8_lossy(&body).contains("method blocked"),
+        "expected policy body in response"
+    );
+}
+
+#[test]
+fn protocol_policy_denies_blocked_path_prefix() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.resilience.protocol.denied_path_prefixes = vec!["/admin".to_string()];
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/admin/secrets"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 4),
+    )
+    .expect("path policy request should complete");
+    let denied = observation_for(&observations, "/admin/secrets");
+    assert_eq!(denied.status.as_deref(), Some("403"));
+    assert!(
+        String::from_utf8_lossy(&denied.body).contains("path blocked"),
+        "expected policy body in response"
+    );
+}
+
+#[test]
 fn upstream_inflight_limit_sheds_excess_requests() {
     let dir = tempdir().expect("failed to create temp dir");
     let (cert, key) = write_test_certs(&dir);

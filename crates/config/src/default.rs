@@ -210,6 +210,22 @@ pub fn resilience_default_route_queue_shed_retry_after_seconds() -> u32 {
     1
 }
 
+pub fn resilience_default_protocol_allow_0rtt() -> bool {
+    false
+}
+
+pub fn resilience_default_protocol_max_headers_count() -> usize {
+    128
+}
+
+pub fn resilience_default_protocol_max_headers_bytes() -> usize {
+    16 * 1024
+}
+
+pub fn resilience_default_protocol_enforce_authority_host_match() -> bool {
+    true
+}
+
 pub fn resilience_default_cb_enabled() -> bool {
     true
 }

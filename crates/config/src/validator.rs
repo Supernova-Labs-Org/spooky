@@ -265,6 +265,16 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.resilience.route_queue.global_cap == 0 {
+        error!("resilience.route_queue.global_cap must be greater than 0");
+        return false;
+    }
+
+    if config.resilience.route_queue.shed_retry_after_seconds == 0 {
+        error!("resilience.route_queue.shed_retry_after_seconds must be greater than 0");
+        return false;
+    }
+
     if config
         .resilience
         .route_queue
@@ -691,6 +701,8 @@ upstream:
         assert_eq!(cfg.observability.metrics.path, "/metrics");
         assert!(cfg.resilience.adaptive_admission.enabled);
         assert_eq!(cfg.resilience.route_queue.default_cap, 512);
+        assert_eq!(cfg.resilience.route_queue.global_cap, 2048);
+        assert_eq!(cfg.resilience.route_queue.shed_retry_after_seconds, 1);
         assert!(!cfg.resilience.watchdog.enabled);
         assert_eq!(cfg.resilience.watchdog.check_interval_ms, 1_000);
     }
@@ -802,6 +814,14 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.route_queue.global_cap = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.route_queue.shed_retry_after_seconds = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.resilience.retry_budget.ratio_percent = 101;
         assert!(!validate(&cfg));
 
@@ -859,6 +879,8 @@ upstream:
         cfg.performance.h2_pool_idle_timeout_ms = 120_000;
         cfg.performance.per_backend_inflight_limit = 32;
         cfg.resilience.route_queue.default_cap = 256;
+        cfg.resilience.route_queue.global_cap = 2048;
+        cfg.resilience.route_queue.shed_retry_after_seconds = 2;
         cfg.resilience.retry_budget.ratio_percent = 30;
         cfg.observability = Observability {
             metrics: MetricsEndpoint {

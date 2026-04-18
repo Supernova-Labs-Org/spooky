@@ -14,6 +14,7 @@ use crate::default::{
     perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
     perf_default_h2_pool_max_idle_per_backend, perf_default_max_response_body_bytes,
     perf_default_new_connections_burst, perf_default_new_connections_per_sec,
+    perf_default_packet_shard_queue_capacity, perf_default_packet_shards_per_worker,
     perf_default_per_backend_inflight_limit, perf_default_per_upstream_inflight_limit,
     perf_default_pin_workers, perf_default_quic_initial_max_data,
     perf_default_quic_initial_max_stream_data, perf_default_quic_initial_max_streams_bidi,
@@ -180,6 +181,15 @@ pub struct Performance {
     #[serde(default = "perf_default_control_plane_threads")]
     pub control_plane_threads: usize,
 
+    /// Number of packet-processing shards per bound UDP worker socket.
+    /// `1` preserves single-loop behavior; values >1 enable parallel shard workers.
+    #[serde(default = "perf_default_packet_shards_per_worker")]
+    pub packet_shards_per_worker: usize,
+
+    /// Capacity of bounded ingress queue per shard.
+    #[serde(default = "perf_default_packet_shard_queue_capacity")]
+    pub packet_shard_queue_capacity: usize,
+
     #[serde(default = "perf_default_reuseport")]
     pub reuseport: bool,
 
@@ -268,6 +278,8 @@ impl Default for Performance {
         Self {
             worker_threads: perf_default_worker_threads(),
             control_plane_threads: perf_default_control_plane_threads(),
+            packet_shards_per_worker: perf_default_packet_shards_per_worker(),
+            packet_shard_queue_capacity: perf_default_packet_shard_queue_capacity(),
             reuseport: perf_default_reuseport(),
             pin_workers: perf_default_pin_workers(),
             global_inflight_limit: perf_default_global_inflight_limit(),

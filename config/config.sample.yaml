@@ -58,6 +58,8 @@ log:
 performance:
     worker_threads: 1
     control_plane_threads: 2
+    packet_shards_per_worker: 1
+    packet_shard_queue_capacity: 2048
     reuseport: true
     pin_workers: false
     global_inflight_limit: 4096

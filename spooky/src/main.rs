@@ -4,6 +4,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
+mod runtime_guard;
+
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -64,6 +66,7 @@ async fn main() {
         config_yaml.log.file.enabled,
         &config_yaml.log.file.path,
     );
+    runtime_guard::install_panic_hook();
 
     // Validate Configurations
     if !validate_config(&config_yaml) {
@@ -174,23 +177,39 @@ async fn main() {
         }
     }
 
+    let mut worker_failed = false;
+    let mut active_worker_handles = worker_handles;
     while !shutdown.load(Ordering::Relaxed) {
+        let mut idx = 0usize;
+        while idx < active_worker_handles.len() {
+            if !active_worker_handles[idx].is_finished() {
+                idx += 1;
+                continue;
+            }
+
+            let handle = active_worker_handles.swap_remove(idx);
+            join_worker_handle(handle, &mut worker_failed);
+            if worker_failed {
+                shutdown.store(true, Ordering::Relaxed);
+                break;
+            }
+        }
+
+        if worker_failed {
+            break;
+        }
+
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    let mut worker_failed = false;
-    for handle in worker_handles {
-        match handle.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                worker_failed = true;
-                error!("Worker exited with error: {}", err);
-            }
-            Err(_) => {
-                worker_failed = true;
-                error!("Worker thread panicked");
-            }
-        }
+    for handle in active_worker_handles {
+        join_worker_handle(handle, &mut worker_failed);
+    }
+
+    let panic_count = runtime_guard::panic_count();
+    if panic_count > 0 {
+        worker_failed = true;
+        error!("Process captured {} panic(s) via panic hook", panic_count);
     }
 
     if worker_failed {
@@ -417,5 +436,22 @@ fn maybe_pin_worker(worker_idx: usize, pin_workers: bool) {
     let core_id = core_ids[worker_idx % core_ids.len()];
     if !core_affinity::set_for_current(core_id) {
         warn!("Failed to pin worker {} to core {}", worker_idx, core_id.id);
+    }
+}
+
+fn join_worker_handle(handle: thread::JoinHandle<Result<(), String>>, worker_failed: &mut bool) {
+    match handle.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            *worker_failed = true;
+            error!("Worker exited with error: {}", err);
+        }
+        Err(payload) => {
+            *worker_failed = true;
+            error!(
+                "Worker thread panicked: {}",
+                runtime_guard::panic_payload_message(payload.as_ref())
+            );
+        }
     }
 }

@@ -234,6 +234,7 @@ pub struct Metrics {
     pub watchdog_restart_requests: AtomicU64,
     pub watchdog_restart_hooks: AtomicU64,
     pub watchdog_degraded_windows: AtomicU64,
+    pub runtime_panics: AtomicU64,
     route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
 }
 
@@ -280,6 +281,7 @@ impl Default for Metrics {
             watchdog_restart_requests: AtomicU64::new(0),
             watchdog_restart_hooks: AtomicU64::new(0),
             watchdog_degraded_windows: AtomicU64::new(0),
+            runtime_panics: AtomicU64::new(0),
             route_stats_shards: shards,
         }
     }
@@ -334,6 +336,10 @@ impl Metrics {
     pub fn inc_watchdog_degraded_window(&self) {
         self.watchdog_degraded_windows
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_runtime_panic(&self) {
+        self.runtime_panics.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
@@ -461,6 +467,13 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_watchdog_restart_hooks {}\n",
             self.watchdog_restart_hooks.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_runtime_panics Total runtime task panics observed.\n");
+        out.push_str("# TYPE spooky_runtime_panics counter\n");
+        out.push_str(&format!(
+            "spooky_runtime_panics {}\n",
+            self.runtime_panics.load(Ordering::Relaxed)
         ));
 
         out.push_str(

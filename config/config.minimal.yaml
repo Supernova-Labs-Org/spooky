@@ -14,3 +14,7 @@ upstream:
         address: "http://127.0.0.1:8080"  # explicit cleartext for local/dev; omit scheme for verified HTTPS default
         health_check:
           path: "/health"
+
+performance:
+  packet_shards_per_worker: 1
+  packet_shard_queue_capacity: 2048

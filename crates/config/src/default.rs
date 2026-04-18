@@ -78,6 +78,14 @@ pub fn perf_default_control_plane_threads() -> usize {
     2
 }
 
+pub fn perf_default_packet_shards_per_worker() -> usize {
+    1
+}
+
+pub fn perf_default_packet_shard_queue_capacity() -> usize {
+    2048
+}
+
 pub fn perf_default_reuseport() -> bool {
     true
 }

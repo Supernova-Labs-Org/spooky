@@ -90,6 +90,16 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.packet_shards_per_worker == 0 {
+        error!("performance.packet_shards_per_worker must be greater than 0");
+        return false;
+    }
+
+    if config.performance.packet_shard_queue_capacity == 0 {
+        error!("performance.packet_shard_queue_capacity must be greater than 0");
+        return false;
+    }
+
     if config.performance.worker_threads > 1 && !config.performance.reuseport {
         error!("performance.reuseport must be true when performance.worker_threads > 1");
         return false;
@@ -660,6 +670,8 @@ upstream:
         let cfg: Config = serde_yaml::from_str(&yaml).expect("parse");
         assert_eq!(cfg.performance.worker_threads, 1);
         assert_eq!(cfg.performance.control_plane_threads, 2);
+        assert_eq!(cfg.performance.packet_shards_per_worker, 1);
+        assert_eq!(cfg.performance.packet_shard_queue_capacity, 2048);
         assert!(cfg.performance.reuseport);
         assert!(!cfg.performance.pin_workers);
         assert_eq!(cfg.performance.global_inflight_limit, 4096);
@@ -698,6 +710,14 @@ upstream:
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 4;
         cfg.performance.reuseport = false;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.packet_shards_per_worker = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.packet_shard_queue_capacity = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -821,6 +841,8 @@ upstream:
         let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 4;
         cfg.performance.control_plane_threads = 2;
+        cfg.performance.packet_shards_per_worker = 2;
+        cfg.performance.packet_shard_queue_capacity = 1024;
         cfg.performance.reuseport = true;
         cfg.performance.pin_workers = true;
         cfg.performance.global_inflight_limit = 10_000;

@@ -1362,7 +1362,7 @@ upstream:
 <td>string</td>
 <td>Yes</td>
 <td>-</td>
-<td>Backend server address in <code>host:port</code> format</td>
+<td>Backend server address. Accepted forms: <code>host:port</code> (defaults to <code>https://</code>), <code>https://host:port</code>, <code>http://host:port</code></td>
 </tr>
 <tr>
 <td><code>weight</code></td>
@@ -1380,6 +1380,10 @@ upstream:
 </tr>
 </tbody>
 </table></div>
+<p><strong>Address format notes:</strong>
+- <code>host:port</code> — shorthand, treated as <code>https://host:port</code>
+- <code>https://host:port</code> — TLS connection; certificate verification is currently skipped (self-signed certs are accepted)
+- <code>http://host:port</code> — plain HTTP/1.1 only; HTTP/2 over cleartext (h2c) is not supported</p>
 <h4 id="health-check-configuration">Health Check Configuration</h4>
 <p>Health checks monitor backend availability and automatically remove unhealthy backends from the pool.</p>
 <div class="table-wrapper"><table>
@@ -1921,14 +1925,14 @@ upstream:
 
     backends:
       - id: &quot;backend1&quot;
-        address: &quot;127.0.0.1:7001&quot;
+        address: &quot;https://127.0.0.1:7001&quot;
         weight: 100
         health_check:
           path: &quot;/health&quot;
           interval: 5000
 
       - id: &quot;backend2&quot;
-        address: &quot;127.0.0.1:7002&quot;
+        address: &quot;https://127.0.0.1:7002&quot;
         weight: 50
         health_check:
           path: &quot;/status&quot;
@@ -1943,7 +1947,7 @@ upstream:
 
     backends:
       - id: &quot;auth1&quot;
-        address: &quot;127.0.0.1:8001&quot;
+        address: &quot;https://127.0.0.1:8001&quot;
         weight: 100
         health_check:
           path: &quot;/health&quot;

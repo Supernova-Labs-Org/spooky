@@ -1,4 +1,7 @@
-.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify bench-micro bench-macro bench-gate bench-promote-baseline
+.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify certs-dir bench-micro bench-macro bench-gate bench-promote-baseline
+
+CERTS_DIR := certs
+SAN_CONF := $(CERTS_DIR)/san.conf
 
 run:
 	make build
@@ -20,7 +23,38 @@ test-transport:
 	sudo cargo test -p spooky-transport
 
 # Certificate generation targets
-certs-selfsigned:
+certs-dir:
+	mkdir -p $(CERTS_DIR)
+
+$(SAN_CONF): | certs-dir
+	@if [ ! -f "$(SAN_CONF)" ]; then \
+		echo "[req]" > "$(SAN_CONF)"; \
+		echo "default_bits = 2048" >> "$(SAN_CONF)"; \
+		echo "prompt = no" >> "$(SAN_CONF)"; \
+		echo "default_md = sha256" >> "$(SAN_CONF)"; \
+		echo "distinguished_name = req_distinguished_name" >> "$(SAN_CONF)"; \
+		echo "req_extensions = v3_req" >> "$(SAN_CONF)"; \
+		echo "" >> "$(SAN_CONF)"; \
+		echo "[req_distinguished_name]" >> "$(SAN_CONF)"; \
+		echo "C = US" >> "$(SAN_CONF)"; \
+		echo "ST = California" >> "$(SAN_CONF)"; \
+		echo "L = San Francisco" >> "$(SAN_CONF)"; \
+		echo "O = Spooky Proxy" >> "$(SAN_CONF)"; \
+		echo "OU = Development" >> "$(SAN_CONF)"; \
+		echo "CN = localhost" >> "$(SAN_CONF)"; \
+		echo "" >> "$(SAN_CONF)"; \
+		echo "[v3_req]" >> "$(SAN_CONF)"; \
+		echo "subjectAltName = @alt_names" >> "$(SAN_CONF)"; \
+		echo "" >> "$(SAN_CONF)"; \
+		echo "[alt_names]" >> "$(SAN_CONF)"; \
+		echo "DNS.1 = localhost" >> "$(SAN_CONF)"; \
+		echo "DNS.2 = proxy.spooky.local" >> "$(SAN_CONF)"; \
+		echo "IP.1 = 127.0.0.1" >> "$(SAN_CONF)"; \
+		echo "IP.2 = ::1" >> "$(SAN_CONF)"; \
+		echo "✅ Created default $(SAN_CONF)"; \
+	fi
+
+certs-selfsigned: $(SAN_CONF)
 	@echo "🔐 Generating ECC P-256 private key..."
 	openssl ecparam -name prime256v1 -genkey -noout -out certs/proxy-key.pem
 	@echo "🔄 Converting to PKCS#8 format for rustls compatibility..."
@@ -37,7 +71,7 @@ certs-selfsigned:
 	chmod 644 certs/proxy-cert.pem certs/proxy-cert.der
 	@echo "✅ Self-signed certificates created successfully!"
 
-certs-ca:
+certs-ca: $(SAN_CONF)
 	@echo "🏛️ Creating Certificate Authority..."
 	openssl ecparam -name prime256v1 -genkey -noout -out certs/ca-key.pem
 	openssl pkcs8 -topk8 -nocrypt -in certs/ca-key.pem -out certs/ca-key-pkcs8.pem

@@ -1767,6 +1767,78 @@ fn slow_request_producer_over_cap_returns_413() {
 }
 
 #[test]
+fn request_body_idle_timeout_returns_408() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.client_body_idle_timeout_ms = 120;
+    config.performance.backend_total_request_timeout_ms = 10_000;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let (status, body, got_reset) = run_h3_client_two_chunk_post(
+        listen_addr,
+        "/",
+        vec![0u8; 512],
+        vec![0u8; 512],
+        Duration::from_millis(250),
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 8),
+    )
+    .expect("slow request producer should complete");
+
+    assert_eq!(
+        status, "408",
+        "slow body producer should hit request-body idle timeout"
+    );
+    assert!(
+        String::from_utf8_lossy(&body).contains("request body idle timeout"),
+        "idle-timeout response body should explain failure"
+    );
+    assert!(
+        !got_reset,
+        "idle timeout should return HTTP response, not reset"
+    );
+}
+
+#[test]
+fn unknown_length_response_prebuffer_cap_returns_503() {
+    let dir = tempdir().expect("failed to create temp dir");
+    let (cert, key) = write_test_certs(&dir);
+
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let backend_addr = rt.block_on(start_h2_backend_with_regression_routes());
+    let mut config = make_config(0, backend_addr.to_string(), cert, key);
+    config.performance.max_response_body_bytes = 64 * 1024;
+    config.performance.unknown_length_response_prebuffer_bytes = 8;
+
+    let listener = QUICListener::new(config).expect("failed to create listener");
+    let listen_addr = listener.socket.local_addr().unwrap();
+    let _listener_task = ListenerTaskGuard::spawn(&rt, listener);
+
+    let observations = run_h3_client_concurrent_get(
+        listen_addr,
+        &["/long-stream"],
+        Duration::from_secs(REQUEST_TIMEOUT_SECS + 8),
+    )
+    .expect("unknown-length prebuffer test should complete");
+    let stream = observation_for(&observations, "/long-stream");
+    assert_eq!(
+        stream.status.as_deref(),
+        Some("503"),
+        "unknown-length prebuffer cap should return 503"
+    );
+    assert_eq!(
+        stream.body, b"upstream response body too large\n",
+        "unknown-length prebuffer cap should return deterministic body"
+    );
+}
+
+#[test]
 fn slow_response_consumer_does_not_hang() {
     let dir = tempdir().expect("failed to create temp dir");
     let (cert, key) = write_test_certs(&dir);
@@ -3020,14 +3092,20 @@ fn make_quic_client(
     let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
     // Initial packet.
-    let (w, si) = conn.send(&mut out).map_err(|e| format!("initial send: {e:?}"))?;
-    socket.send_to(&out[..w], si.to).map_err(|e| e.to_string())?;
+    let (w, si) = conn
+        .send(&mut out)
+        .map_err(|e| format!("initial send: {e:?}"))?;
+    socket
+        .send_to(&out[..w], si.to)
+        .map_err(|e| e.to_string())?;
 
     let deadline = Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS);
     loop {
         loop {
             match conn.send(&mut out) {
-                Ok((w, si)) => { let _ = socket.send_to(&out[..w], si.to); }
+                Ok((w, si)) => {
+                    let _ = socket.send_to(&out[..w], si.to);
+                }
                 Err(quiche::Error::Done) => break,
                 Err(e) => return Err(format!("send: {e:?}")),
             }
@@ -3038,11 +3116,18 @@ fn make_quic_client(
         socket.set_read_timeout(Some(quic_read_timeout(&conn))).ok();
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr })
-                    .map_err(|e| format!("recv: {e:?}"))?;
+                conn.recv(
+                    &mut buf[..len],
+                    quiche::RecvInfo {
+                        from,
+                        to: local_addr,
+                    },
+                )
+                .map_err(|e| format!("recv: {e:?}"))?;
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 conn.on_timeout();
             }
@@ -3059,14 +3144,12 @@ fn make_quic_client(
 }
 
 /// Flush QUIC send buffer to the socket.
-fn flush_quic(
-    conn: &mut quiche::Connection,
-    socket: &std::net::UdpSocket,
-    out: &mut [u8],
-) {
+fn flush_quic(conn: &mut quiche::Connection, socket: &std::net::UdpSocket, out: &mut [u8]) {
     loop {
         match conn.send(out) {
-            Ok((w, si)) => { let _ = socket.send_to(&out[..w], si.to); }
+            Ok((w, si)) => {
+                let _ = socket.send_to(&out[..w], si.to);
+            }
             Err(quiche::Error::Done) => break,
             Err(_) => break,
         }
@@ -3091,10 +3174,17 @@ fn pump_h3_until(
         socket.set_read_timeout(Some(quic_read_timeout(conn))).ok();
         match socket.recv_from(buf) {
             Ok((len, from)) => {
-                let _ = conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr });
+                let _ = conn.recv(
+                    &mut buf[..len],
+                    quiche::RecvInfo {
+                        from,
+                        to: local_addr,
+                    },
+                );
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
-                || e.kind() == std::io::ErrorKind::TimedOut =>
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
             {
                 conn.on_timeout();
             }
@@ -3185,8 +3275,15 @@ fn teardown_client_reset_before_upstream_response() {
     let pump_end = Instant::now() + Duration::from_millis(200);
     let mut discard = Vec::new();
     pump_h3_until(
-        &mut conn, &mut h3, &socket, local_addr,
-        &mut out, &mut buf, slow_sid, pump_end, &mut discard,
+        &mut conn,
+        &mut h3,
+        &socket,
+        local_addr,
+        &mut out,
+        &mut buf,
+        slow_sid,
+        pump_end,
+        &mut discard,
     );
 
     // Follow-up /fast on a fresh connection. This avoids coupling the assertion
@@ -3262,7 +3359,10 @@ fn teardown_client_reset_during_response_streaming() {
                 Ok((len, from)) => {
                     let _ = conn.recv(
                         &mut buf[..len],
-                        quiche::RecvInfo { from, to: local_addr },
+                        quiche::RecvInfo {
+                            from,
+                            to: local_addr,
+                        },
                     );
                 }
                 Err(ref e)
@@ -3293,7 +3393,10 @@ fn teardown_client_reset_during_response_streaming() {
                 panic!("timed out waiting for /stream response data");
             }
         }
-        assert!(got_data, "must receive response data before dropping connection");
+        assert!(
+            got_data,
+            "must receive response data before dropping connection"
+        );
         // Connection drops here (socket + conn out of scope) — server is left
         // in SendingResponse with an orphaned body-pump task.
     }
@@ -3321,8 +3424,13 @@ fn teardown_client_reset_during_response_streaming() {
 
     let mut events = Vec::new();
     let done = pump_h3_until(
-        &mut conn2, &mut h3_2, &socket2, local_addr2,
-        &mut out2, &mut buf2, fast_sid,
+        &mut conn2,
+        &mut h3_2,
+        &socket2,
+        local_addr2,
+        &mut out2,
+        &mut buf2,
+        fast_sid,
         Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS + 2),
         &mut events,
     );
@@ -3418,7 +3526,10 @@ fn teardown_upstream_timeout_cleans_up_stream() {
         Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS + 2),
         &mut fast_events,
     );
-    assert!(done, "follow-up /fast request must complete after timeout teardown");
+    assert!(
+        done,
+        "follow-up /fast request must complete after timeout teardown"
+    );
     assert!(
         fast_events.iter().any(|e| e.starts_with("status:200")),
         "follow-up request must receive 200, got: {fast_events:?}"

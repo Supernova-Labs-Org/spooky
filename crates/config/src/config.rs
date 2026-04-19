@@ -10,21 +10,24 @@ use crate::default::{
     observe_default_address, observe_default_metrics_path, observe_default_port,
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
-    perf_default_backend_total_request_timeout_ms, perf_default_control_plane_threads,
-    perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
-    perf_default_h2_pool_max_idle_per_backend, perf_default_max_response_body_bytes,
+    perf_default_backend_total_request_timeout_ms, perf_default_client_body_idle_timeout_ms,
+    perf_default_control_plane_threads, perf_default_global_inflight_limit,
+    perf_default_h2_pool_idle_timeout_ms, perf_default_h2_pool_max_idle_per_backend,
+    perf_default_max_request_body_bytes, perf_default_max_response_body_bytes,
     perf_default_new_connections_burst, perf_default_new_connections_per_sec,
-    perf_default_packet_shard_queue_capacity, perf_default_packet_shards_per_worker,
-    perf_default_per_backend_inflight_limit, perf_default_per_upstream_inflight_limit,
-    perf_default_pin_workers, perf_default_quic_initial_max_data,
-    perf_default_quic_initial_max_stream_data, perf_default_quic_initial_max_streams_bidi,
-    perf_default_quic_initial_max_streams_uni, perf_default_quic_max_idle_timeout_ms,
+    perf_default_packet_shard_queue_capacity, perf_default_packet_shard_queue_max_bytes,
+    perf_default_packet_shards_per_worker, perf_default_per_backend_inflight_limit,
+    perf_default_per_upstream_inflight_limit, perf_default_pin_workers,
+    perf_default_quic_initial_max_data, perf_default_quic_initial_max_stream_data,
+    perf_default_quic_initial_max_streams_bidi, perf_default_quic_initial_max_streams_uni,
+    perf_default_quic_max_idle_timeout_ms, perf_default_request_buffer_global_cap_bytes,
     perf_default_reuseport, perf_default_shutdown_drain_timeout_ms,
     perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
-    perf_default_worker_threads, resilience_default_adaptive_decrease_step,
-    resilience_default_adaptive_enabled, resilience_default_adaptive_high_latency_ms,
-    resilience_default_adaptive_increase_step, resilience_default_adaptive_min_limit,
-    resilience_default_brownout_enabled, resilience_default_brownout_recover_inflight_percent,
+    perf_default_unknown_length_response_prebuffer_bytes, perf_default_worker_threads,
+    resilience_default_adaptive_decrease_step, resilience_default_adaptive_enabled,
+    resilience_default_adaptive_high_latency_ms, resilience_default_adaptive_increase_step,
+    resilience_default_adaptive_min_limit, resilience_default_brownout_enabled,
+    resilience_default_brownout_recover_inflight_percent,
     resilience_default_brownout_trigger_inflight_percent, resilience_default_cb_enabled,
     resilience_default_cb_failure_threshold, resilience_default_cb_half_open_max_probes,
     resilience_default_cb_open_ms, resilience_default_hedging_delay_ms,
@@ -194,6 +197,10 @@ pub struct Performance {
     #[serde(default = "perf_default_packet_shard_queue_capacity")]
     pub packet_shard_queue_capacity: usize,
 
+    /// Memory-aware cap for queued datagram bytes per ingress shard dispatch queue.
+    #[serde(default = "perf_default_packet_shard_queue_max_bytes")]
+    pub packet_shard_queue_max_bytes: usize,
+
     #[serde(default = "perf_default_reuseport")]
     pub reuseport: bool,
 
@@ -275,6 +282,25 @@ pub struct Performance {
     /// Protects against runaway or adversarial upstreams streaming unboundedly.
     #[serde(default = "perf_default_max_response_body_bytes")]
     pub max_response_body_bytes: usize,
+
+    /// Hard cap on request body bytes per stream.
+    /// Requests exceeding this size are rejected with 413.
+    #[serde(default = "perf_default_max_request_body_bytes")]
+    pub max_request_body_bytes: usize,
+
+    /// Global cap for bytes buffered in request backpressure queues across a worker.
+    #[serde(default = "perf_default_request_buffer_global_cap_bytes")]
+    pub request_buffer_global_cap_bytes: usize,
+
+    /// Max bytes buffered for unknown-length upstream responses before headers are emitted.
+    /// Responses exceeding this prebuffer cap are terminated with overload response.
+    #[serde(default = "perf_default_unknown_length_response_prebuffer_bytes")]
+    pub unknown_length_response_prebuffer_bytes: usize,
+
+    /// Idle timeout for request body upload progress.
+    /// If no request-body bytes arrive for this period, the stream is failed.
+    #[serde(default = "perf_default_client_body_idle_timeout_ms")]
+    pub client_body_idle_timeout_ms: u64,
 }
 
 impl Default for Performance {
@@ -284,6 +310,7 @@ impl Default for Performance {
             control_plane_threads: perf_default_control_plane_threads(),
             packet_shards_per_worker: perf_default_packet_shards_per_worker(),
             packet_shard_queue_capacity: perf_default_packet_shard_queue_capacity(),
+            packet_shard_queue_max_bytes: perf_default_packet_shard_queue_max_bytes(),
             reuseport: perf_default_reuseport(),
             pin_workers: perf_default_pin_workers(),
             global_inflight_limit: perf_default_global_inflight_limit(),
@@ -307,6 +334,11 @@ impl Default for Performance {
             quic_initial_max_streams_bidi: perf_default_quic_initial_max_streams_bidi(),
             quic_initial_max_streams_uni: perf_default_quic_initial_max_streams_uni(),
             max_response_body_bytes: perf_default_max_response_body_bytes(),
+            max_request_body_bytes: perf_default_max_request_body_bytes(),
+            request_buffer_global_cap_bytes: perf_default_request_buffer_global_cap_bytes(),
+            unknown_length_response_prebuffer_bytes:
+                perf_default_unknown_length_response_prebuffer_bytes(),
+            client_body_idle_timeout_ms: perf_default_client_body_idle_timeout_ms(),
         }
     }
 }

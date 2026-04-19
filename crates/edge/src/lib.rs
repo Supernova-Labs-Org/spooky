@@ -81,6 +81,10 @@ impl SharedRuntimeState {
     pub fn inc_ingress_queue_drop(&self) {
         self.metrics.inc_ingress_queue_drop();
     }
+
+    pub fn inc_ingress_queue_drop_bytes(&self, bytes: usize) {
+        self.metrics.inc_ingress_queue_drop_bytes(bytes);
+    }
 }
 
 pub struct QUICListener {
@@ -103,8 +107,12 @@ pub struct QUICListener {
     pub backend_timeout: Duration,
     pub backend_body_idle_timeout: Duration,
     pub backend_body_total_timeout: Duration,
+    pub client_body_idle_timeout: Duration,
     pub backend_total_request_timeout: Duration,
+    pub max_request_body_bytes: usize,
     pub max_response_body_bytes: usize,
+    pub request_buffer_global_cap_bytes: usize,
+    pub unknown_length_response_prebuffer_bytes: usize,
 
     pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
@@ -175,6 +183,8 @@ pub struct RequestEnvelope {
     pub body_buf_bytes: usize,
     /// Total body bytes received on this stream (buffered + already forwarded).
     pub body_bytes_received: usize,
+    /// Last observed request-body byte arrival time.
+    pub last_body_activity: Instant,
     /// Resolved backend address and index (for health marking on response).
     pub backend_addr: Option<String>,
     pub backend_index: Option<usize>,
@@ -237,6 +247,11 @@ pub struct Metrics {
     pub overload_shed: AtomicU64,
     pub ingress_packets_total: AtomicU64,
     pub ingress_queue_drops: AtomicU64,
+    pub ingress_queue_drop_bytes: AtomicU64,
+    pub request_buffered_bytes: AtomicU64,
+    pub request_buffered_high_watermark_bytes: AtomicU64,
+    pub request_buffer_limit_rejects: AtomicU64,
+    pub response_prebuffer_limit_rejects: AtomicU64,
     pub scid_rotations: AtomicU64,
     pub watchdog_restart_requests: AtomicU64,
     pub watchdog_restart_hooks: AtomicU64,
@@ -291,6 +306,11 @@ impl Default for Metrics {
             overload_shed: AtomicU64::new(0),
             ingress_packets_total: AtomicU64::new(0),
             ingress_queue_drops: AtomicU64::new(0),
+            ingress_queue_drop_bytes: AtomicU64::new(0),
+            request_buffered_bytes: AtomicU64::new(0),
+            request_buffered_high_watermark_bytes: AtomicU64::new(0),
+            request_buffer_limit_rejects: AtomicU64::new(0),
+            response_prebuffer_limit_rejects: AtomicU64::new(0),
             scid_rotations: AtomicU64::new(0),
             watchdog_restart_requests: AtomicU64::new(0),
             watchdog_restart_hooks: AtomicU64::new(0),
@@ -359,6 +379,74 @@ impl Metrics {
 
     pub fn inc_ingress_queue_drop(&self) {
         self.ingress_queue_drops.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_queue_drop_bytes(&self, bytes: usize) {
+        self.ingress_queue_drop_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn try_reserve_request_buffer(&self, bytes: usize, cap_bytes: usize) -> bool {
+        let add = bytes as u64;
+        let cap = cap_bytes as u64;
+        loop {
+            let current = self.request_buffered_bytes.load(Ordering::Relaxed);
+            let next = current.saturating_add(add);
+            if next > cap {
+                return false;
+            }
+            if self
+                .request_buffered_bytes
+                .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.observe_request_buffer_high_water(next);
+                return true;
+            }
+        }
+    }
+
+    pub fn release_request_buffer(&self, bytes: usize) {
+        let sub = bytes as u64;
+        loop {
+            let current = self.request_buffered_bytes.load(Ordering::Relaxed);
+            let next = current.saturating_sub(sub);
+            if self
+                .request_buffered_bytes
+                .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    pub fn inc_request_buffer_limit_reject(&self) {
+        self.request_buffer_limit_rejects
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_response_prebuffer_limit_reject(&self) {
+        self.response_prebuffer_limit_rejects
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn observe_request_buffer_high_water(&self, candidate: u64) {
+        loop {
+            let current = self
+                .request_buffered_high_watermark_bytes
+                .load(Ordering::Relaxed);
+            if candidate <= current {
+                return;
+            }
+            if self
+                .request_buffered_high_watermark_bytes
+                .compare_exchange(current, candidate, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     pub fn inc_scid_rotation(&self) {
@@ -542,6 +630,53 @@ impl Metrics {
             self.ingress_queue_drops.load(Ordering::Relaxed)
         ));
 
+        out.push_str(
+            "# HELP spooky_ingress_queue_drop_bytes Total UDP datagram bytes dropped due to full shard queues.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_queue_drop_bytes counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_queue_drop_bytes {}\n",
+            self.ingress_queue_drop_bytes.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_request_buffered_bytes Current bytes buffered in request backpressure queues.\n",
+        );
+        out.push_str("# TYPE spooky_request_buffered_bytes gauge\n");
+        out.push_str(&format!(
+            "spooky_request_buffered_bytes {}\n",
+            self.request_buffered_bytes.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_request_buffered_high_watermark_bytes Peak request-buffered bytes since process start.\n",
+        );
+        out.push_str("# TYPE spooky_request_buffered_high_watermark_bytes gauge\n");
+        out.push_str(&format!(
+            "spooky_request_buffered_high_watermark_bytes {}\n",
+            self.request_buffered_high_watermark_bytes
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_request_buffer_limit_rejects Total requests rejected due to request buffer byte caps.\n",
+        );
+        out.push_str("# TYPE spooky_request_buffer_limit_rejects counter\n");
+        out.push_str(&format!(
+            "spooky_request_buffer_limit_rejects {}\n",
+            self.request_buffer_limit_rejects.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_response_prebuffer_limit_rejects Total unknown-length upstream responses rejected due to prebuffer cap.\n",
+        );
+        out.push_str("# TYPE spooky_response_prebuffer_limit_rejects counter\n");
+        out.push_str(&format!(
+            "spooky_response_prebuffer_limit_rejects {}\n",
+            self.response_prebuffer_limit_rejects
+                .load(Ordering::Relaxed)
+        ));
+
         out.push_str("# HELP spooky_scid_rotations Total SCID rotations.\n");
         out.push_str("# TYPE spooky_scid_rotations counter\n");
         out.push_str(&format!(
@@ -716,5 +851,25 @@ mod tests {
         let output = metrics.render_prometheus();
         assert!(output.contains("spooky_route_requests_total{route=\"route-000\"} 1"));
         assert!(output.contains("spooky_route_requests_total{route=\"route-127\"} 1"));
+    }
+
+    #[test]
+    fn request_buffer_reservation_respects_cap_and_releases() {
+        let metrics = Metrics::default();
+        assert!(metrics.try_reserve_request_buffer(512, 1024));
+        assert!(!metrics.try_reserve_request_buffer(600, 1024));
+        assert_eq!(metrics.request_buffered_bytes.load(Ordering::Relaxed), 512);
+        assert_eq!(
+            metrics
+                .request_buffered_high_watermark_bytes
+                .load(Ordering::Relaxed),
+            512
+        );
+
+        metrics.release_request_buffer(256);
+        assert_eq!(metrics.request_buffered_bytes.load(Ordering::Relaxed), 256);
+
+        metrics.release_request_buffer(512);
+        assert_eq!(metrics.request_buffered_bytes.load(Ordering::Relaxed), 0);
     }
 }

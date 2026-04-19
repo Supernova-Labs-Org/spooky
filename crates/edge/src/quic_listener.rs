@@ -42,9 +42,8 @@ use crate::{
     ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase,
     cid_radix::CidRadix,
     constants::{
-        DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
-        MAX_STREAMS_PER_CONNECTION, MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES,
-        REQUEST_BUFFERED_CHUNK_BYTES_LIMIT, REQUEST_CHUNK_BYTES_LIMIT,
+        DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_STREAMS_PER_CONNECTION,
+        MAX_UDP_PAYLOAD_BYTES, MIN_SCID_LEN_BYTES, REQUEST_CHUNK_BYTES_LIMIT,
         REQUEST_CHUNK_CHANNEL_CAPACITY, RESET_TOKEN_LEN_BYTES, RESPONSE_CHUNK_BYTES_LIMIT,
         RESPONSE_CHUNK_CHANNEL_CAPACITY, SCID_ROTATION_PACKET_THRESHOLD, UDP_READ_TIMEOUT_MS,
         scid_rotation_interval,
@@ -112,6 +111,12 @@ struct RequestValidationResult {
     method: String,
     path: String,
     authority: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestBufferError {
+    StreamCap,
+    GlobalCap,
 }
 
 fn request_content_length(headers: &[quiche::h3::Header]) -> Option<usize> {
@@ -402,8 +407,13 @@ pub(crate) fn sweep_closed_connections<C, F>(
 ///
 /// Returns the phase the stream was in at the time of abort (useful for
 /// logging and metrics at the call site).
-pub(crate) fn abort_stream(req: &mut RequestEnvelope) -> StreamPhase {
+pub(crate) fn abort_stream(req: &mut RequestEnvelope, metrics: &Metrics) -> StreamPhase {
     let phase = req.phase.clone();
+    if req.body_buf_bytes > 0 {
+        metrics.release_request_buffer(req.body_buf_bytes);
+        req.body_buf_bytes = 0;
+    }
+    req.body_buf.clear();
     req.body_tx = None;
     req.upstream_result_rx = None;
     req.response_chunk_rx = None;
@@ -433,7 +443,7 @@ impl QUICListener {
             .saturating_mul(worker_threads);
 
         info!(
-            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} backend_connect_timeout_ms={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} backend_total_request_timeout_ms={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} backend_connect_timeout_ms={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} backend_total_request_timeout_ms={} client_body_idle_timeout_ms={} max_request_body_bytes={} max_response_body_bytes={} request_buffer_global_cap_bytes={} unknown_length_response_prebuffer_bytes={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
             worker_threads,
             config.performance.control_plane_threads.max(1),
             config.performance.reuseport,
@@ -446,6 +456,11 @@ impl QUICListener {
             config.performance.backend_body_idle_timeout_ms,
             config.performance.backend_body_total_timeout_ms,
             config.performance.backend_total_request_timeout_ms,
+            config.performance.client_body_idle_timeout_ms,
+            config.performance.max_request_body_bytes,
+            config.performance.max_response_body_bytes,
+            config.performance.request_buffer_global_cap_bytes,
+            config.performance.unknown_length_response_prebuffer_bytes,
             config.performance.udp_recv_buffer_bytes,
             config.performance.udp_send_buffer_bytes,
             config.performance.h2_pool_max_idle_per_backend,
@@ -580,10 +595,16 @@ impl QUICListener {
             Duration::from_millis(config.performance.backend_body_idle_timeout_ms);
         let backend_body_total_timeout =
             Duration::from_millis(config.performance.backend_body_total_timeout_ms);
+        let client_body_idle_timeout =
+            Duration::from_millis(config.performance.client_body_idle_timeout_ms);
         let backend_total_request_timeout =
             Duration::from_millis(config.performance.backend_total_request_timeout_ms);
         let drain_timeout = Duration::from_millis(config.performance.shutdown_drain_timeout_ms);
+        let max_request_body_bytes = config.performance.max_request_body_bytes;
         let max_response_body_bytes = config.performance.max_response_body_bytes;
+        let request_buffer_global_cap_bytes = config.performance.request_buffer_global_cap_bytes;
+        let unknown_length_response_prebuffer_bytes =
+            config.performance.unknown_length_response_prebuffer_bytes;
         let conn_rate_limiter = TokenBucket::new(
             config.performance.new_connections_per_sec,
             config.performance.new_connections_burst,
@@ -609,8 +630,12 @@ impl QUICListener {
             backend_timeout,
             backend_body_idle_timeout,
             backend_body_total_timeout,
+            client_body_idle_timeout,
             backend_total_request_timeout,
+            max_request_body_bytes,
             max_response_body_bytes,
+            request_buffer_global_cap_bytes,
+            unknown_length_response_prebuffer_bytes,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -1231,6 +1256,7 @@ impl QUICListener {
 
         if let Err(e) = connection.quic.recv(&mut recv_data, recv_info) {
             error!("QUIC recv failed: {:?}", e);
+            Self::release_connection_streams(&mut connection, &self.metrics);
             self.remove_connection_routes(&connection);
             return;
         }
@@ -1268,7 +1294,11 @@ impl QUICListener {
                 &self.routing_index,
                 &self.metrics,
                 &self.resilience,
+                self.max_request_body_bytes,
                 self.max_response_body_bytes,
+                self.request_buffer_global_cap_bytes,
+                self.unknown_length_response_prebuffer_bytes,
+                self.client_body_idle_timeout,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -1295,6 +1325,7 @@ impl QUICListener {
             self.connections
                 .insert(Arc::clone(&new_primary), connection);
         } else {
+            Self::release_connection_streams(&mut connection, &self.metrics);
             self.remove_connection_routes(&connection);
             debug!("Connection closed, not storing");
         }
@@ -1313,6 +1344,7 @@ impl QUICListener {
                 Some(timeout) => timeout,
                 None => {
                     if connection.quic.is_closed() {
+                        Self::release_connection_streams(connection, &self.metrics);
                         to_remove.push(scid.clone());
                     }
                     continue;
@@ -1329,6 +1361,7 @@ impl QUICListener {
             }
 
             if connection.quic.is_closed() {
+                Self::release_connection_streams(connection, &self.metrics);
                 to_remove.push(scid.clone());
                 continue;
             }
@@ -1347,6 +1380,8 @@ impl QUICListener {
                     self.backend_total_request_timeout,
                     &self.resilience,
                     self.max_response_body_bytes,
+                    self.unknown_length_response_prebuffer_bytes,
+                    self.client_body_idle_timeout,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
                 }
@@ -1378,22 +1413,56 @@ impl QUICListener {
         }
     }
 
-    fn push_request_chunk(req: &mut RequestEnvelope, chunk: Bytes) -> Result<(), ()> {
+    fn release_connection_streams(connection: &mut QuicConnection, metrics: &Metrics) {
+        for req in connection.streams.values_mut() {
+            abort_stream(req, metrics);
+        }
+        connection.streams.clear();
+    }
+
+    fn push_request_chunk(
+        req: &mut RequestEnvelope,
+        chunk: Bytes,
+        metrics: &Metrics,
+        max_request_body_bytes: usize,
+        request_buffer_global_cap_bytes: usize,
+    ) -> Result<(), RequestBufferError> {
+        let chunk_len = chunk.len();
+        if !metrics.try_reserve_request_buffer(chunk_len, request_buffer_global_cap_bytes) {
+            return Err(RequestBufferError::GlobalCap);
+        }
+
         let next = req.body_buf_bytes.saturating_add(chunk.len());
-        if next > REQUEST_BUFFERED_CHUNK_BYTES_LIMIT {
-            return Err(());
+        if next > max_request_body_bytes {
+            metrics.release_request_buffer(chunk_len);
+            return Err(RequestBufferError::StreamCap);
         }
         req.body_buf_bytes = next;
         req.body_buf.push_back(chunk);
         Ok(())
     }
 
-    fn enqueue_request_chunk(req: &mut RequestEnvelope, chunk: Bytes) -> Result<(), ()> {
+    fn enqueue_request_chunk(
+        req: &mut RequestEnvelope,
+        chunk: Bytes,
+        metrics: &Metrics,
+        max_request_body_bytes: usize,
+        request_buffer_global_cap_bytes: usize,
+    ) -> Result<(), RequestBufferError> {
         if let Some(tx) = &req.body_tx {
             match tx.try_send(chunk) {
                 Ok(()) => Ok(()),
-                Err(TrySendError::Full(chunk)) => Self::push_request_chunk(req, chunk),
+                Err(TrySendError::Full(chunk)) => Self::push_request_chunk(
+                    req,
+                    chunk,
+                    metrics,
+                    max_request_body_bytes,
+                    request_buffer_global_cap_bytes,
+                ),
                 Err(TrySendError::Closed(_chunk)) => {
+                    if req.body_buf_bytes > 0 {
+                        metrics.release_request_buffer(req.body_buf_bytes);
+                    }
                     req.body_tx = None;
                     req.body_buf.clear();
                     req.body_buf_bytes = 0;
@@ -1401,11 +1470,17 @@ impl QUICListener {
                 }
             }
         } else {
-            Self::push_request_chunk(req, chunk)
+            Self::push_request_chunk(
+                req,
+                chunk,
+                metrics,
+                max_request_body_bytes,
+                request_buffer_global_cap_bytes,
+            )
         }
     }
 
-    fn flush_request_buffer(req: &mut RequestEnvelope) {
+    fn flush_request_buffer(req: &mut RequestEnvelope, metrics: &Metrics) {
         let Some(tx) = req.body_tx.as_ref() else {
             return;
         };
@@ -1418,12 +1493,16 @@ impl QUICListener {
             match tx.try_send(chunk) {
                 Ok(()) => {
                     req.body_buf_bytes = req.body_buf_bytes.saturating_sub(len);
+                    metrics.release_request_buffer(len);
                 }
                 Err(TrySendError::Full(chunk)) => {
                     req.body_buf.push_front(chunk);
                     break;
                 }
                 Err(TrySendError::Closed(_chunk)) => {
+                    if req.body_buf_bytes > 0 {
+                        metrics.release_request_buffer(req.body_buf_bytes);
+                    }
                     req.body_buf.clear();
                     req.body_buf_bytes = 0;
                     req.body_tx = None;
@@ -1447,7 +1526,11 @@ impl QUICListener {
         routing_index: &RouteIndex,
         metrics: &Metrics,
         resilience: &RuntimeResilience,
+        max_request_body_bytes: usize,
         max_response_body_bytes: usize,
+        request_buffer_global_cap_bytes: usize,
+        unknown_length_response_prebuffer_bytes: usize,
+        client_body_idle_timeout: Duration,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -2035,6 +2118,7 @@ impl QUICListener {
                             body_buf: std::collections::VecDeque::new(),
                             body_buf_bytes: 0,
                             body_bytes_received: 0,
+                            last_body_activity: request_start,
                             backend_addr,
                             backend_index,
                             upstream_name,
@@ -2061,6 +2145,9 @@ impl QUICListener {
                             let mut reject_body_for_bodyless = None::<(String, Duration)>;
                             let mut payload_too_large = None::<(String, Duration)>;
                             if let Some(req) = connection.streams.get_mut(&stream_id) {
+                                if read > 0 {
+                                    req.last_body_activity = Instant::now();
+                                }
                                 if req.bodyless_mode && read > 0 {
                                     reject_body_for_bodyless = Some((
                                         req.upstream_name
@@ -2073,7 +2160,7 @@ impl QUICListener {
                                     // Enforce cap on total bytes received for the stream,
                                     // including chunks already forwarded to the H2 body channel.
                                     let next_total = req.body_bytes_received.saturating_add(read);
-                                    if next_total > MAX_REQUEST_BODY_BYTES {
+                                    if next_total > max_request_body_bytes {
                                         payload_too_large = Some((
                                             req.upstream_name
                                                 .clone()
@@ -2087,8 +2174,18 @@ impl QUICListener {
                                             body_buf[..read].chunks(REQUEST_CHUNK_BYTES_LIMIT)
                                         {
                                             let chunk = Bytes::copy_from_slice(chunk_slice);
-                                            if Self::enqueue_request_chunk(req, chunk).is_err() {
+                                            if let Err(err) = Self::enqueue_request_chunk(
+                                                req,
+                                                chunk,
+                                                metrics,
+                                                max_request_body_bytes,
+                                                request_buffer_global_cap_bytes,
+                                            ) {
                                                 shed_due_to_buffer_pressure = true;
+                                                metrics.inc_request_buffer_limit_reject();
+                                                if err == RequestBufferError::GlobalCap {
+                                                    debug!("global request buffer cap reached");
+                                                }
                                                 break;
                                             }
                                         }
@@ -2105,6 +2202,9 @@ impl QUICListener {
                                     http::StatusCode::BAD_REQUEST,
                                     b"request body not allowed for this request\n",
                                 )?;
+                                if let Some(req) = connection.streams.get_mut(&stream_id) {
+                                    abort_stream(req, metrics);
+                                }
                                 connection.streams.remove(&stream_id);
                                 resilience.adaptive_admission.observe(elapsed, true);
                                 break;
@@ -2119,12 +2219,15 @@ impl QUICListener {
                                     http::StatusCode::PAYLOAD_TOO_LARGE,
                                     b"request body too large\n",
                                 )?;
+                                if let Some(req) = connection.streams.get_mut(&stream_id) {
+                                    abort_stream(req, metrics);
+                                }
                                 connection.streams.remove(&stream_id);
                                 resilience.adaptive_admission.observe(elapsed, true);
                                 break;
                             }
                             if shed_due_to_buffer_pressure
-                                && let Some(req) = connection.streams.remove(&stream_id)
+                                && let Some(req) = connection.streams.get(&stream_id)
                             {
                                 metrics.inc_failure();
                                 metrics.inc_overload_shed();
@@ -2145,6 +2248,10 @@ impl QUICListener {
                                 resilience
                                     .adaptive_admission
                                     .observe(req.start.elapsed(), true);
+                                if let Some(req) = connection.streams.get_mut(&stream_id) {
+                                    abort_stream(req, metrics);
+                                }
+                                connection.streams.remove(&stream_id);
                                 break;
                             }
                         }
@@ -2154,7 +2261,7 @@ impl QUICListener {
                                 "HTTP/3 recv_body protocol error on stream {}: {:?}",
                                 stream_id, err
                             );
-                            if let Some(req) = connection.streams.remove(&stream_id) {
+                            if let Some(req) = connection.streams.get(&stream_id) {
                                 metrics.inc_failure();
                                 let route_label =
                                     req.upstream_name.as_deref().unwrap_or("unrouted");
@@ -2167,6 +2274,10 @@ impl QUICListener {
                                     .adaptive_admission
                                     .observe(req.start.elapsed(), true);
                             }
+                            if let Some(req) = connection.streams.get_mut(&stream_id) {
+                                abort_stream(req, metrics);
+                            }
+                            connection.streams.remove(&stream_id);
                             let _ = Self::send_simple_response(
                                 h3,
                                 &mut connection.quic,
@@ -2182,7 +2293,7 @@ impl QUICListener {
                     if let Some(req) = connection.streams.get_mut(&stream_id) {
                         req.request_fin_received = true;
 
-                        Self::flush_request_buffer(req);
+                        Self::flush_request_buffer(req, metrics);
                         // If buffer is now empty, drop body_tx to signal end-of-body.
                         if req.body_buf.is_empty() {
                             req.body_tx = None;
@@ -2195,7 +2306,7 @@ impl QUICListener {
                 }
                 Ok((stream_id, quiche::h3::Event::Reset(error_code))) => {
                     if let Some(req) = connection.streams.get_mut(&stream_id) {
-                        let phase = abort_stream(req);
+                        let phase = abort_stream(req, metrics);
                         debug!(
                             "stream {} reset by client (error_code={}, phase={:?}): resources released",
                             stream_id, error_code, phase
@@ -2222,6 +2333,8 @@ impl QUICListener {
             backend_total_request_timeout,
             resilience,
             max_response_body_bytes,
+            unknown_length_response_prebuffer_bytes,
+            client_body_idle_timeout,
         )?;
 
         Ok(())
@@ -2258,6 +2371,8 @@ impl QUICListener {
         _backend_total_request_timeout: Duration,
         resilience: &RuntimeResilience,
         max_response_body_bytes: usize,
+        unknown_length_response_prebuffer_bytes: usize,
+        client_body_idle_timeout: Duration,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
 
@@ -2285,7 +2400,35 @@ impl QUICListener {
                     .adaptive_admission
                     .observe(req.start.elapsed(), true);
                 if let Some(req) = streams.get_mut(&stream_id) {
-                    abort_stream(req);
+                    abort_stream(req, metrics);
+                }
+                streams.remove(&stream_id);
+                continue;
+            }
+
+            if let Some(req) = streams.get(&stream_id)
+                && req.phase == StreamPhase::ReceivingRequest
+                && !req.request_fin_received
+                && !req.bodyless_mode
+                && Instant::now().saturating_duration_since(req.last_body_activity)
+                    >= client_body_idle_timeout
+            {
+                metrics.inc_failure();
+                metrics.inc_timeout();
+                let route_label = req.upstream_name.as_deref().unwrap_or("unrouted");
+                metrics.record_route(route_label, req.start.elapsed(), RouteOutcome::Timeout);
+                let _ = Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::REQUEST_TIMEOUT,
+                    b"request body idle timeout\n",
+                );
+                resilience
+                    .adaptive_admission
+                    .observe(req.start.elapsed(), true);
+                if let Some(req) = streams.get_mut(&stream_id) {
+                    abort_stream(req, metrics);
                 }
                 streams.remove(&stream_id);
                 continue;
@@ -2293,7 +2436,7 @@ impl QUICListener {
 
             // ── 1 & 2: request body drain ────────────────────────────────────
             if let Some(req) = streams.get_mut(&stream_id) {
-                Self::flush_request_buffer(req);
+                Self::flush_request_buffer(req, metrics);
                 if req.request_fin_received && req.body_buf.is_empty() {
                     req.body_tx = None; // signals EOF to the upstream H2 task
                 }
@@ -2371,6 +2514,9 @@ impl QUICListener {
                                     b"upstream response body too large\n",
                                 );
                             }
+                            if let Some(req) = streams.get_mut(&stream_id) {
+                                abort_stream(req, metrics);
+                            }
                             streams.remove(&stream_id);
                             continue;
                         }
@@ -2426,6 +2572,9 @@ impl QUICListener {
                                     resilience
                                         .adaptive_admission
                                         .observe(req.start.elapsed(), true);
+                                }
+                                if let Some(req) = streams.get_mut(&stream_id) {
+                                    abort_stream(req, metrics);
                                 }
                                 streams.remove(&stream_id);
                                 continue;
@@ -2490,6 +2639,19 @@ impl QUICListener {
                                                         .send(ResponseChunk::Error(ProxyError::Pool(
                                                             PoolError::BackendOverloaded(
                                                                 "upstream response body too large".into(),
+                                                            ),
+                                                        )))
+                                                        .await;
+                                                    return;
+                                                }
+                                                if response_bytes_received
+                                                    > unknown_length_response_prebuffer_bytes
+                                                {
+                                                    let _ = chunk_tx
+                                                        .send(ResponseChunk::Error(ProxyError::Pool(
+                                                            PoolError::BackendOverloaded(
+                                                                "unknown-length response prebuffer limit exceeded"
+                                                                    .into(),
                                                             ),
                                                         )))
                                                         .await;
@@ -2640,7 +2802,7 @@ impl QUICListener {
                                 .observe(req.start.elapsed(), true);
                         }
                         if let Some(req) = streams.get_mut(&stream_id) {
-                            abort_stream(req);
+                            abort_stream(req, metrics);
                         }
                         streams.remove(&stream_id);
                         continue;
@@ -2858,7 +3020,7 @@ impl QUICListener {
             // ── 5: remove terminal streams ────────────────────────────────────
             if terminal {
                 if let Some(req) = streams.get_mut(&stream_id) {
-                    abort_stream(req);
+                    abort_stream(req, metrics);
                 }
                 streams.remove(&stream_id);
             }
@@ -3006,10 +3168,13 @@ impl QUICListener {
                     b"invalid request\n",
                 )
             }
-            Err(ProxyError::Pool(PoolError::BackendOverloaded(_))) => {
+            Err(ProxyError::Pool(PoolError::BackendOverloaded(reason))) => {
                 debug!("Backend overloaded");
                 metrics.inc_failure();
                 metrics.inc_overload_shed();
+                if reason.contains("unknown-length response prebuffer limit exceeded") {
+                    metrics.inc_response_prebuffer_limit_reject();
+                }
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
                 debug!(
                     "Upstream {} status 503 latency_ms {}",
@@ -3937,8 +4102,16 @@ mod tests {
 
         for i in 0u8..20 {
             let primary = cid(&[i, i, i, i, i, i, i, i]);
-            let alias = cid(&[i | 0x80, i | 0x80, i | 0x80, i | 0x80,
-                               i | 0x80, i | 0x80, i | 0x80, i | 0x80]);
+            let alias = cid(&[
+                i | 0x80,
+                i | 0x80,
+                i | 0x80,
+                i | 0x80,
+                i | 0x80,
+                i | 0x80,
+                i | 0x80,
+                i | 0x80,
+            ]);
             let addr = peer(5000 + u16::from(i));
 
             // Register
@@ -3959,8 +4132,14 @@ mod tests {
             );
         }
 
-        assert!(cid_routes.is_empty(), "cid_routes must be empty after all connections torn down");
-        assert!(peer_routes.is_empty(), "peer_routes must be empty after all connections torn down");
+        assert!(
+            cid_routes.is_empty(),
+            "cid_routes must be empty after all connections torn down"
+        );
+        assert!(
+            peer_routes.is_empty(),
+            "peer_routes must be empty after all connections torn down"
+        );
     }
 
     #[test]
@@ -3987,8 +4166,14 @@ mod tests {
             );
         }
 
-        assert!(cid_routes.is_empty(), "cid_routes must be empty after double purge");
-        assert!(peer_routes.is_empty(), "peer_routes must be empty after double purge");
+        assert!(
+            cid_routes.is_empty(),
+            "cid_routes must be empty after double purge"
+        );
+        assert!(
+            peer_routes.is_empty(),
+            "peer_routes must be empty after double purge"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4018,7 +4203,6 @@ mod tests {
 
     fn register_stub(
         conn: &StubConn,
-        connections: &mut HashMap<Arc<[u8]>, StubConn>,
         cid_routes: &mut HashMap<Arc<[u8]>, Arc<[u8]>>,
         cid_radix: &mut CidRadix,
         peer_routes: &mut HashMap<SocketAddr, Arc<[u8]>>,
@@ -4039,9 +4223,17 @@ mod tests {
         cid_routes: &HashMap<Arc<[u8]>, Arc<[u8]>>,
         peer_routes: &HashMap<SocketAddr, Arc<[u8]>>,
     ) {
-        assert!(connections.is_empty(), "{}: connections must be empty", label);
+        assert!(
+            connections.is_empty(),
+            "{}: connections must be empty",
+            label
+        );
         assert!(cid_routes.is_empty(), "{}: cid_routes must be empty", label);
-        assert!(peer_routes.is_empty(), "{}: peer_routes must be empty", label);
+        assert!(
+            peer_routes.is_empty(),
+            "{}: peer_routes must be empty",
+            label
+        );
     }
 
     #[test]
@@ -4052,7 +4244,9 @@ mod tests {
 
         let conn = StubConn {
             primary_scid: Arc::clone(&primary),
-            routing_scids: [Arc::clone(&primary), Arc::clone(&alias)].into_iter().collect(),
+            routing_scids: [Arc::clone(&primary), Arc::clone(&alias)]
+                .into_iter()
+                .collect(),
             peer_address: addr,
         };
 
@@ -4061,7 +4255,7 @@ mod tests {
         let mut cid_radix = CidRadix::new();
         let mut peer_routes = HashMap::new();
 
-        register_stub(&conn, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        register_stub(&conn, &mut cid_routes, &mut cid_radix, &mut peer_routes);
         connections.insert(Arc::clone(&primary), conn);
 
         sweep_closed_connections(
@@ -4073,7 +4267,12 @@ mod tests {
             stub_routes,
         );
 
-        assert_maps_empty("after single sweep", &connections, &cid_routes, &peer_routes);
+        assert_maps_empty(
+            "after single sweep",
+            &connections,
+            &cid_routes,
+            &peer_routes,
+        );
         assert!(
             cid_radix.longest_prefix_match(primary.as_ref()).is_none(),
             "primary must be removed from radix"
@@ -4099,8 +4298,16 @@ mod tests {
         for i in 0..rounds {
             let b = i as u8;
             let primary = cid(&[b, b, b, b, b, b, b, b]);
-            let alias1 = cid(&[b | 0x80, b | 0x80, b | 0x80, b | 0x80,
-                                b | 0x80, b | 0x80, b | 0x80, b | 0x80]);
+            let alias1 = cid(&[
+                b | 0x80,
+                b | 0x80,
+                b | 0x80,
+                b | 0x80,
+                b | 0x80,
+                b | 0x80,
+                b | 0x80,
+                b | 0x80,
+            ]);
             let addr = peer(7000 + i as u16);
 
             let conn = StubConn {
@@ -4111,7 +4318,7 @@ mod tests {
                 peer_address: addr,
             };
 
-            register_stub(&conn, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+            register_stub(&conn, &mut cid_routes, &mut cid_radix, &mut peer_routes);
             connections.insert(Arc::clone(&primary), conn);
 
             // Simulate handle_timeouts detecting this connection as closed.
@@ -4158,8 +4365,8 @@ mod tests {
         let mut cid_radix = CidRadix::new();
         let mut peer_routes = HashMap::new();
 
-        register_stub(&conn1, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
-        register_stub(&conn2, &mut connections, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        register_stub(&conn1, &mut cid_routes, &mut cid_radix, &mut peer_routes);
+        register_stub(&conn2, &mut cid_routes, &mut cid_radix, &mut peer_routes);
         connections.insert(Arc::clone(&p1), conn1);
         connections.insert(Arc::clone(&p2), conn2);
 
@@ -4214,8 +4421,8 @@ mod tests {
     // pending chunks are discarded.
     // -----------------------------------------------------------------------
 
-    use crate::{RequestEnvelope, StreamPhase};
     use crate::resilience::{AdaptiveAdmission, RouteQueueLimiter};
+    use crate::{RequestEnvelope, StreamPhase};
     use std::time::Instant;
     use tokio::sync::{Semaphore, mpsc, oneshot};
 
@@ -4228,6 +4435,7 @@ mod tests {
             body_buf: std::collections::VecDeque::new(),
             body_buf_bytes: 0,
             body_bytes_received: 0,
+            last_body_activity: Instant::now(),
             backend_addr: None,
             backend_index: None,
             upstream_name: None,
@@ -4251,6 +4459,7 @@ mod tests {
     /// Verifies permits are released and body_tx is dropped.
     #[test]
     fn abort_stream_receiving_request_releases_permits() {
+        let metrics = crate::Metrics::default();
         let global_sem = Arc::new(Semaphore::new(1));
         let upstream_sem = Arc::new(Semaphore::new(1));
         let adaptive = Arc::new(AdaptiveAdmission::new(false, 1, 100, 1, 1, 1000));
@@ -4270,13 +4479,21 @@ mod tests {
         req.route_queue_permit = Some(route_permit);
         req.body_tx = Some(body_tx);
 
-        let phase = abort_stream(&mut req);
+        let phase = abort_stream(&mut req, &metrics);
 
         assert_eq!(phase, StreamPhase::ReceivingRequest);
 
         // Permits released: semaphores should be available again.
-        assert_eq!(global_sem.available_permits(), 1, "global semaphore must be freed");
-        assert_eq!(upstream_sem.available_permits(), 1, "upstream semaphore must be freed");
+        assert_eq!(
+            global_sem.available_permits(),
+            1,
+            "global semaphore must be freed"
+        );
+        assert_eq!(
+            upstream_sem.available_permits(),
+            1,
+            "upstream semaphore must be freed"
+        );
 
         // body_tx dropped: body_rx should see the channel as disconnected.
         drop(body_rx); // safe to drop receiver — just checking channel is closed
@@ -4294,20 +4511,22 @@ mod tests {
     /// send will return Err and it will exit.
     #[test]
     fn abort_stream_awaiting_upstream_cancels_oneshot() {
+        let metrics = crate::Metrics::default();
         let (result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
 
         let mut req = make_envelope(StreamPhase::AwaitingUpstream);
         req.upstream_result_rx = Some(result_rx);
 
-        let phase = abort_stream(&mut req);
+        let phase = abort_stream(&mut req, &metrics);
 
         assert_eq!(phase, StreamPhase::AwaitingUpstream);
-        assert!(req.upstream_result_rx.is_none(), "oneshot receiver must be cleared");
+        assert!(
+            req.upstream_result_rx.is_none(),
+            "oneshot receiver must be cleared"
+        );
 
         // Sending on the now-orphaned sender should return Err (closed).
-        let send_result = result_tx.send(Err(spooky_errors::ProxyError::Transport(
-            "test".into(),
-        )));
+        let send_result = result_tx.send(Err(spooky_errors::ProxyError::Transport("test".into())));
         assert!(
             send_result.is_err(),
             "upstream task send must fail after receiver dropped"
@@ -4319,17 +4538,24 @@ mod tests {
     /// return Err, making the task exit promptly.
     #[test]
     fn abort_stream_sending_response_closes_chunk_channel() {
+        let metrics = crate::Metrics::default();
         let (chunk_tx, chunk_rx) = mpsc::channel::<crate::ResponseChunk>(4);
 
         let mut req = make_envelope(StreamPhase::SendingResponse);
         req.response_chunk_rx = Some(chunk_rx);
         req.pending_chunk = Some(crate::ResponseChunk::End);
 
-        let phase = abort_stream(&mut req);
+        let phase = abort_stream(&mut req, &metrics);
 
         assert_eq!(phase, StreamPhase::SendingResponse);
-        assert!(req.response_chunk_rx.is_none(), "chunk receiver must be cleared");
-        assert!(req.pending_chunk.is_none(), "pending chunk must be discarded");
+        assert!(
+            req.response_chunk_rx.is_none(),
+            "chunk receiver must be cleared"
+        );
+        assert!(
+            req.pending_chunk.is_none(),
+            "pending chunk must be discarded"
+        );
 
         // The body-pump task's sender should observe a closed channel.
         let send_result = chunk_tx.try_send(crate::ResponseChunk::End);
@@ -4343,6 +4569,7 @@ mod tests {
     /// of which fields are populated.
     #[test]
     fn abort_stream_upstream_error_releases_all_resources() {
+        let metrics = crate::Metrics::default();
         let global_sem = Arc::new(Semaphore::new(2));
         let upstream_sem = Arc::new(Semaphore::new(2));
 
@@ -4359,11 +4586,19 @@ mod tests {
         req.response_chunk_rx = Some(chunk_rx);
         req.pending_chunk = Some(crate::ResponseChunk::End);
 
-        let phase = abort_stream(&mut req);
+        let phase = abort_stream(&mut req, &metrics);
 
         assert_eq!(phase, StreamPhase::SendingResponse);
-        assert_eq!(global_sem.available_permits(), 2, "global semaphore must be fully freed");
-        assert_eq!(upstream_sem.available_permits(), 2, "upstream semaphore must be fully freed");
+        assert_eq!(
+            global_sem.available_permits(),
+            2,
+            "global semaphore must be fully freed"
+        );
+        assert_eq!(
+            upstream_sem.available_permits(),
+            2,
+            "upstream semaphore must be fully freed"
+        );
         assert!(req.upstream_result_rx.is_none());
         assert!(req.response_chunk_rx.is_none());
         assert!(req.pending_chunk.is_none());
@@ -4376,15 +4611,20 @@ mod tests {
     /// double-decrement any semaphore.
     #[test]
     fn abort_stream_is_idempotent() {
+        let metrics = crate::Metrics::default();
         let global_sem = Arc::new(Semaphore::new(1));
         let permit = global_sem.clone().try_acquire_owned().unwrap();
 
         let mut req = make_envelope(StreamPhase::ReceivingRequest);
         req.global_inflight_permit = Some(permit);
 
-        abort_stream(&mut req);
-        abort_stream(&mut req); // second call must be a no-op
+        abort_stream(&mut req, &metrics);
+        abort_stream(&mut req, &metrics); // second call must be a no-op
 
-        assert_eq!(global_sem.available_permits(), 1, "must not double-release permit");
+        assert_eq!(
+            global_sem.available_permits(),
+            1,
+            "must not double-release permit"
+        );
     }
 }

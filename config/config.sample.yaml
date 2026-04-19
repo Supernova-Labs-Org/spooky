@@ -60,6 +60,7 @@ performance:
     control_plane_threads: 2
     packet_shards_per_worker: 1
     packet_shard_queue_capacity: 2048
+    packet_shard_queue_max_bytes: 67108864    # max queued UDP datagram bytes per shard dispatch queue (64 MiB)
     reuseport: true
     pin_workers: false
     global_inflight_limit: 4096
@@ -82,7 +83,11 @@ performance:
     quic_initial_max_stream_data: 1000000   # per-stream flow control window (bytes); must be <= quic_initial_max_data
     quic_initial_max_streams_bidi: 100      # max concurrent bidirectional streams per connection
     quic_initial_max_streams_uni: 100       # max concurrent unidirectional streams per connection
+    max_request_body_bytes: 1000000         # hard cap on client request body bytes per stream (413 on breach)
     max_response_body_bytes: 104857600      # hard cap on upstream response body per stream (100 MiB); streams exceeding this get a 502
+    request_buffer_global_cap_bytes: 67108864         # global cap for bytes buffered in request backpressure queues (64 MiB)
+    unknown_length_response_prebuffer_bytes: 2097152  # max bytes buffered for unknown-length upstream responses before emitting headers (2 MiB)
+    client_body_idle_timeout_ms: 10000                # fail request streams that stop sending body bytes for this long
 
 observability:
     metrics:

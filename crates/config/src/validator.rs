@@ -100,6 +100,11 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.packet_shard_queue_max_bytes == 0 {
+        error!("performance.packet_shard_queue_max_bytes must be greater than 0");
+        return false;
+    }
+
     if config.performance.worker_threads > 1 && !config.performance.reuseport {
         error!("performance.reuseport must be true when performance.worker_threads > 1");
         return false;
@@ -219,6 +224,26 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if config.performance.max_request_body_bytes == 0 {
+        error!("performance.max_request_body_bytes must be greater than 0");
+        return false;
+    }
+
+    if config.performance.request_buffer_global_cap_bytes == 0 {
+        error!("performance.request_buffer_global_cap_bytes must be greater than 0");
+        return false;
+    }
+
+    if config.performance.unknown_length_response_prebuffer_bytes == 0 {
+        error!("performance.unknown_length_response_prebuffer_bytes must be greater than 0");
+        return false;
+    }
+
+    if config.performance.client_body_idle_timeout_ms == 0 {
+        error!("performance.client_body_idle_timeout_ms must be greater than 0");
+        return false;
+    }
+
     if config.performance.backend_connect_timeout_ms > config.performance.backend_timeout_ms {
         error!("performance.backend_connect_timeout_ms must be <= backend_timeout_ms");
         return false;
@@ -241,6 +266,39 @@ pub fn validate(config: &Config) -> bool {
     {
         error!(
             "performance.backend_body_total_timeout_ms must be <= backend_total_request_timeout_ms"
+        );
+        return false;
+    }
+
+    if config.performance.max_request_body_bytes
+        > config.performance.quic_initial_max_stream_data as usize
+    {
+        error!(
+            "performance.max_request_body_bytes ({}) must be <= quic_initial_max_stream_data ({})",
+            config.performance.max_request_body_bytes,
+            config.performance.quic_initial_max_stream_data
+        );
+        return false;
+    }
+
+    if config.performance.request_buffer_global_cap_bytes
+        < config.performance.max_request_body_bytes
+    {
+        error!(
+            "performance.request_buffer_global_cap_bytes ({}) must be >= max_request_body_bytes ({})",
+            config.performance.request_buffer_global_cap_bytes,
+            config.performance.max_request_body_bytes
+        );
+        return false;
+    }
+
+    if config.performance.unknown_length_response_prebuffer_bytes
+        > config.performance.max_response_body_bytes
+    {
+        error!(
+            "performance.unknown_length_response_prebuffer_bytes ({}) must be <= max_response_body_bytes ({})",
+            config.performance.unknown_length_response_prebuffer_bytes,
+            config.performance.max_response_body_bytes
         );
         return false;
     }
@@ -738,6 +796,10 @@ upstream:
         assert_eq!(cfg.performance.control_plane_threads, 2);
         assert_eq!(cfg.performance.packet_shards_per_worker, 1);
         assert_eq!(cfg.performance.packet_shard_queue_capacity, 2048);
+        assert_eq!(
+            cfg.performance.packet_shard_queue_max_bytes,
+            64 * 1024 * 1024
+        );
         assert!(cfg.performance.reuseport);
         assert!(!cfg.performance.pin_workers);
         assert_eq!(cfg.performance.global_inflight_limit, 4096);
@@ -753,6 +815,16 @@ upstream:
         assert_eq!(cfg.performance.h2_pool_max_idle_per_backend, 256);
         assert_eq!(cfg.performance.h2_pool_idle_timeout_ms, 90_000);
         assert_eq!(cfg.performance.per_backend_inflight_limit, 64);
+        assert_eq!(cfg.performance.max_request_body_bytes, 1_000_000);
+        assert_eq!(
+            cfg.performance.request_buffer_global_cap_bytes,
+            64 * 1024 * 1024
+        );
+        assert_eq!(
+            cfg.performance.unknown_length_response_prebuffer_bytes,
+            2 * 1024 * 1024
+        );
+        assert_eq!(cfg.performance.client_body_idle_timeout_ms, 10_000);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
         assert!(cfg.resilience.adaptive_admission.enabled);
@@ -790,6 +862,10 @@ upstream:
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.packet_shard_queue_capacity = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.packet_shard_queue_max_bytes = 0;
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -870,6 +946,37 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.max_request_body_bytes = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.request_buffer_global_cap_bytes = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.unknown_length_response_prebuffer_bytes = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.client_body_idle_timeout_ms = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.max_request_body_bytes =
+            (cfg.performance.quic_initial_max_stream_data as usize).saturating_add(1);
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.request_buffer_global_cap_bytes =
+            cfg.performance.max_request_body_bytes.saturating_sub(1);
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.performance.unknown_length_response_prebuffer_bytes =
+            cfg.performance.max_response_body_bytes.saturating_add(1);
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.resilience.route_queue.default_cap = 0;
         assert!(!validate(&cfg));
 
@@ -944,6 +1051,7 @@ upstream:
         cfg.performance.control_plane_threads = 2;
         cfg.performance.packet_shards_per_worker = 2;
         cfg.performance.packet_shard_queue_capacity = 1024;
+        cfg.performance.packet_shard_queue_max_bytes = 16 * 1024 * 1024;
         cfg.performance.reuseport = true;
         cfg.performance.pin_workers = true;
         cfg.performance.global_inflight_limit = 10_000;
@@ -959,6 +1067,10 @@ upstream:
         cfg.performance.h2_pool_max_idle_per_backend = 128;
         cfg.performance.h2_pool_idle_timeout_ms = 120_000;
         cfg.performance.per_backend_inflight_limit = 32;
+        cfg.performance.max_request_body_bytes = 512 * 1024;
+        cfg.performance.request_buffer_global_cap_bytes = 8 * 1024 * 1024;
+        cfg.performance.unknown_length_response_prebuffer_bytes = 512 * 1024;
+        cfg.performance.client_body_idle_timeout_ms = 7_500;
         cfg.resilience.route_queue.default_cap = 256;
         cfg.resilience.route_queue.global_cap = 2048;
         cfg.resilience.route_queue.shed_retry_after_seconds = 2;

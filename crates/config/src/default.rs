@@ -86,6 +86,10 @@ pub fn perf_default_packet_shard_queue_capacity() -> usize {
     2048
 }
 
+pub fn perf_default_packet_shard_queue_max_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
 pub fn perf_default_reuseport() -> bool {
     true
 }
@@ -176,6 +180,22 @@ pub fn perf_default_quic_initial_max_streams_uni() -> u64 {
 
 pub fn perf_default_max_response_body_bytes() -> usize {
     100 * 1024 * 1024 // 100 MiB
+}
+
+pub fn perf_default_max_request_body_bytes() -> usize {
+    1_000_000 // 1 MiB
+}
+
+pub fn perf_default_request_buffer_global_cap_bytes() -> usize {
+    64 * 1024 * 1024 // 64 MiB
+}
+
+pub fn perf_default_unknown_length_response_prebuffer_bytes() -> usize {
+    2 * 1024 * 1024 // 2 MiB
+}
+
+pub fn perf_default_client_body_idle_timeout_ms() -> u64 {
+    10_000
 }
 
 pub fn resilience_default_adaptive_enabled() -> bool {

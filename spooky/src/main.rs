@@ -8,7 +8,7 @@ mod runtime_guard;
 
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::{thread, time::Duration};
 
@@ -136,6 +136,7 @@ Use a port >= 1024 for unprivileged startup.",
 
     let pin_workers = config_yaml.performance.pin_workers;
     let shard_queue_capacity = config_yaml.performance.packet_shard_queue_capacity.max(1);
+    let shard_queue_max_bytes = config_yaml.performance.packet_shard_queue_max_bytes.max(1);
     let mut worker_handles = Vec::with_capacity(sockets.len());
     for (worker_idx, socket) in sockets.into_iter().enumerate() {
         let worker_config = config_yaml.clone();
@@ -159,6 +160,7 @@ Use a port >= 1024 for unprivileged startup.",
                     worker_idx,
                     shard_count,
                     shard_queue_capacity,
+                    shard_queue_max_bytes,
                     pin_workers,
                     worker_config,
                     socket,
@@ -224,6 +226,7 @@ fn run_sharded_listener_worker(
     worker_idx: usize,
     shard_count: usize,
     shard_queue_capacity: usize,
+    shard_queue_max_bytes: usize,
     pin_workers: bool,
     worker_config: spooky_config::config::Config,
     socket: std::net::UdpSocket,
@@ -238,6 +241,7 @@ fn run_sharded_listener_worker(
 
     let mut shard_handles = Vec::with_capacity(shard_count);
     let mut shard_txs: Vec<SyncSender<IngressPacket>> = Vec::with_capacity(shard_count);
+    let mut shard_queue_bytes: Vec<Arc<AtomicUsize>> = Vec::with_capacity(shard_count);
 
     for shard_idx in 0..shard_count {
         let shard_socket = socket.try_clone().map_err(|err| {
@@ -252,6 +256,8 @@ fn run_sharded_listener_worker(
         let shard_thread_idx = worker_idx
             .saturating_mul(shard_count)
             .saturating_add(shard_idx);
+        let shard_queue_bytes_counter = Arc::new(AtomicUsize::new(0));
+        shard_queue_bytes.push(Arc::clone(&shard_queue_bytes_counter));
 
         let (tx, rx) = mpsc::sync_channel::<IngressPacket>(shard_queue_capacity);
         shard_txs.push(tx);
@@ -277,10 +283,15 @@ fn run_sharded_listener_worker(
                 while !shard_shutdown.load(Ordering::Relaxed) {
                     match rx.recv_timeout(idle_timeout) {
                         Ok(packet) => {
+                            let packet_bytes = packet.bytes.len();
                             listener.process_datagram(
                                 packet.peer,
                                 packet.local_addr,
                                 &packet.bytes,
+                            );
+                            release_shard_queue_bytes(
+                                shard_queue_bytes_counter.as_ref(),
+                                packet_bytes,
                             );
                         }
                         Err(RecvTimeoutError::Timeout) => {
@@ -315,6 +326,16 @@ fn run_sharded_listener_worker(
                     continue;
                 }
                 let shard_idx = shard_index_for_peer(&peer, shard_count);
+                let packet_len = len;
+                if !try_reserve_shard_queue_bytes(
+                    shard_queue_bytes[shard_idx].as_ref(),
+                    packet_len,
+                    shard_queue_max_bytes,
+                ) {
+                    worker_shared.inc_ingress_queue_drop();
+                    worker_shared.inc_ingress_queue_drop_bytes(packet_len);
+                    continue;
+                }
                 let packet = IngressPacket {
                     peer,
                     local_addr,
@@ -322,10 +343,19 @@ fn run_sharded_listener_worker(
                 };
                 match shard_txs[shard_idx].try_send(packet) {
                     Ok(()) => {}
-                    Err(TrySendError::Full(_packet)) => {
+                    Err(TrySendError::Full(packet)) => {
+                        release_shard_queue_bytes(
+                            shard_queue_bytes[shard_idx].as_ref(),
+                            packet.bytes.len(),
+                        );
                         worker_shared.inc_ingress_queue_drop();
+                        worker_shared.inc_ingress_queue_drop_bytes(packet.bytes.len());
                     }
-                    Err(TrySendError::Disconnected(_packet)) => {
+                    Err(TrySendError::Disconnected(packet)) => {
+                        release_shard_queue_bytes(
+                            shard_queue_bytes[shard_idx].as_ref(),
+                            packet.bytes.len(),
+                        );
                         return Err(format!(
                             "worker {} shard {} dispatch channel disconnected",
                             worker_idx, shard_idx
@@ -398,10 +428,40 @@ fn shard_index_for_peer(peer: &SocketAddr, shard_count: usize) -> usize {
     (hasher.finish() as usize) % shard_count.max(1)
 }
 
+fn try_reserve_shard_queue_bytes(counter: &AtomicUsize, packet_bytes: usize, cap: usize) -> bool {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        let next = current.saturating_add(packet_bytes);
+        if next > cap {
+            return false;
+        }
+        if counter
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+fn release_shard_queue_bytes(counter: &AtomicUsize, packet_bytes: usize) {
+    loop {
+        let current = counter.load(Ordering::Relaxed);
+        let next = current.saturating_sub(packet_bytes);
+        if counter
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::shard_index_for_peer;
+    use super::{release_shard_queue_bytes, shard_index_for_peer, try_reserve_shard_queue_bytes};
     use std::net::SocketAddr;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn shard_index_is_stable_for_same_peer() {
@@ -416,6 +476,23 @@ mod tests {
         let peer: SocketAddr = "10.1.2.3:443".parse().expect("peer addr");
         let idx = shard_index_for_peer(&peer, 16);
         assert!(idx < 16);
+    }
+
+    #[test]
+    fn shard_queue_byte_reservation_obeys_cap() {
+        let counter = AtomicUsize::new(0);
+        assert!(try_reserve_shard_queue_bytes(&counter, 10, 16));
+        assert!(!try_reserve_shard_queue_bytes(&counter, 7, 16));
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 10);
+    }
+
+    #[test]
+    fn shard_queue_byte_release_is_saturating() {
+        let counter = AtomicUsize::new(8);
+        release_shard_queue_bytes(&counter, 3);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 5);
+        release_shard_queue_bytes(&counter, 10);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 }
 

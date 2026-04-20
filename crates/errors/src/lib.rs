@@ -59,9 +59,11 @@ pub enum ProxyError {
 
 
 pub fn is_retryable(err: &ProxyError) -> bool {
-    // TLS and Protocol errors are not retryable
-    matches!(
-        err,
-        ProxyError::Transport(_) | ProxyError::Timeout | ProxyError::Pool(_)
-    )
+    match err {
+        ProxyError::Transport(_) | ProxyError::Timeout => true,
+        // Pool send failures are connection-level (TLS/cert/SNI) — not transient
+        ProxyError::Pool(PoolError::Send(_)) => false,
+        ProxyError::Pool(_) => true,
+        _ => false,
+    }
 }

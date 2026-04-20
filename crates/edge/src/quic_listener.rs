@@ -3420,8 +3420,33 @@ impl QUICListener {
                     overload_retry_after_seconds,
                 )
             }
+            Err(ProxyError::Pool(PoolError::Send(ref send_err))) => {
+                // Log the full inner error — commonly exposes TLS/cert/SNI mismatches
+                // that look like transport failures but are actually local config errors.
+                // Do NOT mark the backend unhealthy: the backend may be fully operational;
+                // the connection failure is a proxy-side config issue.
+                error!(
+                    "Upstream send failed for {} (possible TLS/cert/SNI misconfiguration): {}",
+                    backend_addr, send_err
+                );
+                metrics.inc_health_failure(HealthFailureReason::Tls);
+                metrics.inc_failure();
+                metrics.inc_backend_error();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
+                debug!(
+                    "Upstream {} status 502 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_GATEWAY,
+                    b"upstream error\n",
+                )
+            }
             Err(ProxyError::Transport(_))
-            | Err(ProxyError::Pool(PoolError::Send(_)))
             | Err(ProxyError::Pool(PoolError::InflightLimiterClosed))
             | Err(ProxyError::Pool(PoolError::UnknownBackend(_))) => {
                 error!("Upstream transport error");

@@ -28,6 +28,8 @@ pub struct BackendState {
 #[derive(Clone)]
 enum HealthState {
     Healthy,
+    // `reason` is stored for future introspection; suppressed until wired to metrics
+    #[allow(dead_code)]
     Unhealthy { until: Instant, successes: u32, reason: HealthFailureReason },
 }
 

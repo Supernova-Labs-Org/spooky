@@ -2130,13 +2130,11 @@ impl QUICListener {
                                             Ok(response) => response,
                                             Err(primary_err) => {
                                                 let retry_reason = classify_retry_reason(&primary_err);
-                                                if !bodyless_mode {
-                                                    return Err(primary_err);
-                                                } else if !is_retryable(&primary_err) {
-                                                    return Err(primary_err);
-                                                } else if retry_budget.allow_retry(&route_name).is_err() {
-                                                    return Err(primary_err);
-                                                } else if alternate_backend.is_none() {
+                                                let can_retry = bodyless_mode
+                                                    && is_retryable(&primary_err)
+                                                    && retry_budget.allow_retry(&route_name).is_ok()
+                                                    && alternate_backend.is_some();
+                                                if !can_retry {
                                                     return Err(primary_err);
                                                 } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()

@@ -897,6 +897,40 @@ fn connection_flood_is_rate_limited() {
     );
 }
 
+/// Hard cap on active connections should reject additional Initial packets
+/// even when token-bucket rate limits are permissive.
+#[test]
+fn active_connection_cap_rejects_excess_initial_packets() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_certs(&dir);
+    let mut config =
+        make_config_with_rate_limit(0, cert, key, "127.0.0.1:1".to_string(), 10_000, 10_000);
+    config.performance.max_active_connections = 1;
+    let mut listener = QUICListener::new(config).expect("listener");
+    let addr = listener.socket.local_addr().unwrap();
+
+    const FLOOD_COUNT: usize = 8;
+    for _ in 0..FLOOD_COUNT {
+        let pkt = build_initial_packet(addr);
+        send_udp(addr, &pkt);
+        listener.poll();
+    }
+
+    assert!(
+        listener.connections.len() <= 1,
+        "active connection cap must keep at most one connection, got {}",
+        listener.connections.len()
+    );
+    assert!(
+        listener
+            .metrics
+            .connection_cap_rejects
+            .load(Ordering::Relaxed)
+            > 0,
+        "connection cap should emit rejection metrics"
+    );
+}
+
 /// Once draining starts, unknown/new Initial packets must not create a
 /// connection, even if admission limits would otherwise allow it.
 #[test]
@@ -1040,9 +1074,8 @@ fn stress_connect(
     rand::thread_rng().fill_bytes(&mut scid_bytes);
     let scid = quiche::ConnectionId::from_ref(&scid_bytes);
 
-    let mut conn =
-        quiche::connect(Some("localhost"), &scid, local_addr, server_addr, &mut cfg)
-            .map_err(|e| format!("connect: {e:?}"))?;
+    let mut conn = quiche::connect(Some("localhost"), &scid, local_addr, server_addr, &mut cfg)
+        .map_err(|e| format!("connect: {e:?}"))?;
 
     let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
     let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
@@ -1070,8 +1103,14 @@ fn stress_connect(
 
         match socket.recv_from(&mut buf) {
             Ok((len, from)) => {
-                conn.recv(&mut buf[..len], quiche::RecvInfo { from, to: local_addr })
-                    .map_err(|e| format!("recv: {e:?}"))?;
+                conn.recv(
+                    &mut buf[..len],
+                    quiche::RecvInfo {
+                        from,
+                        to: local_addr,
+                    },
+                )
+                .map_err(|e| format!("recv: {e:?}"))?;
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
@@ -1095,10 +1134,7 @@ fn stress_connect(
 }
 
 /// Send a graceful QUIC CONNECTION_CLOSE and flush.
-fn stress_close_gracefully(
-    socket: &UdpSocket,
-    conn: &mut quiche::Connection,
-) {
+fn stress_close_gracefully(socket: &UdpSocket, conn: &mut quiche::Connection) {
     let _ = conn.close(false, 0, b"done");
     let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
     loop {

@@ -38,8 +38,8 @@ use tokio::sync::{
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
-    ChannelBody, ForwardResult, Metrics, QUICListener, QuicConnection, RequestEnvelope,
-    ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase,
+    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener, QuicConnection,
+    RequestEnvelope, ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_STREAMS_PER_CONNECTION,
@@ -443,7 +443,7 @@ impl QUICListener {
             .saturating_mul(worker_threads);
 
         info!(
-            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} backend_connect_timeout_ms={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} backend_total_request_timeout_ms={} client_body_idle_timeout_ms={} max_request_body_bytes={} max_response_body_bytes={} request_buffer_global_cap_bytes={} unknown_length_response_prebuffer_bytes={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
+            "Performance profile: worker_threads={} control_plane_threads={} reuseport={} pin_workers={} global_inflight_limit={} per_upstream_inflight_limit={} per_backend_inflight_limit={} max_active_connections={} backend_connect_timeout_ms={} backend_timeout_ms={} backend_body_idle_timeout_ms={} backend_body_total_timeout_ms={} backend_total_request_timeout_ms={} client_body_idle_timeout_ms={} max_request_body_bytes={} max_response_body_bytes={} request_buffer_global_cap_bytes={} unknown_length_response_prebuffer_bytes={} udp_recv_buffer_bytes={} udp_send_buffer_bytes={} h2_pool_max_idle_per_backend={} h2_pool_idle_timeout_ms={}",
             worker_threads,
             config.performance.control_plane_threads.max(1),
             config.performance.reuseport,
@@ -451,6 +451,7 @@ impl QUICListener {
             global_inflight_limit,
             per_upstream_limit,
             config.performance.per_backend_inflight_limit,
+            config.performance.max_active_connections,
             config.performance.backend_connect_timeout_ms,
             config.performance.backend_timeout_ms,
             config.performance.backend_body_idle_timeout_ms,
@@ -600,6 +601,7 @@ impl QUICListener {
         let backend_total_request_timeout =
             Duration::from_millis(config.performance.backend_total_request_timeout_ms);
         let drain_timeout = Duration::from_millis(config.performance.shutdown_drain_timeout_ms);
+        let max_active_connections = config.performance.max_active_connections.max(1);
         let max_request_body_bytes = config.performance.max_request_body_bytes;
         let max_response_body_bytes = config.performance.max_response_body_bytes;
         let request_buffer_global_cap_bytes = config.performance.request_buffer_global_cap_bytes;
@@ -632,6 +634,7 @@ impl QUICListener {
             backend_body_total_timeout,
             client_body_idle_timeout,
             backend_total_request_timeout,
+            max_active_connections,
             max_request_body_bytes,
             max_response_body_bytes,
             request_buffer_global_cap_bytes,
@@ -837,6 +840,7 @@ impl QUICListener {
         self.cid_routes.clear();
         self.peer_routes.clear();
         self.cid_radix.clear();
+        self.refresh_active_connection_metric();
     }
 
     fn take_or_create_connection(
@@ -914,6 +918,19 @@ impl QUICListener {
         if !self.conn_rate_limiter.try_consume() {
             debug!(
                 "New connection rate limit exceeded, dropping Initial packet from {}",
+                peer
+            );
+            return None;
+        }
+
+        if self.connections.len() >= self.max_active_connections {
+            self.metrics.inc_connection_cap_reject();
+            self.metrics
+                .inc_overload_shed_reason(OverloadShedReason::ConnectionCap);
+            debug!(
+                "Active connection cap reached (cap={}, active={}), dropping Initial packet from {}",
+                self.max_active_connections,
+                self.connections.len(),
                 peer
             );
             return None;
@@ -1258,6 +1275,7 @@ impl QUICListener {
             error!("QUIC recv failed: {:?}", e);
             Self::release_connection_streams(&mut connection, &self.metrics);
             self.remove_connection_routes(&connection);
+            self.refresh_active_connection_metric();
             return;
         }
 
@@ -1329,6 +1347,8 @@ impl QUICListener {
             self.remove_connection_routes(&connection);
             debug!("Connection closed, not storing");
         }
+
+        self.refresh_active_connection_metric();
     }
 
     fn handle_timeouts(&mut self) {
@@ -1398,6 +1418,7 @@ impl QUICListener {
             to_remove,
             |c| ConnectionRoutes::from(c),
         );
+        self.refresh_active_connection_metric();
     }
 
     fn handle_timeout(socket: &UdpSocket, send_buf: &mut [u8], connection: &mut QuicConnection) {
@@ -1411,6 +1432,10 @@ impl QUICListener {
             connection.last_activity = Instant::now();
             Self::flush_send(socket, send_buf, connection);
         }
+    }
+
+    fn refresh_active_connection_metric(&self) {
+        self.metrics.set_active_connections(self.connections.len());
     }
 
     fn release_connection_streams(connection: &mut QuicConnection, metrics: &Metrics) {
@@ -1632,7 +1657,7 @@ impl QUICListener {
                             );
                             if !resilience.brownout.route_allowed(&upstream_name) {
                                 metrics.inc_failure();
-                                metrics.inc_overload_shed();
+                                metrics.inc_overload_shed_reason(OverloadShedReason::Brownout);
                                 metrics.record_route(
                                     &upstream_name,
                                     request_start.elapsed(),
@@ -1656,7 +1681,9 @@ impl QUICListener {
                                 Some(permit) => permit,
                                 None => {
                                     metrics.inc_failure();
-                                    metrics.inc_overload_shed();
+                                    metrics.inc_overload_shed_reason(
+                                        OverloadShedReason::AdaptiveAdmission,
+                                    );
                                     metrics.record_route(
                                         &upstream_name,
                                         request_start.elapsed(),
@@ -1681,7 +1708,8 @@ impl QUICListener {
                                     Ok(permit) => permit,
                                     Err(RouteQueueRejection::RouteCap) => {
                                         metrics.inc_failure();
-                                        metrics.inc_overload_shed();
+                                        metrics
+                                            .inc_overload_shed_reason(OverloadShedReason::RouteCap);
                                         metrics.record_route(
                                             &upstream_name,
                                             request_start.elapsed(),
@@ -1701,7 +1729,9 @@ impl QUICListener {
                                     }
                                     Err(RouteQueueRejection::GlobalCap) => {
                                         metrics.inc_failure();
-                                        metrics.inc_overload_shed();
+                                        metrics.inc_overload_shed_reason(
+                                            OverloadShedReason::RouteGlobalCap,
+                                        );
                                         metrics.record_route(
                                             &upstream_name,
                                             request_start.elapsed(),
@@ -1726,7 +1756,9 @@ impl QUICListener {
                                     Ok(permit) => permit,
                                     Err(_) => {
                                         metrics.inc_failure();
-                                        metrics.inc_overload_shed();
+                                        metrics.inc_overload_shed_reason(
+                                            OverloadShedReason::GlobalInflight,
+                                        );
                                         metrics.record_route(
                                             &upstream_name,
                                             request_start.elapsed(),
@@ -1753,7 +1785,9 @@ impl QUICListener {
                                         Err(_) => {
                                             drop(global_permit);
                                             metrics.inc_failure();
-                                            metrics.inc_overload_shed();
+                                            metrics.inc_overload_shed_reason(
+                                                OverloadShedReason::UpstreamInflight,
+                                            );
                                             metrics.record_route(
                                                 &upstream_name,
                                                 request_start.elapsed(),
@@ -1775,7 +1809,9 @@ impl QUICListener {
                                     None => {
                                         drop(global_permit);
                                         metrics.inc_failure();
-                                        metrics.inc_overload_shed();
+                                        metrics.inc_overload_shed_reason(
+                                            OverloadShedReason::UpstreamInflight,
+                                        );
                                         metrics.record_route(
                                             &upstream_name,
                                             request_start.elapsed(),
@@ -1801,7 +1837,9 @@ impl QUICListener {
                                     drop(upstream_permit);
                                     drop(global_permit);
                                     metrics.inc_failure();
-                                    metrics.inc_overload_shed();
+                                    metrics.inc_overload_shed_reason(
+                                        OverloadShedReason::BackendInflight,
+                                    );
                                     metrics.record_route(
                                         &upstream_name,
                                         request_start.elapsed(),
@@ -1895,9 +1933,10 @@ impl QUICListener {
                             let method_owned = method.clone();
                             let path_owned = path.clone();
                             let headers_owned = list.clone();
-                            let (result_tx, result_rx) = oneshot::channel::<ForwardResult>();
+                            let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
-                                let result = async {
+                                let mut hedge_telemetry = crate::HedgeTelemetry::default();
+                                let result: ForwardResult = async {
                                     retry_budget.mark_primary(&route_name);
 
                                     let send_once =
@@ -1944,6 +1983,7 @@ impl QUICListener {
                                         if let Some((hedge_backend, hedge_request)) =
                                             hedge_candidate
                                         {
+                                            let primary_started = Instant::now();
                                             let primary_backend = fwd_addr.clone();
                                             let primary_fut = send_once(
                                                 primary_backend,
@@ -1961,6 +2001,7 @@ impl QUICListener {
                                             } {
                                                 result?
                                             } else if retry_budget.allow_retry(&route_name) {
+                                                hedge_telemetry.launched = true;
                                                 let hedge_fut = send_once(
                                                     hedge_backend,
                                                     hedge_request,
@@ -1969,8 +2010,18 @@ impl QUICListener {
                                                 );
                                                 tokio::pin!(hedge_fut);
                                                 tokio::select! {
-                                                    result = &mut primary_fut => result?,
-                                                    result = &mut hedge_fut => result?,
+                                                    result = &mut primary_fut => {
+                                                        hedge_telemetry.primary_won_after_trigger = true;
+                                                        hedge_telemetry.hedge_wasted = true;
+                                                        result?
+                                                    },
+                                                    result = &mut hedge_fut => {
+                                                        hedge_telemetry.hedge_won = true;
+                                                        let elapsed_ms = primary_started.elapsed().as_millis() as u64;
+                                                        let delay_ms = hedge_delay.as_millis() as u64;
+                                                        hedge_telemetry.primary_late_ms = elapsed_ms.saturating_sub(delay_ms);
+                                                        result?
+                                                    },
                                                 }
                                             } else {
                                                 primary_fut.await?
@@ -2027,7 +2078,10 @@ impl QUICListener {
                                 }
                                 .await;
                                 // Ignore send error: receiver dropped means the stream was reset.
-                                let _ = result_tx.send(result);
+                                let _ = result_tx.send(UpstreamResult {
+                                    forward: result,
+                                    hedge: hedge_telemetry,
+                                });
                             };
                             if !spawn_async_task(fut, "upstream") {
                                 error!("dropping upstream task: no runtime available");
@@ -2230,7 +2284,8 @@ impl QUICListener {
                                 && let Some(req) = connection.streams.get(&stream_id)
                             {
                                 metrics.inc_failure();
-                                metrics.inc_overload_shed();
+                                metrics
+                                    .inc_overload_shed_reason(OverloadShedReason::RequestBufferCap);
                                 let route_label =
                                     req.upstream_name.as_deref().unwrap_or("unrouted");
                                 metrics.record_route(
@@ -2454,30 +2509,49 @@ impl QUICListener {
                     && req.body_buf.is_empty()
             });
 
-            // upstream_ready: Option<ForwardResult>
+            // upstream_ready: Option<UpstreamResult>
             //   None          → oneshot not yet resolved (or not eligible), skip
             //   Some(Ok(...)) → upstream responded successfully
             //   Some(Err(.))  → upstream error (or sender dropped)
-            let upstream_ready: Option<ForwardResult> = if can_poll_upstream {
+            let upstream_ready: Option<UpstreamResult> = if can_poll_upstream {
                 streams
                     .get_mut(&stream_id)
                     .and_then(|req| req.upstream_result_rx.as_mut())
                     .and_then(|rx| match rx.try_recv() {
                         Ok(result) => Some(result),
                         Err(oneshot::error::TryRecvError::Empty) => None,
-                        Err(oneshot::error::TryRecvError::Closed) => Some(Err(
-                            ProxyError::Transport("upstream task dropped sender".into()),
-                        )),
+                        Err(oneshot::error::TryRecvError::Closed) => Some(UpstreamResult {
+                            forward: Err(ProxyError::Transport(
+                                "upstream task dropped sender".into(),
+                            )),
+                            hedge: crate::HedgeTelemetry::default(),
+                        }),
                     })
             } else {
                 None
             };
 
             if let Some(forward_result) = upstream_ready {
+                if forward_result.hedge.launched {
+                    metrics.inc_hedge_triggered();
+                }
+                if forward_result.hedge.hedge_won {
+                    metrics.inc_hedge_won();
+                }
+                if forward_result.hedge.hedge_wasted {
+                    metrics.inc_hedge_wasted();
+                }
+                if forward_result.hedge.primary_won_after_trigger {
+                    metrics.inc_hedge_primary_won_after_trigger();
+                }
+                if forward_result.hedge.primary_late_ms > 0 {
+                    metrics.observe_hedge_primary_late_ms(forward_result.hedge.primary_late_ms);
+                }
+
                 if let Some(req) = streams.get_mut(&stream_id) {
                     req.upstream_result_rx = None;
                 }
-                match forward_result {
+                match forward_result.forward {
                     Ok((status, resp_headers, body)) => {
                         // If upstream advertised a response length beyond our hard cap,
                         // fail fast with 503 before sending any downstream headers/body.
@@ -2489,7 +2563,9 @@ impl QUICListener {
                         {
                             if let Some(req) = streams.get(&stream_id) {
                                 metrics.inc_failure();
-                                metrics.inc_overload_shed();
+                                metrics.inc_overload_shed_reason(
+                                    OverloadShedReason::ResponsePrebufferCap,
+                                );
                                 let route_label =
                                     req.upstream_name.as_deref().unwrap_or("unrouted");
                                 metrics.record_route(
@@ -2990,6 +3066,36 @@ impl QUICListener {
                                         req.start.elapsed().as_millis()
                                     );
                                 }
+                                ProxyError::Pool(PoolError::BackendOverloaded(reason)) => {
+                                    metrics.inc_failure();
+                                    if reason.contains(
+                                        "unknown-length response prebuffer limit exceeded",
+                                    ) {
+                                        metrics.inc_response_prebuffer_limit_reject();
+                                        metrics.inc_overload_shed_reason(
+                                            OverloadShedReason::ResponsePrebufferCap,
+                                        );
+                                    } else {
+                                        metrics.inc_overload_shed_reason(
+                                            OverloadShedReason::BackendInflight,
+                                        );
+                                    }
+                                    let route_label =
+                                        req.upstream_name.as_deref().unwrap_or("unrouted");
+                                    metrics.record_route(
+                                        route_label,
+                                        req.start.elapsed(),
+                                        RouteOutcome::OverloadShed,
+                                    );
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(req.start.elapsed(), true);
+                                    error!(
+                                        "Upstream {} overload in response body path: {}",
+                                        req.backend_addr.as_deref().unwrap_or("?"),
+                                        reason
+                                    );
+                                }
                                 _ => {
                                     metrics.inc_failure();
                                     metrics.inc_backend_error();
@@ -3171,9 +3277,11 @@ impl QUICListener {
             Err(ProxyError::Pool(PoolError::BackendOverloaded(reason))) => {
                 debug!("Backend overloaded");
                 metrics.inc_failure();
-                metrics.inc_overload_shed();
                 if reason.contains("unknown-length response prebuffer limit exceeded") {
                     metrics.inc_response_prebuffer_limit_reject();
+                    metrics.inc_overload_shed_reason(OverloadShedReason::ResponsePrebufferCap);
+                } else {
+                    metrics.inc_overload_shed_reason(OverloadShedReason::BackendInflight);
                 }
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
                 debug!(
@@ -3192,7 +3300,7 @@ impl QUICListener {
             Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
                 debug!("Backend circuit open");
                 metrics.inc_failure();
-                metrics.inc_overload_shed();
+                metrics.inc_overload_shed_reason(OverloadShedReason::BackendInflight);
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
                 debug!(
                     "Upstream {} status 503 latency_ms {}",
@@ -4512,7 +4620,7 @@ mod tests {
     #[test]
     fn abort_stream_awaiting_upstream_cancels_oneshot() {
         let metrics = crate::Metrics::default();
-        let (result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
+        let (result_tx, result_rx) = oneshot::channel::<crate::UpstreamResult>();
 
         let mut req = make_envelope(StreamPhase::AwaitingUpstream);
         req.upstream_result_rx = Some(result_rx);
@@ -4526,7 +4634,10 @@ mod tests {
         );
 
         // Sending on the now-orphaned sender should return Err (closed).
-        let send_result = result_tx.send(Err(spooky_errors::ProxyError::Transport("test".into())));
+        let send_result = result_tx.send(crate::UpstreamResult {
+            forward: Err(spooky_errors::ProxyError::Transport("test".into())),
+            hedge: crate::HedgeTelemetry::default(),
+        });
         assert!(
             send_result.is_err(),
             "upstream task send must fail after receiver dropped"
@@ -4576,7 +4687,7 @@ mod tests {
         let global_permit = global_sem.clone().try_acquire_owned().unwrap();
         let upstream_permit = upstream_sem.clone().try_acquire_owned().unwrap();
 
-        let (_result_tx, result_rx) = oneshot::channel::<crate::ForwardResult>();
+        let (_result_tx, result_rx) = oneshot::channel::<crate::UpstreamResult>();
         let (chunk_tx, chunk_rx) = mpsc::channel::<crate::ResponseChunk>(4);
 
         let mut req = make_envelope(StreamPhase::SendingResponse);

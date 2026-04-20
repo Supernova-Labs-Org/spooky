@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TARGET="${TARGET:-127.0.0.1:9889}"
+HOST="${HOST:-localhost}"
+H3_CLIENT_BIN="${H3_CLIENT_BIN:-./target/release/h3_client}"
+OUT_DIR="${OUT_DIR:-bench/load}"
+
+BURST_PATH="${BURST_PATH:-/api}"
+BURST_REQUESTS="${BURST_REQUESTS:-3000}"
+BURST_CONCURRENCY="${BURST_CONCURRENCY:-200}"
+
+SLOW_PATH="${SLOW_PATH:-/slow}"
+SLOW_REQUESTS="${SLOW_REQUESTS:-1000}"
+SLOW_CONCURRENCY="${SLOW_CONCURRENCY:-80}"
+
+LOSS_PATH="${LOSS_PATH:-/api}"
+LOSS_REQUESTS="${LOSS_REQUESTS:-1500}"
+LOSS_CONCURRENCY="${LOSS_CONCURRENCY:-120}"
+LOSS_PERCENT="${LOSS_PERCENT:-2}"
+NETEM_IFACE="${NETEM_IFACE:-}"
+
+usage() {
+  cat <<USAGE
+Usage: scripts/load-scenarios.sh
+
+Environment overrides:
+  TARGET=127.0.0.1:9889
+  HOST=localhost
+  H3_CLIENT_BIN=./target/release/h3_client
+  OUT_DIR=bench/load
+
+  BURST_PATH=/api BURST_REQUESTS=3000 BURST_CONCURRENCY=200
+  SLOW_PATH=/slow SLOW_REQUESTS=1000 SLOW_CONCURRENCY=80
+  LOSS_PATH=/api LOSS_REQUESTS=1500 LOSS_CONCURRENCY=120
+
+Optional Linux netem injection for packet-loss scenario:
+  NETEM_IFACE=eth0 LOSS_PERCENT=2 scripts/load-scenarios.sh
+USAGE
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ ! -x "${H3_CLIENT_BIN}" ]]; then
+  echo "error: h3 client binary not found at ${H3_CLIENT_BIN}" >&2
+  echo "build it with: cargo build --release -p spooky --bin h3_client" >&2
+  exit 1
+fi
+
+mkdir -p "${OUT_DIR}"
+
+results_tsv="${OUT_DIR}/latest.tsv"
+results_json="${OUT_DIR}/latest.json"
+results_md="${OUT_DIR}/latest.md"
+
+echo -n >"${results_tsv}"
+
+now_ns() {
+  perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000000000)'
+}
+
+percentile_from_sorted_file() {
+  local p="$1"
+  local file="$2"
+  local count
+  count=$(wc -l <"${file}")
+  if [[ "${count}" -eq 0 ]]; then
+    echo 0
+    return
+  fi
+  local idx=$(( (p * count + 99) / 100 ))
+  if [[ "${idx}" -lt 1 ]]; then
+    idx=1
+  fi
+  sed -n "${idx}p" "${file}"
+}
+
+run_single_request() {
+  local path="$1"
+  local out_file="$2"
+  local start_ns
+  local end_ns
+  local ok
+
+  start_ns="$(now_ns)"
+  if "${H3_CLIENT_BIN}" --connect "${TARGET}" --host "${HOST}" --path "${path}" --insecure >/dev/null 2>&1; then
+    ok=1
+  else
+    ok=0
+  fi
+  end_ns="$(now_ns)"
+
+  printf "%s %s\n" "${ok}" "$((end_ns - start_ns))" >>"${out_file}"
+}
+
+run_scenario() {
+  local name="$1"
+  local path="$2"
+  local requests="$3"
+  local concurrency="$4"
+
+  local raw
+  local lat_ok
+  raw="$(mktemp)"
+  lat_ok="$(mktemp)"
+
+  local start_ns
+  local end_ns
+  start_ns="$(now_ns)"
+
+  local helper
+  helper="$(mktemp)"
+  cat >"${helper}" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+path="$1"
+out_file="$2"
+client="$3"
+target="$4"
+host="$5"
+start_ns="$(perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000000000)')"
+if "${client}" --connect "${target}" --host "${host}" --path "${path}" --insecure >/dev/null 2>&1; then
+  ok=1
+else
+  ok=0
+fi
+end_ns="$(perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000000000)')"
+printf "%s %s\n" "${ok}" "$((end_ns - start_ns))" >>"${out_file}"
+SH
+  chmod +x "${helper}"
+
+  seq "${requests}" | xargs -P "${concurrency}" -I{} "${helper}" "${path}" "${raw}" "${H3_CLIENT_BIN}" "${TARGET}" "${HOST}"
+
+  end_ns="$(now_ns)"
+  rm -f "${helper}"
+
+  local success
+  local errors
+  success=$(awk '$1 == 1 {c++} END {print c+0}' "${raw}")
+  errors=$((requests - success))
+
+  awk '$1 == 1 {print $2}' "${raw}" | sort -n >"${lat_ok}"
+
+  local min_ns avg_ns p50_ns p95_ns p99_ns max_ns
+  min_ns=$(awk 'NR==1{print; exit}' "${lat_ok}")
+  avg_ns=$(awk '{s+=$1} END {if (NR==0) print 0; else printf "%.0f", s/NR}' "${lat_ok}")
+  p50_ns=$(percentile_from_sorted_file 50 "${lat_ok}")
+  p95_ns=$(percentile_from_sorted_file 95 "${lat_ok}")
+  p99_ns=$(percentile_from_sorted_file 99 "${lat_ok}")
+  max_ns=$(awk 'END{print ($1+0)}' "${lat_ok}")
+
+  min_ns=${min_ns:-0}
+  avg_ns=${avg_ns:-0}
+  p50_ns=${p50_ns:-0}
+  p95_ns=${p95_ns:-0}
+  p99_ns=${p99_ns:-0}
+  max_ns=${max_ns:-0}
+
+  local dur_ns
+  local throughput
+  dur_ns=$((end_ns - start_ns))
+  throughput=$(awk -v ok="${success}" -v ns="${dur_ns}" 'BEGIN { if (ns <= 0) print "0.00"; else printf "%.2f", (ok*1000000000.0)/ns }')
+
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "${name}" "${path}" "${requests}" "${concurrency}" "${success}" "${errors}" \
+    "${throughput}" "${min_ns}" "${avg_ns}" "${p50_ns}" "${p95_ns}" "${p99_ns}" >>"${results_tsv}"
+
+  rm -f "${raw}" "${lat_ok}"
+}
+
+apply_netem_loss_if_configured() {
+  if [[ -z "${NETEM_IFACE}" ]]; then
+    return 1
+  fi
+  if ! command -v tc >/dev/null 2>&1; then
+    echo "warn: tc not available; running quic_loss scenario without netem injection" >&2
+    return 1
+  fi
+
+  sudo tc qdisc replace dev "${NETEM_IFACE}" root netem loss "${LOSS_PERCENT}%"
+  return 0
+}
+
+clear_netem_loss_if_configured() {
+  if [[ -z "${NETEM_IFACE}" ]]; then
+    return 0
+  fi
+  if ! command -v tc >/dev/null 2>&1; then
+    return 0
+  fi
+  sudo tc qdisc del dev "${NETEM_IFACE}" root >/dev/null 2>&1 || true
+}
+
+trap clear_netem_loss_if_configured EXIT
+
+run_scenario "burst" "${BURST_PATH}" "${BURST_REQUESTS}" "${BURST_CONCURRENCY}"
+run_scenario "slow_upstream" "${SLOW_PATH}" "${SLOW_REQUESTS}" "${SLOW_CONCURRENCY}"
+if apply_netem_loss_if_configured; then
+  run_scenario "quic_loss" "${LOSS_PATH}" "${LOSS_REQUESTS}" "${LOSS_CONCURRENCY}"
+  clear_netem_loss_if_configured
+else
+  run_scenario "quic_loss" "${LOSS_PATH}" "${LOSS_REQUESTS}" "${LOSS_CONCURRENCY}"
+fi
+
+# JSON export
+{
+  echo '{'
+  echo '  "target": "'"${TARGET}"'",'
+  echo '  "host": "'"${HOST}"'",'
+  echo '  "generated_unix_secs": '"$(date +%s)"','
+  echo '  "scenarios": ['
+  awk -F'\t' 'BEGIN{first=1} {
+    if (!first) printf(",\n");
+    first=0;
+    printf("    {\"name\":\"%s\",\"path\":\"%s\",\"requests\":%s,\"concurrency\":%s,\"success\":%s,\"errors\":%s,\"throughput_req_s\":%s,\"latency_ns\":{\"min\":%s,\"avg\":%s,\"p50\":%s,\"p95\":%s,\"p99\":%s}}",
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+  } END{printf("\n")} ' "${results_tsv}"
+  echo '  ]'
+  echo '}'
+} >"${results_json}"
+
+# Markdown export
+{
+  echo "# Spooky Load Scenarios"
+  echo
+  echo "- Target: \\`${TARGET}\\`"
+  echo "- Host: \\`${HOST}\\`"
+  echo "- Generated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+  echo
+  echo "| scenario | path | requests | concurrency | success | errors | throughput req/s | min ms | avg ms | p50 ms | p95 ms | p99 ms |"
+  echo "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |"
+  awk -F'\t' '{
+    min_ms=$8/1000000.0; avg_ms=$9/1000000.0; p50_ms=$10/1000000.0; p95_ms=$11/1000000.0; p99_ms=$12/1000000.0;
+    printf("| %s | %s | %s | %s | %s | %s | %s | %.3f | %.3f | %.3f | %.3f | %.3f |\n",
+      $1,$2,$3,$4,$5,$6,$7,min_ms,avg_ms,p50_ms,p95_ms,p99_ms)
+  }' "${results_tsv}"
+} >"${results_md}"
+
+echo "Load scenario report: ${results_md}"
+echo "Load scenario data:   ${results_json}"

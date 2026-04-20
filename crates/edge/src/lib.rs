@@ -109,6 +109,7 @@ pub struct QUICListener {
     pub backend_body_total_timeout: Duration,
     pub client_body_idle_timeout: Duration,
     pub backend_total_request_timeout: Duration,
+    pub max_active_connections: usize,
     pub max_request_body_bytes: usize,
     pub max_response_body_bytes: usize,
     pub request_buffer_global_cap_bytes: usize,
@@ -141,6 +142,20 @@ pub struct QuicConnection {
 /// Result type returned by the in-flight H2 forwarding task.
 pub type ForwardResult =
     Result<(http::StatusCode, http::HeaderMap, hyper::body::Incoming), ProxyError>;
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HedgeTelemetry {
+    pub launched: bool,
+    pub hedge_won: bool,
+    pub hedge_wasted: bool,
+    pub primary_won_after_trigger: bool,
+    pub primary_late_ms: u64,
+}
+
+pub struct UpstreamResult {
+    pub forward: ForwardResult,
+    pub hedge: HedgeTelemetry,
+}
 
 /// Lifecycle phase of a single HTTP/3 request stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,7 +217,7 @@ pub struct RequestEnvelope {
     /// True once the client has sent FIN on the request stream.
     pub request_fin_received: bool,
     /// Receives the upstream H2 response (status, headers, body stream).
-    pub upstream_result_rx: Option<oneshot::Receiver<ForwardResult>>,
+    pub upstream_result_rx: Option<oneshot::Receiver<UpstreamResult>>,
     /// Receives response body chunks to write back over QUIC.
     pub response_chunk_rx: Option<mpsc::Receiver<ResponseChunk>>,
     /// True once downstream response headers are emitted on this stream.
@@ -245,6 +260,24 @@ pub struct Metrics {
     pub backend_timeouts: AtomicU64,
     pub backend_errors: AtomicU64,
     pub overload_shed: AtomicU64,
+    pub overload_shed_brownout: AtomicU64,
+    pub overload_shed_adaptive: AtomicU64,
+    pub overload_shed_route_cap: AtomicU64,
+    pub overload_shed_route_global_cap: AtomicU64,
+    pub overload_shed_global_inflight: AtomicU64,
+    pub overload_shed_upstream_inflight: AtomicU64,
+    pub overload_shed_backend_inflight: AtomicU64,
+    pub overload_shed_request_buffer: AtomicU64,
+    pub overload_shed_response_prebuffer: AtomicU64,
+    pub overload_shed_connection_cap: AtomicU64,
+    pub active_connections: AtomicU64,
+    pub connection_cap_rejects: AtomicU64,
+    pub hedge_triggered: AtomicU64,
+    pub hedge_won: AtomicU64,
+    pub hedge_wasted: AtomicU64,
+    pub hedge_primary_won_after_trigger: AtomicU64,
+    pub hedge_primary_late_ms_total: AtomicU64,
+    pub hedge_primary_late_samples: AtomicU64,
     pub ingress_packets_total: AtomicU64,
     pub ingress_queue_drops: AtomicU64,
     pub ingress_queue_drop_bytes: AtomicU64,
@@ -284,6 +317,20 @@ pub enum RouteOutcome {
     OverloadShed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverloadShedReason {
+    Brownout,
+    AdaptiveAdmission,
+    RouteCap,
+    RouteGlobalCap,
+    GlobalInflight,
+    UpstreamInflight,
+    BackendInflight,
+    RequestBufferCap,
+    ResponsePrebufferCap,
+    ConnectionCap,
+}
+
 impl Default for Metrics {
     fn default() -> Self {
         let mut shards = Vec::with_capacity(ROUTE_STATS_SHARDS);
@@ -304,6 +351,24 @@ impl Default for Metrics {
             backend_timeouts: AtomicU64::new(0),
             backend_errors: AtomicU64::new(0),
             overload_shed: AtomicU64::new(0),
+            overload_shed_brownout: AtomicU64::new(0),
+            overload_shed_adaptive: AtomicU64::new(0),
+            overload_shed_route_cap: AtomicU64::new(0),
+            overload_shed_route_global_cap: AtomicU64::new(0),
+            overload_shed_global_inflight: AtomicU64::new(0),
+            overload_shed_upstream_inflight: AtomicU64::new(0),
+            overload_shed_backend_inflight: AtomicU64::new(0),
+            overload_shed_request_buffer: AtomicU64::new(0),
+            overload_shed_response_prebuffer: AtomicU64::new(0),
+            overload_shed_connection_cap: AtomicU64::new(0),
+            active_connections: AtomicU64::new(0),
+            connection_cap_rejects: AtomicU64::new(0),
+            hedge_triggered: AtomicU64::new(0),
+            hedge_won: AtomicU64::new(0),
+            hedge_wasted: AtomicU64::new(0),
+            hedge_primary_won_after_trigger: AtomicU64::new(0),
+            hedge_primary_late_ms_total: AtomicU64::new(0),
+            hedge_primary_late_samples: AtomicU64::new(0),
             ingress_packets_total: AtomicU64::new(0),
             ingress_queue_drops: AtomicU64::new(0),
             ingress_queue_drop_bytes: AtomicU64::new(0),
@@ -371,6 +436,82 @@ impl Metrics {
 
     pub fn inc_overload_shed(&self) {
         self.overload_shed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_overload_shed_reason(&self, reason: OverloadShedReason) {
+        self.overload_shed.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            OverloadShedReason::Brownout => {
+                self.overload_shed_brownout.fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::AdaptiveAdmission => {
+                self.overload_shed_adaptive.fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::RouteCap => {
+                self.overload_shed_route_cap.fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::RouteGlobalCap => {
+                self.overload_shed_route_global_cap
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::GlobalInflight => {
+                self.overload_shed_global_inflight
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::UpstreamInflight => {
+                self.overload_shed_upstream_inflight
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::BackendInflight => {
+                self.overload_shed_backend_inflight
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::RequestBufferCap => {
+                self.overload_shed_request_buffer
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::ResponsePrebufferCap => {
+                self.overload_shed_response_prebuffer
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OverloadShedReason::ConnectionCap => {
+                self.overload_shed_connection_cap
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn set_active_connections(&self, count: usize) {
+        self.active_connections
+            .store(count as u64, Ordering::Relaxed);
+    }
+
+    pub fn inc_connection_cap_reject(&self) {
+        self.connection_cap_rejects.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_hedge_triggered(&self) {
+        self.hedge_triggered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_hedge_won(&self) {
+        self.hedge_won.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_hedge_wasted(&self) {
+        self.hedge_wasted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_hedge_primary_won_after_trigger(&self) {
+        self.hedge_primary_won_after_trigger
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn observe_hedge_primary_late_ms(&self, late_ms: u64) {
+        self.hedge_primary_late_ms_total
+            .fetch_add(late_ms, Ordering::Relaxed);
+        self.hedge_primary_late_samples
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn inc_ingress_packet(&self) {
@@ -610,6 +751,120 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_overload_shed {}\n",
             self.overload_shed.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_overload_shed_by_reason_total Total overload shed decisions grouped by reason.\n",
+        );
+        out.push_str("# TYPE spooky_overload_shed_by_reason_total counter\n");
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"brownout\"}} {}\n",
+            self.overload_shed_brownout.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"adaptive_admission\"}} {}\n",
+            self.overload_shed_adaptive.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"route_cap\"}} {}\n",
+            self.overload_shed_route_cap.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"route_global_cap\"}} {}\n",
+            self.overload_shed_route_global_cap.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"global_inflight\"}} {}\n",
+            self.overload_shed_global_inflight.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"upstream_inflight\"}} {}\n",
+            self.overload_shed_upstream_inflight.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"backend_inflight\"}} {}\n",
+            self.overload_shed_backend_inflight.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"request_buffer_cap\"}} {}\n",
+            self.overload_shed_request_buffer.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"response_prebuffer_cap\"}} {}\n",
+            self.overload_shed_response_prebuffer
+                .load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_overload_shed_by_reason_total{{reason=\"connection_cap\"}} {}\n",
+            self.overload_shed_connection_cap.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_active_connections Current active QUIC connections.\n");
+        out.push_str("# TYPE spooky_active_connections gauge\n");
+        out.push_str(&format!(
+            "spooky_active_connections {}\n",
+            self.active_connections.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_connection_cap_rejects Total new-connection attempts rejected by max_active_connections cap.\n",
+        );
+        out.push_str("# TYPE spooky_connection_cap_rejects counter\n");
+        out.push_str(&format!(
+            "spooky_connection_cap_rejects {}\n",
+            self.connection_cap_rejects.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_hedge_triggered_total Total hedge attempts started.\n");
+        out.push_str("# TYPE spooky_hedge_triggered_total counter\n");
+        out.push_str(&format!(
+            "spooky_hedge_triggered_total {}\n",
+            self.hedge_triggered.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_hedge_won_total Total requests where hedge response arrived first.\n",
+        );
+        out.push_str("# TYPE spooky_hedge_won_total counter\n");
+        out.push_str(&format!(
+            "spooky_hedge_won_total {}\n",
+            self.hedge_won.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_hedge_wasted_total Total hedge attempts that did not win the race.\n",
+        );
+        out.push_str("# TYPE spooky_hedge_wasted_total counter\n");
+        out.push_str(&format!(
+            "spooky_hedge_wasted_total {}\n",
+            self.hedge_wasted.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_hedge_primary_won_after_trigger_total Total hedged requests where primary still won.\n",
+        );
+        out.push_str("# TYPE spooky_hedge_primary_won_after_trigger_total counter\n");
+        out.push_str(&format!(
+            "spooky_hedge_primary_won_after_trigger_total {}\n",
+            self.hedge_primary_won_after_trigger.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_hedge_primary_late_ms_total Aggregate milliseconds primary was late after hedge trigger.\n",
+        );
+        out.push_str("# TYPE spooky_hedge_primary_late_ms_total counter\n");
+        out.push_str(&format!(
+            "spooky_hedge_primary_late_ms_total {}\n",
+            self.hedge_primary_late_ms_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_hedge_primary_late_samples_total Number of late-primary observations used in hedge tuning.\n",
+        );
+        out.push_str("# TYPE spooky_hedge_primary_late_samples_total counter\n");
+        out.push_str(&format!(
+            "spooky_hedge_primary_late_samples_total {}\n",
+            self.hedge_primary_late_samples.load(Ordering::Relaxed)
         ));
 
         out.push_str(
@@ -871,5 +1126,35 @@ mod tests {
 
         metrics.release_request_buffer(512);
         assert_eq!(metrics.request_buffered_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn metrics_render_includes_overload_reasons_and_hedge_counters() {
+        let metrics = Metrics::default();
+        metrics.inc_overload_shed_reason(OverloadShedReason::GlobalInflight);
+        metrics.inc_overload_shed_reason(OverloadShedReason::BackendInflight);
+        metrics.set_active_connections(7);
+        metrics.inc_connection_cap_reject();
+        metrics.inc_hedge_triggered();
+        metrics.inc_hedge_won();
+        metrics.inc_hedge_wasted();
+        metrics.inc_hedge_primary_won_after_trigger();
+        metrics.observe_hedge_primary_late_ms(42);
+
+        let output = metrics.render_prometheus();
+        assert!(
+            output.contains("spooky_overload_shed_by_reason_total{reason=\"global_inflight\"} 1")
+        );
+        assert!(
+            output.contains("spooky_overload_shed_by_reason_total{reason=\"backend_inflight\"} 1")
+        );
+        assert!(output.contains("spooky_active_connections 7"));
+        assert!(output.contains("spooky_connection_cap_rejects 1"));
+        assert!(output.contains("spooky_hedge_triggered_total 1"));
+        assert!(output.contains("spooky_hedge_won_total 1"));
+        assert!(output.contains("spooky_hedge_wasted_total 1"));
+        assert!(output.contains("spooky_hedge_primary_won_after_trigger_total 1"));
+        assert!(output.contains("spooky_hedge_primary_late_ms_total 42"));
+        assert!(output.contains("spooky_hedge_primary_late_samples_total 1"));
     }
 }

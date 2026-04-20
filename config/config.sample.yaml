@@ -78,6 +78,7 @@ performance:
     per_backend_inflight_limit: 64
     new_connections_per_sec: 2000   # max new QUIC connections accepted per second (token-bucket refill rate)
     new_connections_burst: 500      # burst capacity above the steady-state rate; must be >= 1
+    max_active_connections: 20000   # hard cap on active QUIC connections per worker
     quic_max_idle_timeout_ms: 5000          # close idle QUIC connections after this many ms
     quic_initial_max_data: 10000000         # connection-level flow control window (bytes)
     quic_initial_max_stream_data: 1000000   # per-stream flow control window (bytes); must be <= quic_initial_max_data

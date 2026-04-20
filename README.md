@@ -194,6 +194,9 @@ cargo test -p spooky-edge
 # Run integration tests
 cargo test -p spooky-edge --test lb_integration
 cargo test -p spooky-edge --test h3_bridge
+
+# Run load scenarios (burst / slow-upstream / quic-loss profile)
+make load-scenarios
 ```
 
 

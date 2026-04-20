@@ -158,6 +158,10 @@ pub fn perf_default_new_connections_burst() -> u32 {
     500
 }
 
+pub fn perf_default_max_active_connections() -> usize {
+    20_000
+}
+
 pub fn perf_default_quic_max_idle_timeout_ms() -> u64 {
     5_000
 }

@@ -2156,6 +2156,10 @@ fn metrics_endpoint_exposes_route_slo_metrics() {
     assert!(metrics.contains("spooky_route_latency_ms_p50{route=\"test_pool\"}"));
     assert!(metrics.contains("spooky_route_latency_ms_p95{route=\"test_pool\"}"));
     assert!(metrics.contains("spooky_route_latency_ms_p99{route=\"test_pool\"}"));
+    assert!(metrics.contains("spooky_overload_shed_by_reason_total"));
+    assert!(metrics.contains("spooky_active_connections"));
+    assert!(metrics.contains("spooky_connection_cap_rejects"));
+    assert!(metrics.contains("spooky_hedge_triggered_total"));
 }
 
 #[test]

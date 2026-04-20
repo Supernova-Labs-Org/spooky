@@ -1,4 +1,4 @@
-.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify certs-dir bench-micro bench-macro bench-gate bench-promote-baseline
+.PHONY: run build build-spooky clean test test-edge test-transport certs certs-selfsigned certs-ca certs-clean certs-verify certs-dir bench-micro bench-macro bench-gate bench-promote-baseline load-scenarios
 
 CERTS_DIR := certs
 SAN_CONF := $(CERTS_DIR)/san.conf
@@ -142,3 +142,6 @@ bench-promote-baseline:
 		exit 1; \
 	fi
 	./scripts/bench-promote-baseline.sh "$(RELEASE)"
+
+load-scenarios:
+	./scripts/load-scenarios.sh

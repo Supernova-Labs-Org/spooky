@@ -123,6 +123,7 @@ The following table lists all default configuration values used when properties 
 | `log.file.path` | `"/var/log/spooky/spooky.log"` | Log file path (used when `log.file.enabled` is true) |
 | `performance.new_connections_per_sec` | `2000` | Token-bucket refill rate for new QUIC connections (conns/sec) |
 | `performance.new_connections_burst` | `500` | Burst capacity for new QUIC connections |
+| `performance.max_active_connections` | `20000` | Hard cap on concurrently tracked active QUIC connections per worker |
 | `performance.quic_max_idle_timeout_ms` | `5000` | QUIC idle timeout — connection closed after this many ms of inactivity |
 | `performance.quic_initial_max_data` | `10000000` | Connection-level flow control window (bytes) |
 | `performance.quic_initial_max_stream_data` | `1000000` | Per-stream flow control window (bytes) |
@@ -510,6 +511,7 @@ Controls resource limits, tuning knobs, and connection-flood protection. All fie
 | `h2_pool_idle_timeout_ms` | integer | No | `90000` | How long an idle H2 connection is kept before being closed (ms) |
 | `new_connections_per_sec` | integer | No | `2000` | Steady-state rate at which new QUIC connections are accepted (token-bucket refill, connections/sec) |
 | `new_connections_burst` | integer | No | `500` | Burst capacity above the steady-state rate; the bucket starts full so the first burst of legitimate connections always succeeds |
+| `max_active_connections` | integer | No | `20000` | Hard cap on active QUIC connections per worker; unknown `Initial` packets are dropped once this cap is reached |
 | `quic_max_idle_timeout_ms` | integer | No | `5000` | QUIC idle timeout in ms; connection is closed after this period of inactivity |
 | `quic_initial_max_data` | integer | No | `10000000` | Connection-level QUIC flow control window in bytes |
 | `quic_initial_max_stream_data` | integer | No | `1000000` | Per-stream QUIC flow control window in bytes; must be ≤ `quic_initial_max_data` |
@@ -521,10 +523,13 @@ Controls resource limits, tuning knobs, and connection-flood protection. All fie
 
 `new_connections_per_sec` and `new_connections_burst` implement a token-bucket rate limiter on new QUIC connection accepts. The bucket starts full so legitimate burst traffic at startup is never penalised. Packets for **existing** connections are never affected by this limit — only unknown `Initial` packets that would create a new connection state entry are gated.
 
+`max_active_connections` is a separate hard guardrail for total connection state. Use it to enforce deterministic memory limits under sustained handshake floods even when token-bucket limits allow temporary bursts.
+
 ```yaml
 performance:
   new_connections_per_sec: 2000   # refill rate: 2 k new conns/sec
   new_connections_burst: 500      # allow a burst of up to 500 above the rate
+  max_active_connections: 20000   # hard ceiling for concurrently tracked connections
 ```
 
 Set `new_connections_burst` to `1` and `new_connections_per_sec` to a low value to aggressively throttle connection floods at the cost of rejecting legitimate concurrent handshakes.

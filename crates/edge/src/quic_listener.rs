@@ -24,8 +24,8 @@ use quiche::h3::NameValue;
 use rand::RngCore;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
-use spooky_errors::{PoolError, ProxyError};
-use spooky_lb::{HealthTransition, UpstreamPool};
+use spooky_errors::{PoolError, ProxyError, is_retryable};
+use spooky_lb::{HealthFailureReason, HealthTransition, UpstreamPool};
 use spooky_transport::h2_client::{H2Client, TlsClientConfig};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
@@ -38,8 +38,9 @@ use tokio::sync::{
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
-    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener, QuicConnection,
-    RequestEnvelope, ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase, UpstreamResult,
+    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener,
+    QuicConnection, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome, SharedRuntimeState,
+    StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_STREAMS_PER_CONNECTION,
@@ -2128,9 +2129,16 @@ impl QUICListener {
                                         {
                                             Ok(response) => response,
                                             Err(primary_err) => {
-                                                if bodyless_mode
-                                                    && retry_budget.allow_retry(&route_name).is_ok()
-                                                    && let Some((retry_backend, _)) =
+                                                let retry_reason = classify_retry_reason(&primary_err);
+                                                if !bodyless_mode {
+                                                    return Err(primary_err);
+                                                } else if !is_retryable(&primary_err) {
+                                                    return Err(primary_err);
+                                                } else if retry_budget.allow_retry(&route_name).is_err() {
+                                                    return Err(primary_err);
+                                                } else if alternate_backend.is_none() {
+                                                    return Err(primary_err);
+                                                } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
                                                     && let Ok(retry_request) = build_h2_request(
                                                         &retry_backend,
@@ -2146,6 +2154,10 @@ impl QUICListener {
                                                         },
                                                     )
                                                 {
+                                                    info!(
+                                                        "retrying request on alternate backend: route={} reason={:?}",
+                                                        route_name, retry_reason
+                                                    );
                                                     send_once(
                                                         retry_backend,
                                                         retry_request,
@@ -3254,7 +3266,15 @@ impl QUICListener {
             }
             let lb_type = pool.lb_name();
             let idx = pool.pick(key);
-            let idx = idx.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
+            let idx = idx.ok_or_else(|| {
+                let total = pool.pool.len();
+                let healthy = pool.pool.healthy_indices().len();
+                error!(
+                    "no healthy backends available: {}/{} backends healthy",
+                    healthy, total
+                );
+                ProxyError::Transport("no healthy servers".into())
+            })?;
             let backend_addr = pool
                 .pool
                 .address(idx)
@@ -3407,11 +3427,12 @@ impl QUICListener {
             | Err(ProxyError::Pool(PoolError::InflightLimiterClosed))
             | Err(ProxyError::Pool(PoolError::UnknownBackend(_))) => {
                 error!("Upstream transport error");
+                metrics.inc_health_failure(HealthFailureReason::Transport);
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
                         .lock()
                         .ok()
-                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                        .and_then(|mut p| p.pool.mark_failure_with_reason(backend_index, HealthFailureReason::Transport))
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -3446,11 +3467,12 @@ impl QUICListener {
             }
             Err(ProxyError::Timeout) => {
                 error!("Upstream request timed out");
+                metrics.inc_health_failure(HealthFailureReason::Timeout);
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
                         .lock()
                         .ok()
-                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                        .and_then(|mut p| p.pool.mark_failure_with_reason(backend_index, HealthFailureReason::Timeout))
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -3472,6 +3494,7 @@ impl QUICListener {
             }
             Err(ProxyError::Tls(err)) => {
                 error!("TLS error: {}", err);
+                metrics.inc_health_failure(HealthFailureReason::Tls);
                 metrics.inc_failure();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 debug!(
@@ -3955,6 +3978,15 @@ impl QUICListener {
                 },
             );
         }
+    }
+}
+
+fn classify_retry_reason(err: &ProxyError) -> RetryReason {
+    match err {
+        ProxyError::Timeout => RetryReason::BackendTimeout,
+        ProxyError::Transport(_) => RetryReason::BackendTransport,
+        ProxyError::Pool(_) => RetryReason::BackendPool,
+        _ => RetryReason::BackendTransport,
     }
 }
 

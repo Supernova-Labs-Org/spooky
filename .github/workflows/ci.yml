@@ -16,7 +16,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
       - name: Run clippy panic-safety gates
         run: |
           cargo clippy --workspace --lib --bins -- -D clippy::unwrap_used -D clippy::expect_used
@@ -32,7 +34,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
       - name: Run tests
         timeout-minutes: 20
         run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test
@@ -48,7 +52,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
       - name: Run benchmark regression gates
         run: |
           PROFILE=ci FAIL_ON=severe BENCH_GATE_RETRIES=1 ./scripts/bench-gate.sh

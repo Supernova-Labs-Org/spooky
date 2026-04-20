@@ -1958,32 +1958,40 @@ impl QUICListener {
                                     ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
                                 (Some(tx), channel_body.boxed(), false)
                             };
-                            let request =
-                                match build_h2_request(&addr, &method, &path, &list, boxed, None) {
-                                    Ok(request) => request,
-                                    Err(err) => {
-                                        drop(upstream_permit);
-                                        drop(global_permit);
-                                        metrics.inc_failure();
-                                        metrics.record_route(
-                                            &upstream_name,
-                                            request_start.elapsed(),
-                                            RouteOutcome::Failure,
-                                        );
-                                        Self::send_simple_response(
-                                            h3,
-                                            &mut connection.quic,
-                                            stream_id,
-                                            http::StatusCode::BAD_REQUEST,
-                                            b"invalid request\n",
-                                        )?;
-                                        error!("failed to build upstream request: {}", err);
-                                        resilience
-                                            .adaptive_admission
-                                            .observe(request_start.elapsed(), true);
-                                        continue;
-                                    }
-                                };
+                            let request = match build_h2_request(
+                                &addr,
+                                &method,
+                                &path,
+                                &list,
+                                boxed,
+                                None,
+                                connection.peer_address,
+                                authority.as_deref(),
+                            ) {
+                                Ok(request) => request,
+                                Err(err) => {
+                                    drop(upstream_permit);
+                                    drop(global_permit);
+                                    metrics.inc_failure();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::Failure,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::BAD_REQUEST,
+                                        b"invalid request\n",
+                                    )?;
+                                    error!("failed to build upstream request: {}", err);
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
+                                    continue;
+                                }
+                            };
 
                             let h2 = h2_pool.clone();
                             let fwd_addr = addr.clone();
@@ -1997,6 +2005,8 @@ impl QUICListener {
                                 Self::pick_alternate_backend(&upstream_pool, idx);
                             let method_owned = method.clone();
                             let path_owned = path.clone();
+                            let authority_owned = authority.clone();
+                            let client_addr = connection.peer_address;
                             let headers_owned = list.clone();
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
@@ -2039,6 +2049,8 @@ impl QUICListener {
                                                     &headers_owned,
                                                     BoxBody::new(Full::new(Bytes::new())),
                                                     Some(0),
+                                                    client_addr,
+                                                    authority_owned.as_deref(),
                                                 )
                                                 .ok()
                                                 .map(|req| (backend, req))
@@ -2122,6 +2134,8 @@ impl QUICListener {
                                                         &headers_owned,
                                                         BoxBody::new(Full::new(Bytes::new())),
                                                         Some(0),
+                                                        client_addr,
+                                                        authority_owned.as_deref(),
                                                     )
                                                 {
                                                     send_once(

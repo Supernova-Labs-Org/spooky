@@ -17,7 +17,9 @@ use rcgen::{Certificate, CertificateParams, SanType};
 use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 
-use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
+use spooky_config::config::{
+    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, Tls, UpstreamTls,
+};
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
     MAX_DATAGRAM_SIZE_BYTES, MAX_UDP_PAYLOAD_BYTES, QUIC_IDLE_TIMEOUT_MS, QUIC_INITIAL_MAX_DATA,
@@ -82,13 +84,18 @@ fn make_config(port: u32, cert: String, key: String, backend_address: String) ->
             protocol: "http3".to_string(),
             port,
             address: "127.0.0.1".to_string(),
-            tls: Tls { cert, key },
+            tls: Tls {
+                cert,
+                key,
+                client_auth: ClientAuth::default(),
+            },
         },
         upstream,
         load_balancing: Some(LoadBalancing {
             lb_type: "random".to_string(),
             key: None,
         }),
+        upstream_tls: UpstreamTls::default(),
         log: Log {
             level: "info".to_string(),
             file: Default::default(),
@@ -813,13 +820,18 @@ fn make_config_with_rate_limit(
             protocol: "http3".to_string(),
             port,
             address: "127.0.0.1".to_string(),
-            tls: Tls { cert, key },
+            tls: Tls {
+                cert,
+                key,
+                client_auth: ClientAuth::default(),
+            },
         },
         upstream,
         load_balancing: Some(LoadBalancing {
             lb_type: "random".to_string(),
             key: None,
         }),
+        upstream_tls: UpstreamTls::default(),
         log: Log {
             level: "error".to_string(),
             file: Default::default(),

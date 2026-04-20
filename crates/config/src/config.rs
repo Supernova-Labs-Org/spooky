@@ -43,7 +43,8 @@ use crate::default::{
     resilience_default_watchdog_poll_stall_timeout_ms,
     resilience_default_watchdog_restart_cooldown_ms,
     resilience_default_watchdog_timeout_error_rate_percent,
-    resilience_default_watchdog_unhealthy_consecutive_windows,
+    resilience_default_watchdog_unhealthy_consecutive_windows, upstream_tls_default_strict_sni,
+    upstream_tls_default_verify_certificates,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -57,6 +58,9 @@ pub struct Config {
 
     #[serde(default)]
     pub load_balancing: Option<LoadBalancing>, // Global fallback load balancing
+
+    #[serde(default)]
+    pub upstream_tls: UpstreamTls,
 
     #[serde(default = "get_default_log")]
     pub log: Log,
@@ -88,6 +92,41 @@ pub struct Listen {
 pub struct Tls {
     pub cert: String, // "/path/to/cert"
     pub key: String,  // "/path/to/key"
+    #[serde(default)]
+    pub client_auth: ClientAuth,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct ClientAuth {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub require_client_cert: bool,
+    #[serde(default)]
+    pub ca_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct UpstreamTls {
+    #[serde(default = "upstream_tls_default_verify_certificates")]
+    pub verify_certificates: bool,
+    #[serde(default = "upstream_tls_default_strict_sni")]
+    pub strict_sni: bool,
+    #[serde(default)]
+    pub ca_file: Option<String>,
+    #[serde(default)]
+    pub ca_dir: Option<String>,
+}
+
+impl Default for UpstreamTls {
+    fn default() -> Self {
+        Self {
+            verify_certificates: upstream_tls_default_verify_certificates(),
+            strict_sni: upstream_tls_default_strict_sni(),
+            ca_file: None,
+            ca_dir: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]

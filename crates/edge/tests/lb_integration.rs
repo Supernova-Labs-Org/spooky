@@ -17,7 +17,8 @@ use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 
 use spooky_config::config::{
-    Backend, Config, HealthCheck, Listen, LoadBalancing, Log, RouteMatch, Tls, Upstream,
+    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, RouteMatch, Tls,
+    Upstream, UpstreamTls,
 };
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
@@ -108,13 +109,18 @@ fn make_config(
             protocol: "http3".to_string(),
             port,
             address: "127.0.0.1".to_string(),
-            tls: Tls { cert, key },
+            tls: Tls {
+                cert,
+                key,
+                client_auth: ClientAuth::default(),
+            },
         },
         upstream,
         load_balancing: Some(LoadBalancing {
             lb_type: lb_type.to_string(),
             key: None,
         }),
+        upstream_tls: UpstreamTls::default(),
         log: Log {
             level: "info".to_string(),
             file: Default::default(),

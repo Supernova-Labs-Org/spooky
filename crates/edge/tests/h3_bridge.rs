@@ -30,7 +30,9 @@ use rcgen::{Certificate, CertificateParams, SanType};
 use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 
-use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
+use spooky_config::config::{
+    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, Tls, UpstreamTls,
+};
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
     BACKEND_TIMEOUT_SECS, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
@@ -96,13 +98,18 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
             protocol: "http3".to_string(),
             port,
             address: "127.0.0.1".to_string(),
-            tls: Tls { cert, key },
+            tls: Tls {
+                cert,
+                key,
+                client_auth: ClientAuth::default(),
+            },
         },
         upstream,
         load_balancing: Some(LoadBalancing {
             lb_type: "random".to_string(),
             key: None,
         }),
+        upstream_tls: UpstreamTls::default(),
         log: Log {
             level: "info".to_string(),
             file: Default::default(),

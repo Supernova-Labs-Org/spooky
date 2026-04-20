@@ -291,6 +291,17 @@ pub struct Metrics {
     pub watchdog_restart_hooks: AtomicU64,
     pub watchdog_degraded_windows: AtomicU64,
     pub runtime_panics: AtomicU64,
+    pub retries_total: AtomicU64,
+    pub retry_denied_budget: AtomicU64,
+    pub retry_denied_no_bodyless: AtomicU64,
+    pub retry_denied_no_alternate: AtomicU64,
+    pub retry_reason_timeout: AtomicU64,
+    pub retry_reason_transport: AtomicU64,
+    pub retry_reason_pool: AtomicU64,
+    pub health_failure_5xx: AtomicU64,
+    pub health_failure_timeout: AtomicU64,
+    pub health_failure_transport: AtomicU64,
+    pub health_failure_tls: AtomicU64,
     route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
 }
 
@@ -330,6 +341,25 @@ pub enum OverloadShedReason {
     RequestBufferCap,
     ResponsePrebufferCap,
     ConnectionCap,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RetryReason {
+    BackendTimeout,
+    BackendTransport,
+    BackendPool,
+    BudgetDenied,
+    NotBodylessMode,
+    NoAlternateBackend,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum HealthFailureReason {
+    HttpStatus5xx,
+    Timeout,
+    Transport,
+    Tls,
+    CircuitOpen,
 }
 
 impl Default for Metrics {
@@ -382,6 +412,17 @@ impl Default for Metrics {
             watchdog_restart_hooks: AtomicU64::new(0),
             watchdog_degraded_windows: AtomicU64::new(0),
             runtime_panics: AtomicU64::new(0),
+            retries_total: AtomicU64::new(0),
+            retry_denied_budget: AtomicU64::new(0),
+            retry_denied_no_bodyless: AtomicU64::new(0),
+            retry_denied_no_alternate: AtomicU64::new(0),
+            retry_reason_timeout: AtomicU64::new(0),
+            retry_reason_transport: AtomicU64::new(0),
+            retry_reason_pool: AtomicU64::new(0),
+            health_failure_5xx: AtomicU64::new(0),
+            health_failure_timeout: AtomicU64::new(0),
+            health_failure_transport: AtomicU64::new(0),
+            health_failure_tls: AtomicU64::new(0),
             route_stats_shards: shards,
         }
     }
@@ -611,6 +652,48 @@ impl Metrics {
 
     pub fn inc_runtime_panic(&self) {
         self.runtime_panics.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_retry(&self, reason: RetryReason) {
+        self.retries_total.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            RetryReason::BackendTimeout => {
+                self.retry_reason_timeout.fetch_add(1, Ordering::Relaxed);
+            }
+            RetryReason::BackendTransport => {
+                self.retry_reason_transport.fetch_add(1, Ordering::Relaxed);
+            }
+            RetryReason::BackendPool => {
+                self.retry_reason_pool.fetch_add(1, Ordering::Relaxed);
+            }
+            RetryReason::BudgetDenied => {
+                self.retry_denied_budget.fetch_add(1, Ordering::Relaxed);
+            }
+            RetryReason::NotBodylessMode => {
+                self.retry_denied_no_bodyless.fetch_add(1, Ordering::Relaxed);
+            }
+            RetryReason::NoAlternateBackend => {
+                self.retry_denied_no_alternate.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    pub fn inc_health_failure(&self, reason: HealthFailureReason) {
+        match reason {
+            HealthFailureReason::HttpStatus5xx => {
+                self.health_failure_5xx.fetch_add(1, Ordering::Relaxed);
+            }
+            HealthFailureReason::Timeout => {
+                self.health_failure_timeout.fetch_add(1, Ordering::Relaxed);
+            }
+            HealthFailureReason::Transport => {
+                self.health_failure_transport.fetch_add(1, Ordering::Relaxed);
+            }
+            HealthFailureReason::Tls => {
+                self.health_failure_tls.fetch_add(1, Ordering::Relaxed);
+            }
+            HealthFailureReason::CircuitOpen => {}
+        }
     }
 
     pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
@@ -970,6 +1053,62 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_watchdog_degraded_windows {}\n",
             self.watchdog_degraded_windows.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_retries_total Total retry attempts across all routes.\n");
+        out.push_str("# TYPE spooky_retries_total counter\n");
+        out.push_str(&format!(
+            "spooky_retries_total {}\n",
+            self.retries_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_retry_denied_total Total retry attempts blocked, by denial reason.\n");
+        out.push_str("# TYPE spooky_retry_denied_total counter\n");
+        out.push_str(&format!(
+            "spooky_retry_denied_total{{reason=\"budget\"}} {}\n",
+            self.retry_denied_budget.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_retry_denied_total{{reason=\"no_bodyless\"}} {}\n",
+            self.retry_denied_no_bodyless.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_retry_denied_total{{reason=\"no_alternate\"}} {}\n",
+            self.retry_denied_no_alternate.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_retry_attempts_total Total retries triggered, by error reason.\n");
+        out.push_str("# TYPE spooky_retry_attempts_total counter\n");
+        out.push_str(&format!(
+            "spooky_retry_attempts_total{{reason=\"timeout\"}} {}\n",
+            self.retry_reason_timeout.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_retry_attempts_total{{reason=\"transport\"}} {}\n",
+            self.retry_reason_transport.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_retry_attempts_total{{reason=\"pool\"}} {}\n",
+            self.retry_reason_pool.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_health_failures_total Backend health failures, by failure reason.\n");
+        out.push_str("# TYPE spooky_health_failures_total counter\n");
+        out.push_str(&format!(
+            "spooky_health_failures_total{{reason=\"5xx\"}} {}\n",
+            self.health_failure_5xx.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_health_failures_total{{reason=\"timeout\"}} {}\n",
+            self.health_failure_timeout.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_health_failures_total{{reason=\"transport\"}} {}\n",
+            self.health_failure_transport.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spooky_health_failures_total{{reason=\"tls\"}} {}\n",
+            self.health_failure_tls.load(Ordering::Relaxed)
         ));
 
         let mut snapshot: Vec<(String, RouteStats)> = Vec::new();

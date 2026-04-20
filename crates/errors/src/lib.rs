@@ -56,3 +56,12 @@ pub enum ProxyError {
     #[error("TLS error: {0}")]
     Tls(String),
 }
+
+
+pub fn is_retryable(err: &ProxyError) -> bool {
+    // TLS and Protocol errors are not retryable
+    matches!(
+        err,
+        ProxyError::Transport(_) | ProxyError::Timeout | ProxyError::Pool(_)
+    )
+}

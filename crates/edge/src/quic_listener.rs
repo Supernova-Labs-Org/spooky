@@ -3744,11 +3744,10 @@ impl QUICListener {
                     previous_requests = current_requests;
                     previous_timeouts = current_timeouts;
 
-                    let timeout_rate_percent = if request_delta == 0 {
-                        0
-                    } else {
-                        timeout_delta.saturating_mul(100) / request_delta
-                    };
+                    let timeout_rate_percent = timeout_delta
+                        .saturating_mul(100)
+                        .checked_div(request_delta)
+                        .unwrap_or(0);
 
                     let timeout_pressure = request_delta >= watchdog_config.min_requests_per_window
                         && timeout_rate_percent

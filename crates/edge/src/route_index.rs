@@ -83,7 +83,7 @@ impl RouteIndex {
         // Build a stable route list first. This keeps tie-breaking deterministic even if
         // upstreams came from a map with non-deterministic iteration order.
         let mut ordered: Vec<(&String, &Upstream)> = upstreams.iter().collect();
-        ordered.sort_by(|(left, _), (right, _)| left.cmp(right));
+        ordered.sort_by_key(|(left, _)| *left);
 
         for (order, (name, upstream)) in ordered.into_iter().enumerate() {
             let upstream_idx = upstream_names.len();

@@ -2082,7 +2082,7 @@ impl QUICListener {
                                                 _ = &mut hedge_sleep => None,
                                             } {
                                                 result?
-                                            } else if retry_budget.allow_retry(&route_name) {
+                                            } else if retry_budget.allow_retry(&route_name).is_ok() {
                                                 hedge_telemetry.launched = true;
                                                 let hedge_fut = send_once(
                                                     hedge_backend,
@@ -2129,7 +2129,7 @@ impl QUICListener {
                                             Ok(response) => response,
                                             Err(primary_err) => {
                                                 if bodyless_mode
-                                                    && retry_budget.allow_retry(&route_name)
+                                                    && retry_budget.allow_retry(&route_name).is_ok()
                                                     && let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
                                                     && let Ok(retry_request) = build_h2_request(

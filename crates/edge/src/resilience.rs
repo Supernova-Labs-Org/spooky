@@ -9,6 +9,8 @@ use std::{
 
 use spooky_config::config::Resilience as ResilienceConfig;
 
+use crate::RetryReason;
+
 pub struct AdaptiveAdmission {
     enabled: bool,
     min_limit: usize,
@@ -324,9 +326,9 @@ impl RetryBudget {
         }
     }
 
-    pub fn allow_retry(&self, route: &str) -> bool {
+    pub fn allow_retry(&self, route: &str) -> Result<(), RetryReason> {
         if !self.enabled {
-            return false;
+            return Err(RetryReason::BudgetDenied);
         }
 
         let ratio = self
@@ -340,7 +342,7 @@ impl RetryBudget {
         let retries = self.global_retries.load(Ordering::Relaxed);
         let global_limit = ((primary * ratio as u64) / 100).saturating_add(1);
         if retries >= global_limit {
-            return false;
+            return Err(RetryReason::BudgetDenied);
         }
 
         let mut route_allowed = true;
@@ -354,11 +356,11 @@ impl RetryBudget {
             }
         }
         if !route_allowed {
-            return false;
+            return Err(RetryReason::BudgetDenied);
         }
 
         self.global_retries.fetch_add(1, Ordering::Relaxed);
-        true
+        Ok(())
     }
 }
 
@@ -596,8 +598,8 @@ mod tests {
     fn retry_budget_respects_ratio() {
         let rb = RetryBudget::new(true, 50, HashMap::new());
         rb.mark_primary("api");
-        assert!(rb.allow_retry("api"));
-        assert!(!rb.allow_retry("api"));
+        assert!(rb.allow_retry("api").is_ok());
+        assert!(rb.allow_retry("api").is_err());
     }
 
     #[test]

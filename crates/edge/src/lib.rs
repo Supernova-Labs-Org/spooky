@@ -353,14 +353,7 @@ pub enum RetryReason {
     NoAlternateBackend,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub enum HealthFailureReason {
-    HttpStatus5xx,
-    Timeout,
-    Transport,
-    Tls,
-    CircuitOpen,
-}
+pub use spooky_lb::HealthFailureReason;
 
 impl Default for Metrics {
     fn default() -> Self {

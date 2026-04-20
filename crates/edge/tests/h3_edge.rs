@@ -449,7 +449,7 @@ fn assert_cid_sync_invariants(listener: &QUICListener) {
 
             if cid.as_ref() == connection.primary_scid.as_ref() {
                 assert!(
-                    listener.cid_routes.get(cid.as_ref()).is_none(),
+                    !listener.cid_routes.contains_key(cid.as_ref()),
                     "primary SCID must not be present in alias map"
                 );
             } else {
@@ -1149,13 +1149,8 @@ fn stress_connect(
 fn stress_close_gracefully(socket: &UdpSocket, conn: &mut quiche::Connection) {
     let _ = conn.close(false, 0, b"done");
     let mut out = [0u8; MAX_UDP_PAYLOAD_BYTES];
-    loop {
-        match conn.send(&mut out) {
-            Ok((w, si)) => {
-                let _ = socket.send_to(&out[..w], si.to);
-            }
-            Err(_) => break,
-        }
+    while let Ok((w, si)) = conn.send(&mut out) {
+        let _ = socket.send_to(&out[..w], si.to);
     }
 }
 

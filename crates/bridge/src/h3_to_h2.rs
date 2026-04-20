@@ -12,6 +12,11 @@ use spooky_config::backend_endpoint::BackendEndpoint;
 
 pub use spooky_errors::BridgeError;
 
+pub struct ForwardedContext<'a> {
+    pub client_addr: SocketAddr,
+    pub request_authority: Option<&'a str>,
+}
+
 /// Build an HTTP/2 request with a pre-boxed streaming body.
 /// `content_length` is `Some(n)` only when the full length is known upfront
 /// (i.e. the body was fully buffered); pass `None` for streaming bodies.
@@ -22,8 +27,7 @@ pub fn build_h2_request(
     headers: &[quiche::h3::Header],
     body: BoxBody<Bytes, Infallible>,
     content_length: Option<usize>,
-    client_addr: SocketAddr,
-    request_authority: Option<&str>,
+    forwarded_ctx: ForwardedContext<'_>,
 ) -> Result<Request<BoxBody<Bytes, Infallible>>, BridgeError> {
     let method = Method::from_bytes(method.as_bytes()).map_err(|_| BridgeError::InvalidMethod)?;
     let endpoint = BackendEndpoint::parse(backend).map_err(|_| BridgeError::InvalidUri)?;
@@ -56,7 +60,8 @@ pub fn build_h2_request(
         builder = builder.header(header_name, header_value);
     }
 
-    let host_value = request_authority
+    let host_value = forwarded_ctx
+        .request_authority
         .or(host_from_headers.as_deref())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or(endpoint.authority());
@@ -68,19 +73,19 @@ pub fn build_h2_request(
         builder = builder.header(http::header::CONTENT_LENGTH, len);
     }
 
-    let forwarded = format!(
+    let forwarded_value = format!(
         "for={};proto=https;host=\"{}\"",
-        forwarded_for_value(client_addr.ip()),
+        forwarded_for_value(forwarded_ctx.client_addr.ip()),
         escape_forwarded_host(host_value),
     );
     builder = builder
         .header(
             HeaderName::from_static("forwarded"),
-            HeaderValue::from_str(&forwarded).map_err(|_| BridgeError::InvalidHeader)?,
+            HeaderValue::from_str(&forwarded_value).map_err(|_| BridgeError::InvalidHeader)?,
         )
         .header(
             HeaderName::from_static("x-forwarded-for"),
-            HeaderValue::from_str(&client_addr.ip().to_string())
+            HeaderValue::from_str(&forwarded_ctx.client_addr.ip().to_string())
                 .map_err(|_| BridgeError::InvalidHeader)?,
         )
         .header(
@@ -161,7 +166,7 @@ mod tests {
     use http_body_util::{BodyExt, Empty};
     use quiche::h3::Header;
 
-    use super::build_h2_request;
+    use super::{ForwardedContext, build_h2_request};
 
     #[test]
     fn defaults_to_https_origin_for_host_port_backend() {
@@ -172,8 +177,10 @@ mod tests {
             &[],
             Empty::<Bytes>::new().boxed(),
             None,
-            "203.0.113.10:44321".parse().expect("client"),
-            Some("api.example.com"),
+            ForwardedContext {
+                client_addr: "203.0.113.10:44321".parse().expect("client"),
+                request_authority: Some("api.example.com"),
+            },
         )
         .expect("request");
 
@@ -199,8 +206,10 @@ mod tests {
             &[],
             Empty::<Bytes>::new().boxed(),
             None,
-            "198.51.100.3:5555".parse().expect("client"),
-            None,
+            ForwardedContext {
+                client_addr: "198.51.100.3:5555".parse().expect("client"),
+                request_authority: None,
+            },
         )
         .expect("request");
 
@@ -220,8 +229,10 @@ mod tests {
             &[],
             Empty::<Bytes>::new().boxed(),
             None,
-            "127.0.0.1:12345".parse().expect("client"),
-            None,
+            ForwardedContext {
+                client_addr: "127.0.0.1:12345".parse().expect("client"),
+                request_authority: None,
+            },
         )
         .expect_err("invalid backend endpoint should fail");
 
@@ -248,8 +259,10 @@ mod tests {
             &headers,
             Empty::<Bytes>::new().boxed(),
             None,
-            "203.0.113.55:43210".parse().expect("client"),
-            Some("api.example.com"),
+            ForwardedContext {
+                client_addr: "203.0.113.55:43210".parse().expect("client"),
+                request_authority: Some("api.example.com"),
+            },
         )
         .expect("request");
 
@@ -285,8 +298,10 @@ mod tests {
             &[],
             Empty::<Bytes>::new().boxed(),
             None,
-            "[2001:db8::1]:4444".parse().expect("client"),
-            Some("api.example.com"),
+            ForwardedContext {
+                client_addr: "[2001:db8::1]:4444".parse().expect("client"),
+                request_authority: Some("api.example.com"),
+            },
         )
         .expect("request");
 

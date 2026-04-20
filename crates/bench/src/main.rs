@@ -1070,49 +1070,13 @@ fn classify_regression(
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{GateMetric, RegressionSeverity, classify_regression};
-
-    fn gate(
-        warn_pct: f64,
-        severe_pct: f64,
-        zero_baseline_limit: f64,
-        min_delta_abs: f64,
-    ) -> GateMetric {
-        GateMetric {
-            warn_pct,
-            severe_pct,
-            zero_baseline_limit,
-            min_delta_abs,
-        }
-    }
-
-    #[test]
-    fn min_delta_abs_suppresses_small_absolute_memory_drift() {
-        let memory_gate = gate(0.20, 0.40, 128.0, 256.0);
-        let regression = classify_regression(320.0, 200.0, &memory_gate, 128.0);
-        assert!(regression.is_none());
-    }
-
-    #[test]
-    fn min_delta_abs_still_allows_large_absolute_memory_regressions() {
-        let memory_gate = gate(0.20, 0.40, 128.0, 256.0);
-        let regression = classify_regression(520.0, 200.0, &memory_gate, 128.0);
-        assert!(matches!(
-            regression,
-            Some((RegressionSeverity::Severe, _, _))
-        ));
-    }
-}
-
 fn median(values: &mut [f64]) -> f64 {
     if values.is_empty() {
         return 1.0;
     }
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         (values[mid - 1] + values[mid]) / 2.0
     } else {
         values[mid]
@@ -1516,11 +1480,13 @@ fn resolve_baseline_paths(
 }
 
 fn merge_reports(reports: Vec<BenchReport>) -> BenchReport {
-    let mut merged = BenchReport::default();
-    merged.suite = "spooky-performance-baseline".to_string();
-    merged.report_kind = "merged".to_string();
-    merged.profile = "baseline".to_string();
-    merged.generated_unix_secs = unix_now();
+    let mut merged = BenchReport {
+        suite: "spooky-performance-baseline".to_string(),
+        report_kind: "merged".to_string(),
+        profile: "baseline".to_string(),
+        generated_unix_secs: unix_now(),
+        ..BenchReport::default()
+    };
 
     for report in reports {
         merged.cases.extend(report.cases);
@@ -1687,4 +1653,40 @@ fn main() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GateMetric, RegressionSeverity, classify_regression};
+
+    fn gate(
+        warn_pct: f64,
+        severe_pct: f64,
+        zero_baseline_limit: f64,
+        min_delta_abs: f64,
+    ) -> GateMetric {
+        GateMetric {
+            warn_pct,
+            severe_pct,
+            zero_baseline_limit,
+            min_delta_abs,
+        }
+    }
+
+    #[test]
+    fn min_delta_abs_suppresses_small_absolute_memory_drift() {
+        let memory_gate = gate(0.20, 0.40, 128.0, 256.0);
+        let regression = classify_regression(320.0, 200.0, &memory_gate, 128.0);
+        assert!(regression.is_none());
+    }
+
+    #[test]
+    fn min_delta_abs_still_allows_large_absolute_memory_regressions() {
+        let memory_gate = gate(0.20, 0.40, 128.0, 256.0);
+        let regression = classify_regression(520.0, 200.0, &memory_gate, 128.0);
+        assert!(matches!(
+            regression,
+            Some((RegressionSeverity::Severe, _, _))
+        ));
+    }
 }

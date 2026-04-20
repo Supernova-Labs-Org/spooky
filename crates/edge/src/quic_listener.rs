@@ -23,7 +23,7 @@ use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
 use socket2::{Domain, Protocol, Socket, Type};
-use spooky_bridge::h3_to_h2::build_h2_request;
+use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
 use spooky_errors::{PoolError, ProxyError};
 use spooky_lb::{HealthTransition, UpstreamPool};
 use spooky_transport::h2_client::{H2Client, TlsClientConfig};
@@ -1965,8 +1965,10 @@ impl QUICListener {
                                 &list,
                                 boxed,
                                 None,
-                                connection.peer_address,
-                                authority.as_deref(),
+                                ForwardedContext {
+                                    client_addr: connection.peer_address,
+                                    request_authority: authority.as_deref(),
+                                },
                             ) {
                                 Ok(request) => request,
                                 Err(err) => {
@@ -2049,8 +2051,11 @@ impl QUICListener {
                                                     &headers_owned,
                                                     BoxBody::new(Full::new(Bytes::new())),
                                                     Some(0),
-                                                    client_addr,
-                                                    authority_owned.as_deref(),
+                                                    ForwardedContext {
+                                                        client_addr,
+                                                        request_authority: authority_owned
+                                                            .as_deref(),
+                                                    },
                                                 )
                                                 .ok()
                                                 .map(|req| (backend, req))
@@ -2134,8 +2139,11 @@ impl QUICListener {
                                                         &headers_owned,
                                                         BoxBody::new(Full::new(Bytes::new())),
                                                         Some(0),
-                                                        client_addr,
-                                                        authority_owned.as_deref(),
+                                                        ForwardedContext {
+                                                            client_addr,
+                                                            request_authority: authority_owned
+                                                                .as_deref(),
+                                                        },
                                                     )
                                                 {
                                                     send_once(
@@ -4040,6 +4048,11 @@ mod tests {
         ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,
         resolve_primary_from_radix_prefix, sweep_closed_connections,
     };
+    type RoutingMaps = (
+        HashMap<Arc<[u8]>, Arc<[u8]>>,
+        CidRadix,
+        HashMap<SocketAddr, Arc<[u8]>>,
+    );
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
@@ -4068,7 +4081,7 @@ mod tests {
 
         assert_eq!(resolved.as_ref(), primary.as_ref());
         assert!(
-            cid_routes.get(alias.as_ref()).is_some(),
+            cid_routes.contains_key(alias.as_ref()),
             "live alias should remain mapped to active primary"
         );
         assert!(
@@ -4097,7 +4110,7 @@ mod tests {
             resolve_primary_from_radix_prefix(&dcid, &connections, &mut cid_routes, &mut cid_radix);
         assert!(resolved.is_none(), "stale alias must not resolve");
         assert!(
-            cid_routes.get(alias.as_ref()).is_none(),
+            !cid_routes.contains_key(alias.as_ref()),
             "stale alias mapping should be removed"
         );
         assert!(
@@ -4190,11 +4203,7 @@ mod tests {
         primary: &Arc<[u8]>,
         aliases: &[Arc<[u8]>],
         addr: SocketAddr,
-    ) -> (
-        HashMap<Arc<[u8]>, Arc<[u8]>>,
-        CidRadix,
-        HashMap<SocketAddr, Arc<[u8]>>,
-    ) {
+    ) -> RoutingMaps {
         let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
         let mut cid_radix = CidRadix::new();
         let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
@@ -4230,7 +4239,7 @@ mod tests {
             "primary SCID must be removed from radix after cleanup"
         );
         assert!(
-            peer_routes.get(&addr).is_none(),
+            !peer_routes.contains_key(&addr),
             "peer_routes entry must be removed after cleanup"
         );
     }
@@ -4257,11 +4266,11 @@ mod tests {
         );
 
         assert!(
-            cid_routes.get(alias1.as_ref()).is_none(),
+            !cid_routes.contains_key(alias1.as_ref()),
             "alias1 must be removed from cid_routes"
         );
         assert!(
-            cid_routes.get(alias2.as_ref()).is_none(),
+            !cid_routes.contains_key(alias2.as_ref()),
             "alias2 must be removed from cid_routes"
         );
         assert!(
@@ -4273,7 +4282,7 @@ mod tests {
             "alias2 must be removed from radix"
         );
         assert!(
-            peer_routes.get(&addr).is_none(),
+            !peer_routes.contains_key(&addr),
             "peer_routes entry must be removed"
         );
     }
@@ -4576,11 +4585,11 @@ mod tests {
             "surviving connection must remain in connections"
         );
         assert!(
-            peer_routes.get(&addr2).is_some(),
+            peer_routes.contains_key(&addr2),
             "surviving connection peer_route must remain"
         );
         assert!(
-            peer_routes.get(&addr1).is_none(),
+            !peer_routes.contains_key(&addr1),
             "timed-out connection peer_route must be removed"
         );
         assert!(

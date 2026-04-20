@@ -5,7 +5,7 @@ use hyper::Request;
 use hyper::body::{Bytes, Incoming};
 use tokio::sync::{Semaphore, TryAcquireError};
 
-use crate::h2_client::H2Client;
+use crate::h2_client::{H2Client, TlsClientConfig};
 pub use spooky_errors::PoolError;
 
 struct BackendHandle {
@@ -24,7 +24,8 @@ impl H2Pool {
         max_idle_per_backend: usize,
         pool_idle_timeout: Duration,
         connect_timeout: Duration,
-    ) -> Self
+        tls: TlsClientConfig,
+    ) -> Result<Self, String>
     where
         I: IntoIterator<Item = String>,
     {
@@ -32,15 +33,21 @@ impl H2Pool {
         let max_idle_per_backend = max_idle_per_backend.max(1);
         let mut map = HashMap::new();
         for backend in backends {
+            let client = H2Client::new(
+                max_idle_per_backend,
+                pool_idle_timeout,
+                connect_timeout,
+                tls.clone(),
+            )?;
             map.insert(
                 backend,
                 BackendHandle {
-                    client: H2Client::new(max_idle_per_backend, pool_idle_timeout, connect_timeout, false),
+                    client,
                     inflight: Arc::new(Semaphore::new(inflight)),
                 },
             );
         }
-        Self { backends: map }
+        Ok(Self { backends: map })
     }
 
     pub fn has_backend(&self, backend: &str) -> bool {

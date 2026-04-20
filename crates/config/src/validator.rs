@@ -542,6 +542,72 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    // --- Validate optional downstream client-auth (mTLS) ---
+    if config.listen.tls.client_auth.require_client_cert && !config.listen.tls.client_auth.enabled {
+        error!("listen.tls.client_auth.require_client_cert requires client_auth.enabled=true");
+        return false;
+    }
+
+    if config.listen.tls.client_auth.enabled {
+        let Some(ca_file) = config.listen.tls.client_auth.ca_file.as_ref() else {
+            error!("listen.tls.client_auth.ca_file is required when client_auth.enabled=true");
+            return false;
+        };
+        if ca_file.trim().is_empty() {
+            error!("listen.tls.client_auth.ca_file cannot be empty");
+            return false;
+        }
+        if !std::path::Path::new(ca_file).exists() {
+            error!("listen.tls.client_auth.ca_file does not exist: {}", ca_file);
+            return false;
+        }
+        if let Err(err) = std::fs::read(ca_file) {
+            error!(
+                "Cannot read listen.tls.client_auth.ca_file '{}': {}",
+                ca_file, err
+            );
+            return false;
+        }
+    }
+
+    // --- Validate upstream TLS trust-store configuration ---
+    if !config.upstream_tls.verify_certificates {
+        warn!(
+            "upstream_tls.verify_certificates=false disables TLS certificate validation for HTTPS upstreams"
+        );
+    }
+
+    if let Some(ca_file) = config.upstream_tls.ca_file.as_ref() {
+        if ca_file.trim().is_empty() {
+            error!("upstream_tls.ca_file cannot be empty when provided");
+            return false;
+        }
+        if !std::path::Path::new(ca_file).exists() {
+            error!("upstream_tls.ca_file does not exist: {}", ca_file);
+            return false;
+        }
+        if let Err(err) = std::fs::read(ca_file) {
+            error!("Cannot read upstream_tls.ca_file '{}': {}", ca_file, err);
+            return false;
+        }
+    }
+
+    if let Some(ca_dir) = config.upstream_tls.ca_dir.as_ref() {
+        if ca_dir.trim().is_empty() {
+            error!("upstream_tls.ca_dir cannot be empty when provided");
+            return false;
+        }
+        let ca_path = std::path::Path::new(ca_dir);
+        if !ca_path.exists() {
+            error!("upstream_tls.ca_dir does not exist: {}", ca_dir);
+            return false;
+        }
+        if !ca_path.is_dir() {
+            error!("upstream_tls.ca_dir must be a directory: {}", ca_dir);
+            return false;
+        }
+    }
+
     // --- Validate upstream routes ---
     for (upstream_name, upstream) in &config.upstream {
         // Validate route matcher has at least one condition
@@ -700,8 +766,8 @@ pub fn validate(config: &Config) -> bool {
 mod tests {
     use super::validate;
     use crate::config::{
-        Backend, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint, Observability,
-        Performance, Resilience, RouteMatch, Tls, Upstream,
+        Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint,
+        Observability, Performance, Resilience, RouteMatch, Tls, Upstream, UpstreamTls,
     };
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -745,6 +811,7 @@ mod tests {
                 tls: Tls {
                     cert: cert.to_string(),
                     key: key.to_string(),
+                    client_auth: ClientAuth::default(),
                 },
             },
             upstream,
@@ -752,6 +819,7 @@ mod tests {
                 lb_type: "random".to_string(),
                 key: None,
             }),
+            upstream_tls: UpstreamTls::default(),
             log: Log {
                 level: "info".to_string(),
                 file: Default::default(),
@@ -833,6 +901,11 @@ upstream:
         assert_eq!(cfg.performance.client_body_idle_timeout_ms, 10_000);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
+        assert!(cfg.upstream_tls.verify_certificates);
+        assert!(cfg.upstream_tls.strict_sni);
+        assert!(!cfg.listen.tls.client_auth.enabled);
+        assert!(!cfg.listen.tls.client_auth.require_client_cert);
+        assert!(cfg.listen.tls.client_auth.ca_file.is_none());
         assert!(cfg.resilience.adaptive_admission.enabled);
         assert_eq!(cfg.resilience.route_queue.default_cap, 512);
         assert_eq!(cfg.resilience.route_queue.global_cap, 2048);
@@ -1037,6 +1110,23 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.listen.tls.client_auth.require_client_cert = true;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.listen.tls.client_auth.enabled = true;
+        cfg.listen.tls.client_auth.ca_file = None;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.upstream_tls.ca_file = Some("/path/does/not/exist.pem".to_string());
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.upstream_tls.ca_dir = Some("/path/does/not/exist".to_string());
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,
@@ -1092,6 +1182,13 @@ upstream:
         cfg.resilience.protocol.allowed_methods = vec!["GET".to_string(), "POST".to_string()];
         cfg.resilience.protocol.denied_path_prefixes = vec!["/admin".to_string()];
         cfg.resilience.retry_budget.ratio_percent = 30;
+        cfg.upstream_tls.verify_certificates = true;
+        cfg.upstream_tls.strict_sni = true;
+        cfg.upstream_tls.ca_file = Some(cert.to_string_lossy().to_string());
+        cfg.upstream_tls.ca_dir = Some(dir.path().to_string_lossy().to_string());
+        cfg.listen.tls.client_auth.enabled = true;
+        cfg.listen.tls.client_auth.require_client_cert = true;
+        cfg.listen.tls.client_auth.ca_file = Some(cert.to_string_lossy().to_string());
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,

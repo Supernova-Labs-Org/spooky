@@ -7,6 +7,16 @@ listen:
     tls:
         cert: certs/proxy-fullchain.pem # path to cert
         key: certs/proxy-key-pkcs8.pem # path to key
+        client_auth:
+            enabled: false              # set true to request/verify client certificates (mTLS)
+            require_client_cert: false  # when true, close connections that complete handshake without a client cert
+            ca_file: null               # PEM CA bundle used to verify client certificates when enabled=true
+
+upstream_tls:
+    verify_certificates: true  # safe-by-default for HTTPS upstreams
+    strict_sni: true           # send backend host as SNI for HTTPS upstream connections
+    ca_file: null              # optional PEM CA bundle for private PKI
+    ca_dir: null               # optional directory of PEM CA bundles for private PKI
 
 upstream:
   api_pool:

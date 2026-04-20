@@ -22,10 +22,12 @@ hyper = "1"
 hyper-util = { version = "0.1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http2", "webpki-roots", "ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pemfile = "2.2"
 log = "0.4.28"
 quiche = "0.24.6"
 rand = "0.8"
 rustls-pki-types = "1.12.0"
+webpki-roots = "0.26"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9.34"

@@ -23,10 +23,10 @@ use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
 use socket2::{Domain, Protocol, Socket, Type};
-use spooky_bridge::h3_to_h2::build_h2_request;
+use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
 use spooky_errors::{PoolError, ProxyError};
 use spooky_lb::{HealthTransition, UpstreamPool};
-use spooky_transport::h2_client::H2Client;
+use spooky_transport::h2_client::{H2Client, TlsClientConfig};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
 use tokio::sync::{
@@ -433,6 +433,15 @@ impl QUICListener {
         Self::new_with_socket_and_shared_state(config, socket, shared_state)
     }
 
+    fn upstream_tls_client_config(config: &SpookyConfig) -> TlsClientConfig {
+        TlsClientConfig {
+            verify_certificates: config.upstream_tls.verify_certificates,
+            strict_sni: config.upstream_tls.strict_sni,
+            ca_file: config.upstream_tls.ca_file.clone(),
+            ca_dir: config.upstream_tls.ca_dir.clone(),
+        }
+    }
+
     pub fn build_shared_state(config: &SpookyConfig) -> Result<SharedRuntimeState, ProxyError> {
         let worker_threads = config.performance.worker_threads.max(1);
         let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
@@ -481,13 +490,17 @@ impl QUICListener {
             }
         }
 
-        let h2_pool = Arc::new(H2Pool::new(
-            backend_addresses,
-            max_inflight_per_backend,
-            config.performance.h2_pool_max_idle_per_backend,
-            Duration::from_millis(config.performance.h2_pool_idle_timeout_ms),
-            Duration::from_millis(config.performance.backend_connect_timeout_ms),
-        ));
+        let h2_pool = Arc::new(
+            H2Pool::new(
+                backend_addresses,
+                max_inflight_per_backend,
+                config.performance.h2_pool_max_idle_per_backend,
+                Duration::from_millis(config.performance.h2_pool_idle_timeout_ms),
+                Duration::from_millis(config.performance.backend_connect_timeout_ms),
+                Self::upstream_tls_client_config(config),
+            )
+            .map_err(ProxyError::Tls)?,
+        );
         let mut upstream_pools = HashMap::new();
         let mut upstream_inflight = HashMap::new();
 
@@ -527,14 +540,21 @@ impl QUICListener {
         shared_state
             .watchdog
             .set_expected_workers(worker_count.max(1));
+        let health_client = match H2Client::new(
+            config.performance.h2_pool_max_idle_per_backend.max(1),
+            Duration::from_millis(config.performance.h2_pool_idle_timeout_ms.max(1)),
+            Duration::from_millis(config.performance.backend_connect_timeout_ms.max(1)),
+            Self::upstream_tls_client_config(config),
+        ) {
+            Ok(client) => Arc::new(client),
+            Err(err) => {
+                error!("failed to initialize control-plane H2 client: {}", err);
+                return;
+            }
+        };
         Self::spawn_health_checks(
             shared_state.upstream_pools.clone(),
-            Arc::new(H2Client::new(
-                config.performance.h2_pool_max_idle_per_backend.max(1),
-                Duration::from_millis(config.performance.h2_pool_idle_timeout_ms.max(1)),
-                Duration::from_millis(config.performance.backend_connect_timeout_ms.max(1)),
-                false,
-            )),
+            health_client,
             Arc::clone(&shared_state.metrics),
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
@@ -607,6 +627,7 @@ impl QUICListener {
         let request_buffer_global_cap_bytes = config.performance.request_buffer_global_cap_bytes;
         let unknown_length_response_prebuffer_bytes =
             config.performance.unknown_length_response_prebuffer_bytes;
+        let require_client_cert = config.listen.tls.client_auth.require_client_cert;
         let conn_rate_limiter = TokenBucket::new(
             config.performance.new_connections_per_sec,
             config.performance.new_connections_burst,
@@ -639,6 +660,7 @@ impl QUICListener {
             max_response_body_bytes,
             request_buffer_global_cap_bytes,
             unknown_length_response_prebuffer_bytes,
+            require_client_cert,
             recv_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             send_buf: [0; MAX_DATAGRAM_SIZE_BYTES],
             connections: HashMap::new(),
@@ -785,7 +807,36 @@ impl QUICListener {
         quic_config.set_initial_max_streams_bidi(config.performance.quic_initial_max_streams_bidi);
         quic_config.set_initial_max_streams_uni(config.performance.quic_initial_max_streams_uni);
         quic_config.set_disable_active_migration(true);
-        quic_config.verify_peer(false);
+
+        if config.listen.tls.client_auth.enabled {
+            let ca_file = config
+                .listen
+                .tls
+                .client_auth
+                .ca_file
+                .as_ref()
+                .ok_or_else(|| {
+                    ProxyError::Tls(
+                        "listen.tls.client_auth.ca_file is required when mTLS is enabled"
+                            .to_string(),
+                    )
+                })?;
+            quic_config
+                .load_verify_locations_from_file(ca_file)
+                .map_err(|err| {
+                    ProxyError::Tls(format!(
+                        "failed to load listen.tls.client_auth.ca_file '{}': {}",
+                        ca_file, err
+                    ))
+                })?;
+            quic_config.verify_peer(true);
+            info!(
+                "Downstream mTLS enabled (require_client_cert={})",
+                config.listen.tls.client_auth.require_client_cert
+            );
+        } else {
+            quic_config.verify_peer(false);
+        }
 
         Ok(quic_config)
     }
@@ -1298,7 +1349,21 @@ impl QUICListener {
             connection.quic.is_closed()
         );
 
-        if (connection.quic.is_established() || connection.quic.is_in_early_data())
+        if self.require_client_cert
+            && connection.quic.is_established()
+            && connection.quic.peer_cert().is_none()
+        {
+            warn!(
+                "closing connection {}: downstream mTLS requires a client certificate",
+                connection.quic.trace_id()
+            );
+            let _ = connection
+                .quic
+                .close(true, 0x01A0, b"client certificate required");
+        }
+
+        if !connection.quic.is_closed()
+            && (connection.quic.is_established() || connection.quic.is_in_early_data())
             && let Err(e) = Self::handle_h3(
                 &mut connection,
                 Arc::clone(&h2_pool),
@@ -1893,32 +1958,42 @@ impl QUICListener {
                                     ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
                                 (Some(tx), channel_body.boxed(), false)
                             };
-                            let request =
-                                match build_h2_request(&addr, &method, &path, &list, boxed, None) {
-                                    Ok(request) => request,
-                                    Err(err) => {
-                                        drop(upstream_permit);
-                                        drop(global_permit);
-                                        metrics.inc_failure();
-                                        metrics.record_route(
-                                            &upstream_name,
-                                            request_start.elapsed(),
-                                            RouteOutcome::Failure,
-                                        );
-                                        Self::send_simple_response(
-                                            h3,
-                                            &mut connection.quic,
-                                            stream_id,
-                                            http::StatusCode::BAD_REQUEST,
-                                            b"invalid request\n",
-                                        )?;
-                                        error!("failed to build upstream request: {}", err);
-                                        resilience
-                                            .adaptive_admission
-                                            .observe(request_start.elapsed(), true);
-                                        continue;
-                                    }
-                                };
+                            let request = match build_h2_request(
+                                &addr,
+                                &method,
+                                &path,
+                                &list,
+                                boxed,
+                                None,
+                                ForwardedContext {
+                                    client_addr: connection.peer_address,
+                                    request_authority: authority.as_deref(),
+                                },
+                            ) {
+                                Ok(request) => request,
+                                Err(err) => {
+                                    drop(upstream_permit);
+                                    drop(global_permit);
+                                    metrics.inc_failure();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::Failure,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::BAD_REQUEST,
+                                        b"invalid request\n",
+                                    )?;
+                                    error!("failed to build upstream request: {}", err);
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
+                                    continue;
+                                }
+                            };
 
                             let h2 = h2_pool.clone();
                             let fwd_addr = addr.clone();
@@ -1932,6 +2007,8 @@ impl QUICListener {
                                 Self::pick_alternate_backend(&upstream_pool, idx);
                             let method_owned = method.clone();
                             let path_owned = path.clone();
+                            let authority_owned = authority.clone();
+                            let client_addr = connection.peer_address;
                             let headers_owned = list.clone();
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
@@ -1974,6 +2051,11 @@ impl QUICListener {
                                                     &headers_owned,
                                                     BoxBody::new(Full::new(Bytes::new())),
                                                     Some(0),
+                                                    ForwardedContext {
+                                                        client_addr,
+                                                        request_authority: authority_owned
+                                                            .as_deref(),
+                                                    },
                                                 )
                                                 .ok()
                                                 .map(|req| (backend, req))
@@ -2057,6 +2139,11 @@ impl QUICListener {
                                                         &headers_owned,
                                                         BoxBody::new(Full::new(Bytes::new())),
                                                         Some(0),
+                                                        ForwardedContext {
+                                                            client_addr,
+                                                            request_authority: authority_owned
+                                                                .as_deref(),
+                                                        },
                                                     )
                                                 {
                                                     send_once(
@@ -3657,11 +3744,10 @@ impl QUICListener {
                     previous_requests = current_requests;
                     previous_timeouts = current_timeouts;
 
-                    let timeout_rate_percent = if request_delta == 0 {
-                        0
-                    } else {
-                        timeout_delta.saturating_mul(100) / request_delta
-                    };
+                    let timeout_rate_percent = timeout_delta
+                        .saturating_mul(100)
+                        .checked_div(request_delta)
+                        .unwrap_or(0);
 
                     let timeout_pressure = request_delta >= watchdog_config.min_requests_per_window
                         && timeout_rate_percent
@@ -3961,6 +4047,11 @@ mod tests {
         ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,
         resolve_primary_from_radix_prefix, sweep_closed_connections,
     };
+    type RoutingMaps = (
+        HashMap<Arc<[u8]>, Arc<[u8]>>,
+        CidRadix,
+        HashMap<SocketAddr, Arc<[u8]>>,
+    );
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
@@ -3989,7 +4080,7 @@ mod tests {
 
         assert_eq!(resolved.as_ref(), primary.as_ref());
         assert!(
-            cid_routes.get(alias.as_ref()).is_some(),
+            cid_routes.contains_key(alias.as_ref()),
             "live alias should remain mapped to active primary"
         );
         assert!(
@@ -4018,7 +4109,7 @@ mod tests {
             resolve_primary_from_radix_prefix(&dcid, &connections, &mut cid_routes, &mut cid_radix);
         assert!(resolved.is_none(), "stale alias must not resolve");
         assert!(
-            cid_routes.get(alias.as_ref()).is_none(),
+            !cid_routes.contains_key(alias.as_ref()),
             "stale alias mapping should be removed"
         );
         assert!(
@@ -4111,11 +4202,7 @@ mod tests {
         primary: &Arc<[u8]>,
         aliases: &[Arc<[u8]>],
         addr: SocketAddr,
-    ) -> (
-        HashMap<Arc<[u8]>, Arc<[u8]>>,
-        CidRadix,
-        HashMap<SocketAddr, Arc<[u8]>>,
-    ) {
+    ) -> RoutingMaps {
         let mut cid_routes: HashMap<Arc<[u8]>, Arc<[u8]>> = HashMap::new();
         let mut cid_radix = CidRadix::new();
         let mut peer_routes: HashMap<SocketAddr, Arc<[u8]>> = HashMap::new();
@@ -4151,7 +4238,7 @@ mod tests {
             "primary SCID must be removed from radix after cleanup"
         );
         assert!(
-            peer_routes.get(&addr).is_none(),
+            !peer_routes.contains_key(&addr),
             "peer_routes entry must be removed after cleanup"
         );
     }
@@ -4178,11 +4265,11 @@ mod tests {
         );
 
         assert!(
-            cid_routes.get(alias1.as_ref()).is_none(),
+            !cid_routes.contains_key(alias1.as_ref()),
             "alias1 must be removed from cid_routes"
         );
         assert!(
-            cid_routes.get(alias2.as_ref()).is_none(),
+            !cid_routes.contains_key(alias2.as_ref()),
             "alias2 must be removed from cid_routes"
         );
         assert!(
@@ -4194,7 +4281,7 @@ mod tests {
             "alias2 must be removed from radix"
         );
         assert!(
-            peer_routes.get(&addr).is_none(),
+            !peer_routes.contains_key(&addr),
             "peer_routes entry must be removed"
         );
     }
@@ -4497,11 +4584,11 @@ mod tests {
             "surviving connection must remain in connections"
         );
         assert!(
-            peer_routes.get(&addr2).is_some(),
+            peer_routes.contains_key(&addr2),
             "surviving connection peer_route must remain"
         );
         assert!(
-            peer_routes.get(&addr1).is_none(),
+            !peer_routes.contains_key(&addr1),
             "timed-out connection peer_route must be removed"
         );
         assert!(

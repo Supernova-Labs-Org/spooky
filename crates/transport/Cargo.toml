@@ -11,5 +11,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 hyper-rustls.workspace = true
 rustls.workspace = true
+rustls-pemfile.workspace = true
 tokio.workspace = true
+webpki-roots.workspace = true
 spooky-errors = { path = "../errors" }

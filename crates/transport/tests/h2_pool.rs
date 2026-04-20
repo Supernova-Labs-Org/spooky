@@ -12,7 +12,10 @@ use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::net::TcpListener;
 
-use spooky_transport::h2_pool::{H2Pool, PoolError};
+use spooky_transport::{
+    h2_client::TlsClientConfig,
+    h2_pool::{H2Pool, PoolError},
+};
 
 struct ConcurrencyTracker {
     current: AtomicUsize,
@@ -84,13 +87,20 @@ async fn pool_limits_inflight_per_backend() {
     let port = start_h2_server(tracker.clone()).await.unwrap();
     let backend = format!("127.0.0.1:{port}");
 
-    let pool = Arc::new(H2Pool::new(
-        vec![backend.clone()],
-        1,
-        64,
-        Duration::from_secs(30),
-        Duration::from_secs(2),
-    ));
+    let pool = Arc::new(
+        H2Pool::new(
+            vec![backend.clone()],
+            1,
+            64,
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+            TlsClientConfig {
+                verify_certificates: false,
+                ..TlsClientConfig::default()
+            },
+        )
+        .expect("pool"),
+    );
     let req1 = Request::builder()
         .method("GET")
         .uri(format!("http://{backend}/"))
@@ -135,7 +145,12 @@ async fn pool_rejects_unknown_backend() {
         64,
         Duration::from_secs(30),
         Duration::from_secs(2),
-    );
+        TlsClientConfig {
+            verify_certificates: false,
+            ..TlsClientConfig::default()
+        },
+    )
+    .expect("pool");
     let req = Request::builder()
         .method("GET")
         .uri("http://127.0.0.1:12345/")
@@ -154,13 +169,20 @@ async fn pool_capacity_probe_reflects_inflight_state() {
     let tracker = Arc::new(ConcurrencyTracker::new());
     let port = start_h2_server(tracker).await.unwrap();
     let backend = format!("127.0.0.1:{port}");
-    let pool = Arc::new(H2Pool::new(
-        vec![backend.clone()],
-        1,
-        64,
-        Duration::from_secs(30),
-        Duration::from_secs(2),
-    ));
+    let pool = Arc::new(
+        H2Pool::new(
+            vec![backend.clone()],
+            1,
+            64,
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+            TlsClientConfig {
+                verify_certificates: false,
+                ..TlsClientConfig::default()
+            },
+        )
+        .expect("pool"),
+    );
 
     assert!(pool.has_capacity(&backend).unwrap());
 

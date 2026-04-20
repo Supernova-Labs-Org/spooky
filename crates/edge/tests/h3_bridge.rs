@@ -30,7 +30,9 @@ use rcgen::{Certificate, CertificateParams, SanType};
 use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 
-use spooky_config::config::{Backend, Config, HealthCheck, Listen, LoadBalancing, Log, Tls};
+use spooky_config::config::{
+    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, Tls, UpstreamTls,
+};
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
     BACKEND_TIMEOUT_SECS, MAX_DATAGRAM_SIZE_BYTES, MAX_REQUEST_BODY_BYTES,
@@ -96,13 +98,18 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
             protocol: "http3".to_string(),
             port,
             address: "127.0.0.1".to_string(),
-            tls: Tls { cert, key },
+            tls: Tls {
+                cert,
+                key,
+                client_auth: ClientAuth::default(),
+            },
         },
         upstream,
         load_balancing: Some(LoadBalancing {
             lb_type: "random".to_string(),
             key: None,
         }),
+        upstream_tls: UpstreamTls::default(),
         log: Log {
             level: "info".to_string(),
             file: Default::default(),
@@ -862,6 +869,13 @@ fn run_h3_client_concurrent_get(
         .map_err(|e| format!("send_to: {e:?}"))?;
 
     loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "timeout waiting for responses (done={finished}, expected={})",
+                paths.len()
+            ));
+        }
+
         loop {
             match conn.send(&mut out) {
                 Ok((write, send_info)) => {
@@ -872,7 +886,15 @@ fn run_h3_client_concurrent_get(
             }
         }
 
-        let read_timeout = quic_read_timeout(&conn);
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let read_timeout = quic_read_timeout(&conn)
+            .min(remaining)
+            .min(Duration::from_millis(50));
+        let read_timeout = if read_timeout.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            read_timeout
+        };
         socket
             .set_read_timeout(Some(read_timeout))
             .map_err(|e| format!("timeout: {e:?}"))?;
@@ -970,12 +992,6 @@ fn run_h3_client_concurrent_get(
             return Ok(observations);
         }
 
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "timeout waiting for responses (done={finished}, expected={})",
-                paths.len()
-            ));
-        }
     }
 }
 
@@ -1091,57 +1107,6 @@ async fn start_h2_backend_with_drain_probe(inflight_seen: Arc<AtomicBool>) -> So
     addr
 }
 
-async fn start_h2_backend_with_body_routes() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        loop {
-            let (stream, _) = match listener.accept().await {
-                Ok(v) => v,
-                Err(_) => break,
-            };
-
-            let io = TokioIo::new(stream);
-            let service = service_fn(|req: Request<Incoming>| async move {
-                let path = req.uri().path().to_string();
-                let collected = req.into_body().collect().await;
-                let body_len = match collected {
-                    Ok(body) => body.to_bytes().len(),
-                    Err(_) => {
-                        let resp = Response::builder()
-                            .status(500)
-                            .body(Full::new(Bytes::from_static(b"read-failed\n")).boxed())
-                            .unwrap();
-                        return Ok::<_, hyper::Error>(resp);
-                    }
-                };
-
-                let response: Response<TestBody> = match path.as_str() {
-                    "/slow" => {
-                        tokio::time::sleep(Duration::from_millis(700)).await;
-                        Response::new(
-                            Full::new(Bytes::from(format!("slow-body-bytes={body_len}\n"))).boxed(),
-                        )
-                    }
-                    _ => Response::new(
-                        Full::new(Bytes::from(format!("body-bytes={body_len}\n"))).boxed(),
-                    ),
-                };
-                Ok::<_, hyper::Error>(response)
-            });
-
-            tokio::spawn(async move {
-                let _ = hyper::server::conn::http2::Builder::new(TokioExecutor::new())
-                    .serve_connection(io, service)
-                    .await;
-            });
-        }
-    });
-
-    addr
-}
-
 async fn start_h2_backend_with_chaos_routes() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1175,7 +1140,10 @@ async fn start_h2_backend_with_chaos_routes() -> SocketAddr {
                             Response::new(Full::new(Bytes::from_static(b"late-loss\n")).boxed())
                         }
                         "/flap" => {
-                            if flap_counter.fetch_add(1, Ordering::Relaxed) % 2 == 0 {
+                            if flap_counter
+                                .fetch_add(1, Ordering::Relaxed)
+                                .is_multiple_of(2)
+                            {
                                 Response::new(Full::new(Bytes::from_static(b"flap-ok\n")).boxed())
                             } else {
                                 Response::builder()
@@ -3160,29 +3128,35 @@ fn flush_quic(conn: &mut quiche::Connection, socket: &std::net::UdpSocket, out: 
     }
 }
 
+struct PumpIo<'a> {
+    socket: &'a std::net::UdpSocket,
+    local_addr: std::net::SocketAddr,
+    out: &'a mut [u8],
+    buf: &'a mut [u8],
+}
+
 /// Pump the QUIC event loop until `target_sid` finishes/resets OR `deadline`
 /// passes.  Collects H3 status/finished/reset events.  Returns true if done.
 fn pump_h3_until(
     conn: &mut quiche::Connection,
     h3: &mut quiche::h3::Connection,
-    socket: &std::net::UdpSocket,
-    local_addr: std::net::SocketAddr,
-    out: &mut [u8],
-    buf: &mut [u8],
+    io: &mut PumpIo<'_>,
     target_sid: u64,
     deadline: Instant,
     events: &mut Vec<String>,
 ) -> bool {
     while Instant::now() < deadline {
-        flush_quic(conn, socket, out);
-        socket.set_read_timeout(Some(quic_read_timeout(conn))).ok();
-        match socket.recv_from(buf) {
+        flush_quic(conn, io.socket, io.out);
+        io.socket
+            .set_read_timeout(Some(quic_read_timeout(conn)))
+            .ok();
+        match io.socket.recv_from(io.buf) {
             Ok((len, from)) => {
                 let _ = conn.recv(
-                    &mut buf[..len],
+                    &mut io.buf[..len],
                     quiche::RecvInfo {
                         from,
-                        to: local_addr,
+                        to: io.local_addr,
                     },
                 );
             }
@@ -3278,13 +3252,16 @@ fn teardown_client_reset_before_upstream_response() {
     // Pump briefly so the listener processes the reset and calls abort_stream.
     let pump_end = Instant::now() + Duration::from_millis(200);
     let mut discard = Vec::new();
+    let mut io = PumpIo {
+        socket: &socket,
+        local_addr,
+        out: &mut out,
+        buf: &mut buf,
+    };
     pump_h3_until(
         &mut conn,
         &mut h3,
-        &socket,
-        local_addr,
-        &mut out,
-        &mut buf,
+        &mut io,
         slow_sid,
         pump_end,
         &mut discard,
@@ -3355,7 +3332,6 @@ fn teardown_client_reset_during_response_streaming() {
         // Wait for first response data chunk — this guarantees the server is in
         // SendingResponse and actively streaming.
         let data_deadline = Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS);
-        let mut got_data = false;
         'wait: loop {
             flush_quic(&mut conn, &socket, &mut out);
             socket.set_read_timeout(Some(quic_read_timeout(&conn))).ok();
@@ -3382,7 +3358,6 @@ fn teardown_client_reset_during_response_streaming() {
                     Ok((sid, quiche::h3::Event::Data)) if sid == stream_sid => {
                         let mut tmp = [0u8; 4096];
                         while h3.recv_body(&mut conn, sid, &mut tmp).is_ok() {}
-                        got_data = true;
                         break 'wait;
                     }
                     Ok((sid, quiche::h3::Event::Finished)) if sid == stream_sid => {
@@ -3397,10 +3372,6 @@ fn teardown_client_reset_during_response_streaming() {
                 panic!("timed out waiting for /stream response data");
             }
         }
-        assert!(
-            got_data,
-            "must receive response data before dropping connection"
-        );
         // Connection drops here (socket + conn out of scope) — server is left
         // in SendingResponse with an orphaned body-pump task.
     }
@@ -3427,13 +3398,16 @@ fn teardown_client_reset_during_response_streaming() {
         .expect("send_request /fast on second connection");
 
     let mut events = Vec::new();
+    let mut io = PumpIo {
+        socket: &socket2,
+        local_addr: local_addr2,
+        out: &mut out2,
+        buf: &mut buf2,
+    };
     let done = pump_h3_until(
         &mut conn2,
         &mut h3_2,
-        &socket2,
-        local_addr2,
-        &mut out2,
-        &mut buf2,
+        &mut io,
         fast_sid,
         Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS + 2),
         &mut events,
@@ -3489,13 +3463,16 @@ fn teardown_upstream_timeout_cleans_up_stream() {
 
     let mut timeout_events = Vec::new();
     // backend_timeout_ms=200ms + some margin for the listener to respond
+    let mut io = PumpIo {
+        socket: &socket,
+        local_addr,
+        out: &mut out,
+        buf: &mut buf,
+    };
     let done = pump_h3_until(
         &mut conn,
         &mut h3,
-        &socket,
-        local_addr,
-        &mut out,
-        &mut buf,
+        &mut io,
         timeout_sid,
         Instant::now() + Duration::from_secs(5),
         &mut timeout_events,
@@ -3519,13 +3496,16 @@ fn teardown_upstream_timeout_cleans_up_stream() {
         .expect("send_request /fast after timeout");
 
     let mut fast_events = Vec::new();
+    let mut io = PumpIo {
+        socket: &socket,
+        local_addr,
+        out: &mut out,
+        buf: &mut buf,
+    };
     let done = pump_h3_until(
         &mut conn,
         &mut h3,
-        &socket,
-        local_addr,
-        &mut out,
-        &mut buf,
+        &mut io,
         fast_sid,
         Instant::now() + Duration::from_secs(REQUEST_TIMEOUT_SECS + 2),
         &mut fast_events,

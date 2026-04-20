@@ -457,6 +457,44 @@ fn release_shard_queue_bytes(counter: &AtomicUsize, packet_bytes: usize) {
     }
 }
 
+fn maybe_pin_worker(worker_idx: usize, pin_workers: bool) {
+    if !pin_workers {
+        return;
+    }
+
+    let Some(core_ids) = core_affinity::get_core_ids() else {
+        warn!("Worker pinning requested but core list is unavailable");
+        return;
+    };
+
+    if core_ids.is_empty() {
+        warn!("Worker pinning requested but no cores were reported");
+        return;
+    }
+
+    let core_id = core_ids[worker_idx % core_ids.len()];
+    if !core_affinity::set_for_current(core_id) {
+        warn!("Failed to pin worker {} to core {}", worker_idx, core_id.id);
+    }
+}
+
+fn join_worker_handle(handle: thread::JoinHandle<Result<(), String>>, worker_failed: &mut bool) {
+    match handle.join() {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            *worker_failed = true;
+            error!("Worker exited with error: {}", err);
+        }
+        Err(payload) => {
+            *worker_failed = true;
+            error!(
+                "Worker thread panicked: {}",
+                runtime_guard::panic_payload_message(payload.as_ref())
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{release_shard_queue_bytes, shard_index_for_peer, try_reserve_shard_queue_bytes};
@@ -493,43 +531,5 @@ mod tests {
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 5);
         release_shard_queue_bytes(&counter, 10);
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 0);
-    }
-}
-
-fn maybe_pin_worker(worker_idx: usize, pin_workers: bool) {
-    if !pin_workers {
-        return;
-    }
-
-    let Some(core_ids) = core_affinity::get_core_ids() else {
-        warn!("Worker pinning requested but core list is unavailable");
-        return;
-    };
-
-    if core_ids.is_empty() {
-        warn!("Worker pinning requested but no cores were reported");
-        return;
-    }
-
-    let core_id = core_ids[worker_idx % core_ids.len()];
-    if !core_affinity::set_for_current(core_id) {
-        warn!("Failed to pin worker {} to core {}", worker_idx, core_id.id);
-    }
-}
-
-fn join_worker_handle(handle: thread::JoinHandle<Result<(), String>>, worker_failed: &mut bool) {
-    match handle.join() {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            *worker_failed = true;
-            error!("Worker exited with error: {}", err);
-        }
-        Err(payload) => {
-            *worker_failed = true;
-            error!(
-                "Worker thread panicked: {}",
-                runtime_guard::panic_payload_message(payload.as_ref())
-            );
-        }
     }
 }

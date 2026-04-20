@@ -341,3 +341,11 @@ pub fn observe_default_port() -> u16 {
 pub fn observe_default_metrics_path() -> String {
     String::from("/metrics")
 }
+
+pub fn upstream_tls_default_verify_certificates() -> bool {
+    true
+}
+
+pub fn upstream_tls_default_strict_sni() -> bool {
+    true
+}

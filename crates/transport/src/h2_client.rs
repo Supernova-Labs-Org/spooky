@@ -138,13 +138,15 @@ impl H2Client {
 
 impl Default for H2Client {
     fn default() -> Self {
-        Self::new(
+        match Self::new(
             64,
             Duration::from_secs(30),
             Duration::from_secs(2),
             TlsClientConfig::default(),
-        )
-        .expect("default H2 client config must be valid")
+        ) {
+            Ok(client) => client,
+            Err(err) => panic!("default H2 client config must be valid: {err}"),
+        }
     }
 }
 

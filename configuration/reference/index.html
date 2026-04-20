@@ -1080,6 +1080,11 @@ log:
 <td>Burst capacity for new QUIC connections</td>
 </tr>
 <tr>
+<td><code>performance.max_active_connections</code></td>
+<td><code>20000</code></td>
+<td>Hard cap on concurrently tracked active QUIC connections per worker</td>
+</tr>
+<tr>
 <td><code>performance.quic_max_idle_timeout_ms</code></td>
 <td><code>5000</code></td>
 <td>QUIC idle timeout — connection closed after this many ms of inactivity</td>
@@ -1796,6 +1801,13 @@ log:
 <td>Burst capacity above the steady-state rate; the bucket starts full so the first burst of legitimate connections always succeeds</td>
 </tr>
 <tr>
+<td><code>max_active_connections</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>20000</code></td>
+<td>Hard cap on active QUIC connections per worker; unknown <code>Initial</code> packets are dropped once this cap is reached</td>
+</tr>
+<tr>
 <td><code>quic_max_idle_timeout_ms</code></td>
 <td>integer</td>
 <td>No</td>
@@ -1841,9 +1853,11 @@ log:
 </table></div>
 <h3 id="connection-flood-protection">Connection flood protection</h3>
 <p><code>new_connections_per_sec</code> and <code>new_connections_burst</code> implement a token-bucket rate limiter on new QUIC connection accepts. The bucket starts full so legitimate burst traffic at startup is never penalised. Packets for <strong>existing</strong> connections are never affected by this limit — only unknown <code>Initial</code> packets that would create a new connection state entry are gated.</p>
+<p><code>max_active_connections</code> is a separate hard guardrail for total connection state. Use it to enforce deterministic memory limits under sustained handshake floods even when token-bucket limits allow temporary bursts.</p>
 <pre><code class="language-yaml">performance:
   new_connections_per_sec: 2000   # refill rate: 2 k new conns/sec
   new_connections_burst: 500      # allow a burst of up to 500 above the rate
+  max_active_connections: 20000   # hard ceiling for concurrently tracked connections
 </code></pre>
 <p>Set <code>new_connections_burst</code> to <code>1</code> and <code>new_connections_per_sec</code> to a low value to aggressively throttle connection floods at the cost of rejecting legitimate concurrent handshakes.</p>
 <h3 id="examples_3">Examples</h3>

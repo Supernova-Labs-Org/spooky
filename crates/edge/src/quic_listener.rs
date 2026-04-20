@@ -2922,7 +2922,7 @@ impl QUICListener {
                                                     p.pool.mark_success(idx)
                                                 }
                                                 crate::HealthClassification::Failure => {
-                                                    p.pool.mark_failure(idx)
+                                                    p.pool.mark_request_failure(idx, HealthFailureReason::HttpStatus5xx)
                                                 }
                                                 crate::HealthClassification::Neutral => None,
                                             },
@@ -3138,7 +3138,7 @@ impl QUICListener {
                                 req.backend_index,
                                 upstream_name.and_then(|n| upstream_pools.get(n)),
                             ) && let Some(t) =
-                                pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
+                                pool.lock().ok().and_then(|mut p| p.pool.mark_request_failure(idx, HealthFailureReason::HttpStatus5xx))
                                 && let Some(addr) = &req.backend_addr
                             {
                                 Self::log_health_transition(addr, t);
@@ -3430,7 +3430,7 @@ impl QUICListener {
                     && let Some(t) = pool
                         .lock()
                         .ok()
-                        .and_then(|mut p| p.pool.mark_failure_with_reason(backend_index, HealthFailureReason::Transport))
+                        .and_then(|mut p| p.pool.mark_request_failure(backend_index, HealthFailureReason::Transport))
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -3470,7 +3470,7 @@ impl QUICListener {
                     && let Some(t) = pool
                         .lock()
                         .ok()
-                        .and_then(|mut p| p.pool.mark_failure_with_reason(backend_index, HealthFailureReason::Timeout))
+                        .and_then(|mut p| p.pool.mark_request_failure(backend_index, HealthFailureReason::Timeout))
                 {
                     Self::log_health_transition(backend_addr, t);
                 }

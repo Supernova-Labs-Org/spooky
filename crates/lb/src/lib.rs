@@ -53,6 +53,13 @@ impl BackendState {
         matches!(self.health_state, HealthState::Healthy)
     }
 
+    /// Returns true when an active health-check loop is running for this backend.
+    /// When active checks are present, only the health-check loop should drive
+    /// consecutive_failures — request-path failures should not contribute.
+    pub fn has_active_health_check(&self) -> bool {
+        self.health_check.interval > 0
+    }
+
     pub fn address(&self) -> &str {
         &self.address
     }
@@ -195,8 +202,23 @@ impl BackendPool {
         transition
     }
 
+    /// Mark a failure from the active health-check loop — always recorded.
     pub fn mark_failure(&mut self, index: usize) -> Option<HealthTransition> {
         self.mark_failure_with_reason(index, HealthFailureReason::HttpStatus5xx)
+    }
+
+    /// Mark a failure from the request path (passive).
+    /// Skipped when an active health-check loop is running for this backend,
+    /// because the loop is the sole authority on consecutive_failures in that case.
+    pub fn mark_request_failure(
+        &mut self,
+        index: usize,
+        reason: HealthFailureReason,
+    ) -> Option<HealthTransition> {
+        if index < self.backends.len() && self.backends[index].has_active_health_check() {
+            return None;
+        }
+        self.mark_failure_with_reason(index, reason)
     }
 
     pub fn mark_failure_with_reason(

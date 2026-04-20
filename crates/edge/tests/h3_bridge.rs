@@ -869,6 +869,13 @@ fn run_h3_client_concurrent_get(
         .map_err(|e| format!("send_to: {e:?}"))?;
 
     loop {
+        if start.elapsed() > timeout {
+            return Err(format!(
+                "timeout waiting for responses (done={finished}, expected={})",
+                paths.len()
+            ));
+        }
+
         loop {
             match conn.send(&mut out) {
                 Ok((write, send_info)) => {
@@ -879,7 +886,15 @@ fn run_h3_client_concurrent_get(
             }
         }
 
-        let read_timeout = quic_read_timeout(&conn);
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let read_timeout = quic_read_timeout(&conn)
+            .min(remaining)
+            .min(Duration::from_millis(50));
+        let read_timeout = if read_timeout.is_zero() {
+            Duration::from_millis(1)
+        } else {
+            read_timeout
+        };
         socket
             .set_read_timeout(Some(read_timeout))
             .map_err(|e| format!("timeout: {e:?}"))?;
@@ -977,12 +992,6 @@ fn run_h3_client_concurrent_get(
             return Ok(observations);
         }
 
-        if start.elapsed() > timeout {
-            return Err(format!(
-                "timeout waiting for responses (done={finished}, expected={})",
-                paths.len()
-            ));
-        }
     }
 }
 

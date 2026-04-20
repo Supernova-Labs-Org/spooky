@@ -388,7 +388,7 @@ impl Default for Performance {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct Resilience {
     #[serde(default)]
     pub adaptive_admission: AdaptiveAdmission,
@@ -406,21 +406,6 @@ pub struct Resilience {
     pub brownout: Brownout,
     #[serde(default)]
     pub watchdog: Watchdog,
-}
-
-impl Default for Resilience {
-    fn default() -> Self {
-        Self {
-            adaptive_admission: AdaptiveAdmission::default(),
-            route_queue: RouteQueue::default(),
-            protocol: ProtocolPolicy::default(),
-            circuit_breaker: CircuitBreaker::default(),
-            hedging: Hedging::default(),
-            retry_budget: RetryBudget::default(),
-            brownout: Brownout::default(),
-            watchdog: Watchdog::default(),
-        }
-    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

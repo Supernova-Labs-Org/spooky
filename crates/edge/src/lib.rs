@@ -114,6 +114,7 @@ pub struct QUICListener {
     pub max_response_body_bytes: usize,
     pub request_buffer_global_cap_bytes: usize,
     pub unknown_length_response_prebuffer_bytes: usize,
+    pub require_client_cert: bool,
 
     pub recv_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],
     pub send_buf: [u8; MAX_DATAGRAM_SIZE_BYTES],

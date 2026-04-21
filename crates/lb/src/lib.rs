@@ -3,6 +3,15 @@ use std::time::{Duration, Instant};
 use rand::Rng;
 use spooky_config::config::{Backend, HealthCheck};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthFailureReason {
+    HttpStatus5xx,
+    Timeout,
+    Transport,
+    Tls,
+    CircuitOpen,
+}
+
 const DEFAULT_REPLICAS: u32 = 64;
 const FNV_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x00000100000001b3;
@@ -19,7 +28,9 @@ pub struct BackendState {
 #[derive(Clone)]
 enum HealthState {
     Healthy,
-    Unhealthy { until: Instant, successes: u32 },
+    // `reason` is stored for future introspection; suppressed until wired to metrics
+    #[allow(dead_code)]
+    Unhealthy { until: Instant, successes: u32, reason: HealthFailureReason },
 }
 
 pub enum HealthTransition {
@@ -42,6 +53,13 @@ impl BackendState {
         matches!(self.health_state, HealthState::Healthy)
     }
 
+    /// Returns true when an active health-check loop is running for this backend.
+    /// When active checks are present, only the health-check loop should drive
+    /// consecutive_failures — request-path failures should not contribute.
+    pub fn has_active_health_check(&self) -> bool {
+        self.health_check.interval > 0
+    }
+
     pub fn address(&self) -> &str {
         &self.address
     }
@@ -60,7 +78,7 @@ impl BackendState {
                 self.consecutive_failures = 0;
                 None
             }
-            HealthState::Unhealthy { until, successes } => {
+            HealthState::Unhealthy { until, successes, .. } => {
                 if Instant::now() < *until {
                     return None;
                 }
@@ -76,7 +94,7 @@ impl BackendState {
         }
     }
 
-    pub fn record_failure(&mut self) -> Option<HealthTransition> {
+    pub fn record_failure(&mut self, reason: HealthFailureReason) -> Option<HealthTransition> {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         let threshold = self.health_check.failure_threshold;
         if self.consecutive_failures < threshold {
@@ -88,6 +106,7 @@ impl BackendState {
         self.health_state = HealthState::Unhealthy {
             until: Instant::now() + cooldown,
             successes: 0,
+            reason,
         };
         Some(HealthTransition::BecameUnhealthy)
     }
@@ -183,7 +202,30 @@ impl BackendPool {
         transition
     }
 
+    /// Mark a failure from the active health-check loop — always recorded.
     pub fn mark_failure(&mut self, index: usize) -> Option<HealthTransition> {
+        self.mark_failure_with_reason(index, HealthFailureReason::HttpStatus5xx)
+    }
+
+    /// Mark a failure from the request path (passive).
+    /// Skipped when an active health-check loop is running for this backend,
+    /// because the loop is the sole authority on consecutive_failures in that case.
+    pub fn mark_request_failure(
+        &mut self,
+        index: usize,
+        reason: HealthFailureReason,
+    ) -> Option<HealthTransition> {
+        if index < self.backends.len() && self.backends[index].has_active_health_check() {
+            return None;
+        }
+        self.mark_failure_with_reason(index, reason)
+    }
+
+    pub fn mark_failure_with_reason(
+        &mut self,
+        index: usize,
+        reason: HealthFailureReason,
+    ) -> Option<HealthTransition> {
         if index >= self.backends.len() {
             return None;
         }
@@ -191,7 +233,7 @@ impl BackendPool {
         let (was_healthy, is_healthy, transition) = {
             let backend = &mut self.backends[index];
             let was_healthy = backend.is_healthy();
-            let transition = backend.record_failure();
+            let transition = backend.record_failure(reason);
             let is_healthy = backend.is_healthy();
             (was_healthy, is_healthy, transition)
         };

@@ -15,6 +15,11 @@ upstream:
         health_check:
           path: "/health"
 
+# For Dev-work
+upstream_tls:
+  verify_certificates: false
+
+
 performance:
   packet_shards_per_worker: 1
   packet_shard_queue_capacity: 2048

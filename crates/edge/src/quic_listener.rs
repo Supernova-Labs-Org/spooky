@@ -24,8 +24,8 @@ use quiche::h3::NameValue;
 use rand::RngCore;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
-use spooky_errors::{PoolError, ProxyError};
-use spooky_lb::{HealthTransition, UpstreamPool};
+use spooky_errors::{PoolError, ProxyError, is_retryable};
+use spooky_lb::{HealthFailureReason, HealthTransition, UpstreamPool};
 use spooky_transport::h2_client::{H2Client, TlsClientConfig};
 use spooky_transport::h2_pool::H2Pool;
 use tokio::runtime::Handle;
@@ -38,8 +38,9 @@ use tokio::sync::{
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
-    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener, QuicConnection,
-    RequestEnvelope, ResponseChunk, RouteOutcome, SharedRuntimeState, StreamPhase, UpstreamResult,
+    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener,
+    QuicConnection, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome, SharedRuntimeState,
+    StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_STREAMS_PER_CONNECTION,
@@ -2082,7 +2083,7 @@ impl QUICListener {
                                                 _ = &mut hedge_sleep => None,
                                             } {
                                                 result?
-                                            } else if retry_budget.allow_retry(&route_name) {
+                                            } else if retry_budget.allow_retry(&route_name).is_ok() {
                                                 hedge_telemetry.launched = true;
                                                 let hedge_fut = send_once(
                                                     hedge_backend,
@@ -2128,9 +2129,14 @@ impl QUICListener {
                                         {
                                             Ok(response) => response,
                                             Err(primary_err) => {
-                                                if bodyless_mode
-                                                    && retry_budget.allow_retry(&route_name)
-                                                    && let Some((retry_backend, _)) =
+                                                let retry_reason = classify_retry_reason(&primary_err);
+                                                let can_retry = bodyless_mode
+                                                    && is_retryable(&primary_err)
+                                                    && retry_budget.allow_retry(&route_name).is_ok()
+                                                    && alternate_backend.is_some();
+                                                if !can_retry {
+                                                    return Err(primary_err);
+                                                } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
                                                     && let Ok(retry_request) = build_h2_request(
                                                         &retry_backend,
@@ -2146,6 +2152,10 @@ impl QUICListener {
                                                         },
                                                     )
                                                 {
+                                                    info!(
+                                                        "retrying request on alternate backend: route={} reason={:?}",
+                                                        route_name, retry_reason
+                                                    );
                                                     send_once(
                                                         retry_backend,
                                                         retry_request,
@@ -2912,7 +2922,7 @@ impl QUICListener {
                                                     p.pool.mark_success(idx)
                                                 }
                                                 crate::HealthClassification::Failure => {
-                                                    p.pool.mark_failure(idx)
+                                                    p.pool.mark_request_failure(idx, HealthFailureReason::HttpStatus5xx)
                                                 }
                                                 crate::HealthClassification::Neutral => None,
                                             },
@@ -3128,7 +3138,7 @@ impl QUICListener {
                                 req.backend_index,
                                 upstream_name.and_then(|n| upstream_pools.get(n)),
                             ) && let Some(t) =
-                                pool.lock().ok().and_then(|mut p| p.pool.mark_failure(idx))
+                                pool.lock().ok().and_then(|mut p| p.pool.mark_request_failure(idx, HealthFailureReason::HttpStatus5xx))
                                 && let Some(addr) = &req.backend_addr
                             {
                                 Self::log_health_transition(addr, t);
@@ -3254,7 +3264,15 @@ impl QUICListener {
             }
             let lb_type = pool.lb_name();
             let idx = pool.pick(key);
-            let idx = idx.ok_or_else(|| ProxyError::Transport("no healthy servers".into()))?;
+            let idx = idx.ok_or_else(|| {
+                let total = pool.pool.len();
+                let healthy = pool.pool.healthy_indices().len();
+                error!(
+                    "no healthy backends available: {}/{} backends healthy",
+                    healthy, total
+                );
+                ProxyError::Transport("no healthy servers".into())
+            })?;
             let backend_addr = pool
                 .pool
                 .address(idx)
@@ -3402,16 +3420,42 @@ impl QUICListener {
                     overload_retry_after_seconds,
                 )
             }
+            Err(ProxyError::Pool(PoolError::Send(ref send_err))) => {
+                // Log the full inner error — commonly exposes TLS/cert/SNI mismatches
+                // that look like transport failures but are actually local config errors.
+                // Do NOT mark the backend unhealthy: the backend may be fully operational;
+                // the connection failure is a proxy-side config issue.
+                error!(
+                    "Upstream send failed for {} (possible TLS/cert/SNI misconfiguration): {}",
+                    backend_addr, send_err
+                );
+                metrics.inc_health_failure(HealthFailureReason::Tls);
+                metrics.inc_failure();
+                metrics.inc_backend_error();
+                metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
+                debug!(
+                    "Upstream {} status 502 latency_ms {}",
+                    backend_addr,
+                    start.elapsed().as_millis()
+                );
+                Self::send_simple_response(
+                    h3,
+                    quic,
+                    stream_id,
+                    http::StatusCode::BAD_GATEWAY,
+                    b"upstream error\n",
+                )
+            }
             Err(ProxyError::Transport(_))
-            | Err(ProxyError::Pool(PoolError::Send(_)))
             | Err(ProxyError::Pool(PoolError::InflightLimiterClosed))
             | Err(ProxyError::Pool(PoolError::UnknownBackend(_))) => {
                 error!("Upstream transport error");
+                metrics.inc_health_failure(HealthFailureReason::Transport);
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
                         .lock()
                         .ok()
-                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                        .and_then(|mut p| p.pool.mark_request_failure(backend_index, HealthFailureReason::Transport))
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -3446,11 +3490,12 @@ impl QUICListener {
             }
             Err(ProxyError::Timeout) => {
                 error!("Upstream request timed out");
+                metrics.inc_health_failure(HealthFailureReason::Timeout);
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
                         .lock()
                         .ok()
-                        .and_then(|mut p| p.pool.mark_failure(backend_index))
+                        .and_then(|mut p| p.pool.mark_request_failure(backend_index, HealthFailureReason::Timeout))
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -3472,6 +3517,7 @@ impl QUICListener {
             }
             Err(ProxyError::Tls(err)) => {
                 error!("TLS error: {}", err);
+                metrics.inc_health_failure(HealthFailureReason::Tls);
                 metrics.inc_failure();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
                 debug!(
@@ -3955,6 +4001,15 @@ impl QUICListener {
                 },
             );
         }
+    }
+}
+
+fn classify_retry_reason(err: &ProxyError) -> RetryReason {
+    match err {
+        ProxyError::Timeout => RetryReason::BackendTimeout,
+        ProxyError::Transport(_) => RetryReason::BackendTransport,
+        ProxyError::Pool(_) => RetryReason::BackendPool,
+        _ => RetryReason::BackendTransport,
     }
 }
 

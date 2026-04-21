@@ -335,8 +335,7 @@ impl RetryBudget {
             .per_route_ratio_percent
             .get(route)
             .copied()
-            .unwrap_or(self.global_ratio_percent)
-            .min(100);
+            .unwrap_or(self.global_ratio_percent);
 
         let primary = self.global_primary.load(Ordering::Relaxed);
         let retries = self.global_retries.load(Ordering::Relaxed);
@@ -508,7 +507,7 @@ impl RuntimeResilience {
             max_headers_bytes: config.protocol.max_headers_bytes.max(1),
             enforce_authority_host_match: config.protocol.enforce_authority_host_match,
             hedging_enabled: config.hedging.enabled,
-            hedging_delay: Duration::from_millis(config.hedging.delay_ms.max(1)),
+            hedging_delay: Duration::from_millis(config.hedging.delay_ms),
             hedge_safe_methods,
             early_data_safe_methods,
             allowed_methods,

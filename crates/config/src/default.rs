@@ -215,11 +215,11 @@ pub fn resilience_default_adaptive_decrease_step() -> usize {
 }
 
 pub fn resilience_default_adaptive_increase_step() -> usize {
-    8
+    16
 }
 
 pub fn resilience_default_adaptive_high_latency_ms() -> u64 {
-    250
+    500
 }
 
 pub fn resilience_default_route_queue_default_cap() -> usize {
@@ -255,15 +255,15 @@ pub fn resilience_default_cb_enabled() -> bool {
 }
 
 pub fn resilience_default_cb_failure_threshold() -> u32 {
-    5
+    3
 }
 
 pub fn resilience_default_cb_open_ms() -> u64 {
-    10_000
+    30_000
 }
 
 pub fn resilience_default_cb_half_open_max_probes() -> u32 {
-    2
+    1
 }
 
 pub fn resilience_default_hedging_enabled() -> bool {
@@ -271,7 +271,7 @@ pub fn resilience_default_hedging_enabled() -> bool {
 }
 
 pub fn resilience_default_hedging_delay_ms() -> u64 {
-    75
+    100
 }
 
 pub fn resilience_default_retry_budget_enabled() -> bool {
@@ -279,7 +279,7 @@ pub fn resilience_default_retry_budget_enabled() -> bool {
 }
 
 pub fn resilience_default_retry_budget_ratio_percent() -> u8 {
-    20
+    10
 }
 
 pub fn resilience_default_brownout_enabled() -> bool {

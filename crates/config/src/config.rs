@@ -422,6 +422,36 @@ pub struct AdaptiveAdmission {
     pub high_latency_ms: u64,
 }
 
+impl Resilience {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.brownout.recover_inflight_percent >= self.brownout.trigger_inflight_percent {
+            return Err(format!(
+                "resilience.brownout: recover_inflight_percent ({}) must be \
+                 less than trigger_inflight_percent ({})",
+                self.brownout.recover_inflight_percent,
+                self.brownout.trigger_inflight_percent,
+            ));
+        }
+        if self.adaptive_admission.min_limit == 0 {
+            return Err(
+                "resilience.adaptive_admission: min_limit must be > 0".into(),
+            );
+        }
+        if self.retry_budget.ratio_percent > 100 {
+            return Err(format!(
+                "resilience.retry_budget: ratio_percent ({}) must be 0-100",
+                self.retry_budget.ratio_percent,
+            ));
+        }
+        if self.hedging.enabled && self.hedging.delay_ms == 0 {
+            return Err(
+                "resilience.hedging: delay_ms must be > 0 when hedging is enabled".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Default for AdaptiveAdmission {
     fn default() -> Self {
         Self {

@@ -516,6 +516,10 @@ impl QUICListener {
             upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
         }
 
+        config
+            .resilience
+            .validate()
+            .map_err(|e| ProxyError::Transport(format!("invalid resilience config: {e}")))?;
         let resilience = Arc::new(RuntimeResilience::from_config(
             &config.resilience,
             global_inflight_limit,

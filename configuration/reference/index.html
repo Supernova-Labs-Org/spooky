@@ -1879,6 +1879,472 @@ performance:
   new_connections_per_sec: 10000
   new_connections_burst: 2000
 </code></pre>
+<h2 id="resilience-configuration">Resilience Configuration</h2>
+<p>Controls retry budgets, circuit breaking, hedging, adaptive admission, brownout shedding, route queuing, protocol policy, and the worker watchdog. All fields are optional and fall back to production-tuned defaults.</p>
+<h3 id="adaptive_admission">adaptive_admission</h3>
+<p>Dynamically adjusts the global in-flight request limit based on observed backend latency.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Enable adaptive admission control</td>
+</tr>
+<tr>
+<td><code>min_limit</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>64</code></td>
+<td>Floor for the dynamic in-flight limit; must be &gt; 0</td>
+</tr>
+<tr>
+<td><code>decrease_step</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>16</code></td>
+<td>Amount to subtract from the limit on high-latency observation</td>
+</tr>
+<tr>
+<td><code>increase_step</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>16</code></td>
+<td>Amount to add to the limit on healthy-latency observation</td>
+</tr>
+<tr>
+<td><code>high_latency_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>500</code></td>
+<td>Latency threshold (ms) above which the limit is decreased</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="circuit_breaker">circuit_breaker</h3>
+<p>Tracks consecutive failures per backend and opens the circuit to stop sending requests to a failing backend.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Enable per-backend circuit breakers</td>
+</tr>
+<tr>
+<td><code>failure_threshold</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>3</code></td>
+<td>Consecutive failures before opening the circuit</td>
+</tr>
+<tr>
+<td><code>open_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>30000</code></td>
+<td>How long (ms) the circuit stays open before probing</td>
+</tr>
+<tr>
+<td><code>half_open_max_probes</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>1</code></td>
+<td>Probe requests allowed during half-open state</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="retry_budget">retry_budget</h3>
+<p>Limits retried requests as a fraction of primary requests to prevent retry amplification.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Enable retry budget enforcement</td>
+</tr>
+<tr>
+<td><code>ratio_percent</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>10</code></td>
+<td>Max retries as a percentage of primary requests (0–100)</td>
+</tr>
+<tr>
+<td><code>per_route_ratio_percent</code></td>
+<td>map</td>
+<td>No</td>
+<td><code>{}</code></td>
+<td>Per-route overrides: <code>{ "/api": 5 }</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="hedging">hedging</h3>
+<p>Fires a speculative second request to an alternate backend when the primary is slow.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Enable request hedging</td>
+</tr>
+<tr>
+<td><code>delay_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>100</code></td>
+<td>Delay (ms) before firing the hedge; must be &gt; 0 when <code>enabled</code> is true</td>
+</tr>
+<tr>
+<td><code>safe_methods</code></td>
+<td>list</td>
+<td>No</td>
+<td><code>["GET","HEAD"]</code></td>
+<td>HTTP methods eligible for hedging</td>
+</tr>
+<tr>
+<td><code>route_allowlist</code></td>
+<td>list</td>
+<td>No</td>
+<td><code>[]</code></td>
+<td>Routes eligible for hedging; empty means all routes</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="brownout">brownout</h3>
+<p>Sheds non-core traffic when the global in-flight percent exceeds a threshold, protecting core routes.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Enable brownout shedding</td>
+</tr>
+<tr>
+<td><code>trigger_inflight_percent</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>90</code></td>
+<td>Inflight % at which brownout activates (0–100)</td>
+</tr>
+<tr>
+<td><code>recover_inflight_percent</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>60</code></td>
+<td>Inflight % at which brownout deactivates; must be &lt; <code>trigger_inflight_percent</code></td>
+</tr>
+<tr>
+<td><code>core_routes</code></td>
+<td>list</td>
+<td>No</td>
+<td><code>[]</code></td>
+<td>Upstream pool names exempt from shedding during brownout</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="route_queue">route_queue</h3>
+<p>Per-route and global caps on queued (waiting) requests.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>default_cap</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>512</code></td>
+<td>Per-route queue depth cap</td>
+</tr>
+<tr>
+<td><code>global_cap</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>2048</code></td>
+<td>Total queue depth cap across all routes</td>
+</tr>
+<tr>
+<td><code>shed_retry_after_seconds</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>1</code></td>
+<td><code>Retry-After</code> header value (seconds) sent with 503 queue-shed responses</td>
+</tr>
+<tr>
+<td><code>caps</code></td>
+<td>map</td>
+<td>No</td>
+<td><code>{}</code></td>
+<td>Per-route overrides: <code>{ "/api": 128 }</code></td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="protocol">protocol</h3>
+<p>Request validation and early-data policy.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>allow_0rtt</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Accept 0-RTT early data</td>
+</tr>
+<tr>
+<td><code>early_data_safe_methods</code></td>
+<td>list</td>
+<td>No</td>
+<td><code>["GET","HEAD"]</code></td>
+<td>Methods permitted in 0-RTT early data</td>
+</tr>
+<tr>
+<td><code>max_headers_count</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>128</code></td>
+<td>Maximum number of request headers</td>
+</tr>
+<tr>
+<td><code>max_headers_bytes</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>16384</code></td>
+<td>Maximum total size of request headers (bytes)</td>
+</tr>
+<tr>
+<td><code>enforce_authority_host_match</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Reject requests where <code>:authority</code> differs from <code>Host</code></td>
+</tr>
+<tr>
+<td><code>allowed_methods</code></td>
+<td>list</td>
+<td>No</td>
+<td><code>[]</code></td>
+<td>Allowed HTTP methods; empty means all methods allowed</td>
+</tr>
+<tr>
+<td><code>denied_path_prefixes</code></td>
+<td>list</td>
+<td>No</td>
+<td><code>[]</code></td>
+<td>Path prefixes that are always rejected with 403</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="watchdog">watchdog</h3>
+<p>Monitors worker health and triggers a restart hook when error rates or stall conditions exceed thresholds.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>bool</td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Enable the worker watchdog</td>
+</tr>
+<tr>
+<td><code>check_interval_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>1000</code></td>
+<td>How often (ms) the watchdog evaluates metrics</td>
+</tr>
+<tr>
+<td><code>poll_stall_timeout_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>5000</code></td>
+<td>Declare a stall if the event loop hasn't polled within this window</td>
+</tr>
+<tr>
+<td><code>timeout_error_rate_percent</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>60</code></td>
+<td>Trigger if timeout errors exceed this % of requests in a window</td>
+</tr>
+<tr>
+<td><code>min_requests_per_window</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>20</code></td>
+<td>Minimum requests in a window before error-rate check applies</td>
+</tr>
+<tr>
+<td><code>overload_inflight_percent</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>95</code></td>
+<td>Trigger if in-flight % exceeds this threshold</td>
+</tr>
+<tr>
+<td><code>unhealthy_consecutive_windows</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>3</code></td>
+<td>Consecutive unhealthy windows before invoking the restart hook</td>
+</tr>
+<tr>
+<td><code>drain_grace_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>8000</code></td>
+<td>Grace period (ms) to drain connections before restarting</td>
+</tr>
+<tr>
+<td><code>restart_cooldown_ms</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>120000</code></td>
+<td>Minimum time (ms) between restart hook invocations</td>
+</tr>
+<tr>
+<td><code>restart_hook</code></td>
+<td>string</td>
+<td>No</td>
+<td><code>null</code></td>
+<td>Shell command invoked on restart trigger</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="startup-validation-errors">Startup Validation Errors</h3>
+<p>The following resilience configurations are rejected at startup with a descriptive error:</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Error</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>recover_inflight_percent &gt;= trigger_inflight_percent</code></td>
+<td>brownout hysteresis inverted</td>
+</tr>
+<tr>
+<td><code>adaptive_admission.min_limit == 0</code></td>
+<td>min_limit must be &gt; 0</td>
+</tr>
+<tr>
+<td><code>retry_budget.ratio_percent &gt; 100</code></td>
+<td>ratio_percent must be 0–100</td>
+</tr>
+<tr>
+<td><code>hedging.enabled &amp;&amp; delay_ms == 0</code></td>
+<td>delay_ms must be &gt; 0 when hedging is enabled</td>
+</tr>
+</tbody>
+</table></div>
+<h3 id="example">Example</h3>
+<pre><code class="language-yaml">resilience:
+  adaptive_admission:
+    enabled: true
+    min_limit: 64
+    high_latency_ms: 500
+
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 3
+    open_ms: 30000
+    half_open_max_probes: 1
+
+  retry_budget:
+    enabled: true
+    ratio_percent: 10
+
+  hedging:
+    enabled: false
+    delay_ms: 100
+
+  brownout:
+    enabled: true
+    trigger_inflight_percent: 90
+    recover_inflight_percent: 60
+    core_routes:
+      - &quot;auth_pool&quot;
+      - &quot;payments_pool&quot;
+</code></pre>
 <h2 id="configuration-validation">Configuration Validation</h2>
 <p>Spooky validates configuration at startup and reports errors before attempting to start the server.</p>
 <h3 id="common-validation-errors">Common Validation Errors</h3>
@@ -1912,6 +2378,10 @@ performance:
 <li>Port already in use</li>
 <li>Duplicate upstream pool names</li>
 <li>Overlapping or ambiguous route definitions</li>
+<li>Brownout <code>recover_inflight_percent</code> ≥ <code>trigger_inflight_percent</code></li>
+<li><code>adaptive_admission.min_limit</code> set to 0</li>
+<li><code>retry_budget.ratio_percent</code> &gt; 100</li>
+<li><code>hedging.enabled</code> with <code>delay_ms</code> = 0</li>
 </ol>
 <h3 id="testing-configuration">Testing Configuration</h3>
 <p>Validate configuration without starting the server:</p>
@@ -2458,6 +2928,76 @@ log:
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
             data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#examples_3');">
             Examples
+        </a>
+        
+        
+
+        
+        <a href="#resilience-configuration"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#resilience-configuration');">
+            Resilience Configuration
+        </a>
+        
+        
+        <a href="#adaptive_admission"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#adaptive_admission');">
+            adaptive_admission
+        </a>
+        
+        <a href="#circuit_breaker"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#circuit_breaker');">
+            circuit_breaker
+        </a>
+        
+        <a href="#retry_budget"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#retry_budget');">
+            retry_budget
+        </a>
+        
+        <a href="#hedging"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#hedging');">
+            hedging
+        </a>
+        
+        <a href="#brownout"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#brownout');">
+            brownout
+        </a>
+        
+        <a href="#route_queue"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#route_queue');">
+            route_queue
+        </a>
+        
+        <a href="#protocol"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#protocol');">
+            protocol
+        </a>
+        
+        <a href="#watchdog"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#watchdog');">
+            watchdog
+        </a>
+        
+        <a href="#startup-validation-errors"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#startup-validation-errors');">
+            Startup Validation Errors
+        </a>
+        
+        <a href="#example"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#example');">
+            Example
         </a>
         
         

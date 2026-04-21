@@ -556,6 +556,150 @@ performance:
   new_connections_burst: 2000
 ```
 
+## Resilience Configuration
+
+Controls retry budgets, circuit breaking, hedging, adaptive admission, brownout shedding, route queuing, protocol policy, and the worker watchdog. All fields are optional and fall back to production-tuned defaults.
+
+### adaptive_admission
+
+Dynamically adjusts the global in-flight request limit based on observed backend latency.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | bool | No | `true` | Enable adaptive admission control |
+| `min_limit` | integer | No | `64` | Floor for the dynamic in-flight limit; must be > 0 |
+| `decrease_step` | integer | No | `16` | Amount to subtract from the limit on high-latency observation |
+| `increase_step` | integer | No | `16` | Amount to add to the limit on healthy-latency observation |
+| `high_latency_ms` | integer | No | `500` | Latency threshold (ms) above which the limit is decreased |
+
+### circuit_breaker
+
+Tracks consecutive failures per backend and opens the circuit to stop sending requests to a failing backend.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | bool | No | `true` | Enable per-backend circuit breakers |
+| `failure_threshold` | integer | No | `3` | Consecutive failures before opening the circuit |
+| `open_ms` | integer | No | `30000` | How long (ms) the circuit stays open before probing |
+| `half_open_max_probes` | integer | No | `1` | Probe requests allowed during half-open state |
+
+### retry_budget
+
+Limits retried requests as a fraction of primary requests to prevent retry amplification.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | bool | No | `true` | Enable retry budget enforcement |
+| `ratio_percent` | integer | No | `10` | Max retries as a percentage of primary requests (0–100) |
+| `per_route_ratio_percent` | map | No | `{}` | Per-route overrides: `{ "/api": 5 }` |
+
+### hedging
+
+Fires a speculative second request to an alternate backend when the primary is slow.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | bool | No | `false` | Enable request hedging |
+| `delay_ms` | integer | No | `100` | Delay (ms) before firing the hedge; must be > 0 when `enabled` is true |
+| `safe_methods` | list | No | `["GET","HEAD"]` | HTTP methods eligible for hedging |
+| `route_allowlist` | list | No | `[]` | Routes eligible for hedging; empty means all routes |
+
+### brownout
+
+Sheds non-core traffic when the global in-flight percent exceeds a threshold, protecting core routes.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | bool | No | `true` | Enable brownout shedding |
+| `trigger_inflight_percent` | integer | No | `90` | Inflight % at which brownout activates (0–100) |
+| `recover_inflight_percent` | integer | No | `60` | Inflight % at which brownout deactivates; must be < `trigger_inflight_percent` |
+| `core_routes` | list | No | `[]` | Upstream pool names exempt from shedding during brownout |
+
+### route_queue
+
+Per-route and global caps on queued (waiting) requests.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `default_cap` | integer | No | `512` | Per-route queue depth cap |
+| `global_cap` | integer | No | `2048` | Total queue depth cap across all routes |
+| `shed_retry_after_seconds` | integer | No | `1` | `Retry-After` header value (seconds) sent with 503 queue-shed responses |
+| `caps` | map | No | `{}` | Per-route overrides: `{ "/api": 128 }` |
+
+### protocol
+
+Request validation and early-data policy.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `allow_0rtt` | bool | No | `false` | Accept 0-RTT early data |
+| `early_data_safe_methods` | list | No | `["GET","HEAD"]` | Methods permitted in 0-RTT early data |
+| `max_headers_count` | integer | No | `128` | Maximum number of request headers |
+| `max_headers_bytes` | integer | No | `16384` | Maximum total size of request headers (bytes) |
+| `enforce_authority_host_match` | bool | No | `true` | Reject requests where `:authority` differs from `Host` |
+| `allowed_methods` | list | No | `[]` | Allowed HTTP methods; empty means all methods allowed |
+| `denied_path_prefixes` | list | No | `[]` | Path prefixes that are always rejected with 403 |
+
+### watchdog
+
+Monitors worker health and triggers a restart hook when error rates or stall conditions exceed thresholds.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | bool | No | `false` | Enable the worker watchdog |
+| `check_interval_ms` | integer | No | `1000` | How often (ms) the watchdog evaluates metrics |
+| `poll_stall_timeout_ms` | integer | No | `5000` | Declare a stall if the event loop hasn't polled within this window |
+| `timeout_error_rate_percent` | integer | No | `60` | Trigger if timeout errors exceed this % of requests in a window |
+| `min_requests_per_window` | integer | No | `20` | Minimum requests in a window before error-rate check applies |
+| `overload_inflight_percent` | integer | No | `95` | Trigger if in-flight % exceeds this threshold |
+| `unhealthy_consecutive_windows` | integer | No | `3` | Consecutive unhealthy windows before invoking the restart hook |
+| `drain_grace_ms` | integer | No | `8000` | Grace period (ms) to drain connections before restarting |
+| `restart_cooldown_ms` | integer | No | `120000` | Minimum time (ms) between restart hook invocations |
+| `restart_hook` | string | No | `null` | Shell command invoked on restart trigger |
+
+### Startup Validation Errors
+
+The following resilience configurations are rejected at startup with a descriptive error:
+
+| Condition | Error |
+|-----------|-------|
+| `recover_inflight_percent >= trigger_inflight_percent` | brownout hysteresis inverted |
+| `adaptive_admission.min_limit == 0` | min_limit must be > 0 |
+| `retry_budget.ratio_percent > 100` | ratio_percent must be 0–100 |
+| `hedging.enabled && delay_ms == 0` | delay_ms must be > 0 when hedging is enabled |
+
+### Example
+
+```yaml
+resilience:
+  adaptive_admission:
+    enabled: true
+    min_limit: 64
+    high_latency_ms: 500
+
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 3
+    open_ms: 30000
+    half_open_max_probes: 1
+
+  retry_budget:
+    enabled: true
+    ratio_percent: 10
+
+  hedging:
+    enabled: false
+    delay_ms: 100
+
+  brownout:
+    enabled: true
+    trigger_inflight_percent: 90
+    recover_inflight_percent: 60
+    core_routes:
+      - "auth_pool"
+      - "payments_pool"
+```
+
 ## Configuration Validation
 
 Spooky validates configuration at startup and reports errors before attempting to start the server.
@@ -582,6 +726,10 @@ Spooky validates configuration at startup and reports errors before attempting t
    - Port already in use
    - Duplicate upstream pool names
    - Overlapping or ambiguous route definitions
+   - Brownout `recover_inflight_percent` ≥ `trigger_inflight_percent`
+   - `adaptive_admission.min_limit` set to 0
+   - `retry_budget.ratio_percent` > 100
+   - `hedging.enabled` with `delay_ms` = 0
 
 ### Testing Configuration
 

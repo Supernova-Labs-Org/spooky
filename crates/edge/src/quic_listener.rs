@@ -4122,9 +4122,11 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use crate::cid_radix::CidRadix;
+    use crate::REQUEST_ID_COUNTER;
 
     use std::collections::HashSet;
     use std::net::SocketAddr;
+    use std::sync::atomic::Ordering;
 
     use super::{
         ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,

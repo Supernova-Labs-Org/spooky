@@ -27,6 +27,8 @@ use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
 use crate::resilience::{AdaptivePermit, RouteQueuePermit, RuntimeResilience};
 use crate::watchdog::WatchdogCoordinator;
 
+static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 /// A streaming HTTP body backed by a tokio mpsc channel.
 /// The quiche Data handler sends chunks through the sender;
 /// hyper reads them from the receiver as the H2 request body.
@@ -188,6 +190,8 @@ pub enum ResponseChunk {
 }
 
 pub struct RequestEnvelope {
+    pub request_id: u64,
+
     pub method: String,
     pub path: String,
     pub authority: Option<String>,
@@ -225,6 +229,12 @@ pub struct RequestEnvelope {
     pub response_headers_sent: bool,
     /// A chunk that could not be written due to QUIC send backpressure; retried next poll.
     pub pending_chunk: Option<ResponseChunk>,
+}
+
+impl RequestEnvelope {
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
 }
 
 #[derive(Debug)]

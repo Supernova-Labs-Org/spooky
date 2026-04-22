@@ -39,8 +39,8 @@ use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyC
 
 use crate::{
     ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener,
-    QuicConnection, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome, SharedRuntimeState,
-    StreamPhase, UpstreamResult,
+    QuicConnection, REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
+    SharedRuntimeState, StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
         DEFAULT_SCID_LEN_BYTES, MAX_DATAGRAM_SIZE_BYTES, MAX_STREAMS_PER_CONNECTION,
@@ -2266,6 +2266,7 @@ impl QUICListener {
                     connection.streams.insert(
                         stream_id,
                         RequestEnvelope {
+                            request_id: REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
                             method,
                             path,
                             authority,
@@ -4682,6 +4683,7 @@ mod tests {
 
     fn make_envelope(phase: StreamPhase) -> RequestEnvelope {
         RequestEnvelope {
+            request_id: REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             method: "GET".into(),
             path: "/".into(),
             authority: None,

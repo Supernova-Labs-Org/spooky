@@ -209,6 +209,17 @@ pub struct Log {
 
     #[serde(default)]
     pub file: LogFile,
+
+    #[serde(default)]
+    pub format: LogFormat,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Plain,
+    Json,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]

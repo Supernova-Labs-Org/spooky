@@ -1,4 +1,4 @@
-use crate::config::{LoadBalancing, Log, LogFile};
+use crate::config::{LoadBalancing, Log, LogFile, LogFormat};
 
 // default values
 pub fn get_default_version() -> u32 {
@@ -67,6 +67,7 @@ pub fn get_default_log() -> Log {
             enabled: false,
             path: String::from(""),
         },
+        format: LogFormat::Plain,
     }
 }
 

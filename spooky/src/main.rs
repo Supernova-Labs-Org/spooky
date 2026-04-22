@@ -66,6 +66,7 @@ Use a port >= 1024 for unprivileged startup.",
         &config_yaml.log.level,
         config_yaml.log.file.enabled,
         &config_yaml.log.file.path,
+        config_yaml.log.format == spooky_config::config::LogFormat::Json,
     );
     runtime_guard::install_panic_hook();
 

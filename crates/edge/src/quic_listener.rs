@@ -1671,8 +1671,6 @@ impl QUICListener {
                     let path = request.path;
                     let authority = request.authority;
 
-                    debug!("HTTP/3 request {} {}", method, path);
-
                     metrics.inc_total();
                     let request_start = Instant::now();
 
@@ -1720,6 +1718,7 @@ impl QUICListener {
                         route_queue_permit,
                         request_fin_received,
                         bodyless_mode,
+                        request_id,
                     ) = match resolved {
                         Ok((upstream_name, addr, idx, upstream_pool)) => {
                             resilience.brownout.observe_admission_pressure(
@@ -1950,6 +1949,7 @@ impl QUICListener {
                                 }
                             }
 
+                            let request_id = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
                             let content_length = request_content_length(&list);
                             let bodyless_mode = content_length.unwrap_or(0) == 0
                                 && (method.eq_ignore_ascii_case("GET")
@@ -1973,6 +1973,7 @@ impl QUICListener {
                                 ForwardedContext {
                                     client_addr: connection.peer_address,
                                     request_authority: authority.as_deref(),
+                                    request_id,
                                 },
                             ) {
                                 Ok(request) => request,
@@ -2061,6 +2062,7 @@ impl QUICListener {
                                                         client_addr,
                                                         request_authority: authority_owned
                                                             .as_deref(),
+                                                        request_id,
                                                     },
                                                 )
                                                 .ok()
@@ -2154,13 +2156,14 @@ impl QUICListener {
                                                             client_addr,
                                                             request_authority: authority_owned
                                                                 .as_deref(),
+                                                            request_id,
                                                         },
                                                     )
                                                 {
                                                     retry_count = retry_count.saturating_add(1);
                                                     info!(
-                                                        "retrying request on alternate backend: route={} reason={:?}",
-                                                        route_name, retry_reason
+                                                        "request_id={} retrying request on alternate backend: route={} reason={:?}",
+                                                        request_id, route_name, retry_reason
                                                     );
                                                     send_once(
                                                         retry_backend,
@@ -2202,6 +2205,7 @@ impl QUICListener {
                                 Some(route_queue_permit),
                                 request_fin_received,
                                 bodyless_mode,
+                                request_id,
                             )
                         }
                         Err(err) => {
@@ -2269,7 +2273,7 @@ impl QUICListener {
                     connection.streams.insert(
                         stream_id,
                         RequestEnvelope {
-                            request_id: REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+                            request_id,
                             method,
                             path,
                             authority,
@@ -2298,6 +2302,12 @@ impl QUICListener {
                             pending_chunk: None,
                         },
                     );
+                    if let Some(req) = connection.streams.get(&stream_id) {
+                        debug!(
+                            "request_id={} method={} path={} stream_id={}",
+                            req.request_id, req.method, req.path, stream_id
+                        );
+                    }
                 }
                 Ok((stream_id, quiche::h3::Event::Data)) => loop {
                     match h3.recv_body(&mut connection.quic, stream_id, &mut body_buf) {
@@ -2419,8 +2429,10 @@ impl QUICListener {
                         }
                         Err(quiche::h3::Error::Done) => break,
                         Err(err) => {
+                            let rid = connection.streams.get(&stream_id).map(|r| r.request_id);
                             error!(
-                                "HTTP/3 recv_body protocol error on stream {}: {:?}",
+                                "request_id={} HTTP/3 recv_body protocol error on stream {}: {:?}",
+                                rid.map_or_else(|| "-".to_string(), |id| id.to_string()),
                                 stream_id, err
                             );
                             if let Some(req) = connection.streams.get(&stream_id) {
@@ -2695,7 +2707,8 @@ impl QUICListener {
                                     .adaptive_admission
                                     .observe(req.start.elapsed(), true);
                                 warn!(
-                                    "upstream declared content-length over cap ({} > {}) on stream {}",
+                                    "request_id={} upstream declared content-length over cap ({} > {}) on stream {}",
+                                    req.request_id,
                                     upstream_content_length.unwrap_or_default(),
                                     max_response_body_bytes,
                                     stream_id
@@ -2963,12 +2976,7 @@ impl QUICListener {
                             resilience
                                 .adaptive_admission
                                 .observe(req.start.elapsed(), false);
-                            debug!(
-                                "Upstream {} status {} latency_ms {}",
-                                req.backend_addr.as_deref().unwrap_or("?"),
-                                status,
-                                req.start.elapsed().as_millis()
-                            );
+                            Self::log_access(req, status.as_u16());
                         }
                     }
                     Err(err) => {
@@ -3328,6 +3336,34 @@ impl QUICListener {
         None
     }
 
+    fn log_access(req: &RequestEnvelope, status: u16) {
+        match req.error_kind {
+            Some(e) => info!(
+                "request_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={} error={}",
+                req.request_id,
+                req.method,
+                req.path,
+                status,
+                req.backend_addr.as_deref().unwrap_or("-"),
+                req.upstream_name.as_deref().unwrap_or("-"),
+                req.start.elapsed().as_millis(),
+                req.retry_count,
+                e,
+            ),
+            None => info!(
+                "request_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={}",
+                req.request_id,
+                req.method,
+                req.path,
+                status,
+                req.backend_addr.as_deref().unwrap_or("-"),
+                req.upstream_name.as_deref().unwrap_or("-"),
+                req.start.elapsed().as_millis(),
+                req.retry_count,
+            ),
+        }
+    }
+
     /// Handle an already-resolved `ForwardResult`, applying health transitions
     /// and sending the H3 response.
     #[allow(clippy::too_many_arguments)]
@@ -3387,11 +3423,7 @@ impl QUICListener {
                 error!("Bridge error: {:?}", err);
                 metrics.inc_failure();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
-                debug!(
-                    "Upstream {} status 400 latency_ms {}",
-                    backend_addr,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 400);
                 Self::send_simple_response(
                     h3,
                     quic,
@@ -3401,7 +3433,6 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Pool(PoolError::BackendOverloaded(reason))) => {
-                debug!("Backend overloaded");
                 metrics.inc_failure();
                 if reason.contains("unknown-length response prebuffer limit exceeded") {
                     metrics.inc_response_prebuffer_limit_reject();
@@ -3410,11 +3441,7 @@ impl QUICListener {
                     metrics.inc_overload_shed_reason(OverloadShedReason::BackendInflight);
                 }
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
-                debug!(
-                    "Upstream {} status 503 latency_ms {}",
-                    backend_addr,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 503);
                 Self::send_overload_response(
                     h3,
                     quic,
@@ -3424,15 +3451,10 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
-                debug!("Backend circuit open");
                 metrics.inc_failure();
                 metrics.inc_overload_shed_reason(OverloadShedReason::BackendInflight);
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
-                debug!(
-                    "Upstream {} status 503 latency_ms {}",
-                    backend_addr,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 503);
                 Self::send_overload_response(
                     h3,
                     quic,
@@ -3454,11 +3476,7 @@ impl QUICListener {
                 metrics.inc_failure();
                 metrics.inc_backend_error();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
-                debug!(
-                    "Upstream {} status 502 latency_ms {}",
-                    backend_addr,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 502);
                 Self::send_simple_response(
                     h3,
                     quic,
@@ -3483,11 +3501,7 @@ impl QUICListener {
                 metrics.inc_failure();
                 metrics.inc_backend_error();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
-                debug!(
-                    "Upstream {} status 502 latency_ms {}",
-                    backend_addr,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 502);
                 Self::send_simple_response(
                     h3,
                     quic,
@@ -3497,10 +3511,11 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Protocol(err)) => {
-                error!("Protocol error: {}", err);
+                error!("request_id={} Protocol error: {}", req.request_id, err);
                 metrics.inc_failure();
                 metrics.inc_backend_error();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::BackendError);
+                Self::log_access(req, 502);
                 Self::send_simple_response(
                     h3,
                     quic,
@@ -3510,7 +3525,7 @@ impl QUICListener {
                 )
             }
             Err(ProxyError::Timeout) => {
-                error!("Upstream request timed out");
+                error!("request_id={} Upstream request timed out", req.request_id);
                 metrics.inc_health_failure(HealthFailureReason::Timeout);
                 if let Some(pool) = &upstream_pool
                     && let Some(t) = pool
@@ -3523,11 +3538,7 @@ impl QUICListener {
                 metrics.inc_failure();
                 metrics.inc_timeout();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Timeout);
-                debug!(
-                    "Upstream {} status 503 latency_ms {}",
-                    backend_addr,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 503);
                 Self::send_simple_response(
                     h3,
                     quic,
@@ -3541,11 +3552,7 @@ impl QUICListener {
                 metrics.inc_health_failure(HealthFailureReason::Tls);
                 metrics.inc_failure();
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::Failure);
-                debug!(
-                    "TLS error for stream {} latency_ms {}",
-                    stream_id,
-                    start.elapsed().as_millis()
-                );
+                Self::log_access(req, 500);
                 Self::send_simple_response(
                     h3,
                     quic,

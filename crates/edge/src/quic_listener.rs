@@ -2018,6 +2018,7 @@ impl QUICListener {
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
                                 let mut hedge_telemetry = crate::HedgeTelemetry::default();
+                                let mut retry_count: u8 = 0;
                                 let result: ForwardResult = async {
                                     retry_budget.mark_primary(&route_name);
 
@@ -2156,6 +2157,7 @@ impl QUICListener {
                                                         },
                                                     )
                                                 {
+                                                    retry_count = retry_count.saturating_add(1);
                                                     info!(
                                                         "retrying request on alternate backend: route={} reason={:?}",
                                                         route_name, retry_reason
@@ -2182,6 +2184,7 @@ impl QUICListener {
                                 let _ = result_tx.send(UpstreamResult {
                                     forward: result,
                                     hedge: hedge_telemetry,
+                                    retry_count,
                                 });
                             };
                             if !spawn_async_task(fut, "upstream") {
@@ -2285,6 +2288,8 @@ impl QUICListener {
                             start: request_start,
                             total_request_deadline: request_start + backend_total_request_timeout,
                             bodyless_mode,
+                            retry_count: 0,
+                            error_kind: None,
                             phase: StreamPhase::ReceivingRequest,
                             request_fin_received,
                             upstream_result_rx,
@@ -2627,6 +2632,7 @@ impl QUICListener {
                                 "upstream task dropped sender".into(),
                             )),
                             hedge: crate::HedgeTelemetry::default(),
+                            retry_count: 0,
                         }),
                     })
             } else {
@@ -2652,6 +2658,16 @@ impl QUICListener {
 
                 if let Some(req) = streams.get_mut(&stream_id) {
                     req.upstream_result_rx = None;
+                    req.retry_count = forward_result.retry_count;
+                    req.error_kind = match &forward_result.forward {
+                        Err(ProxyError::Timeout) => Some("timeout"),
+                        Err(ProxyError::Tls(_)) => Some("tls"),
+                        Err(ProxyError::Transport(_)) => Some("transport"),
+                        Err(ProxyError::Pool(_)) => Some("pool"),
+                        Err(ProxyError::Protocol(_)) => Some("protocol"),
+                        Err(ProxyError::Bridge(_)) => Some("bridge"),
+                        Ok(_) => None,
+                    };
                 }
                 match forward_result.forward {
                     Ok((status, resp_headers, body)) => {
@@ -4702,6 +4718,8 @@ mod tests {
             start: Instant::now(),
             total_request_deadline: Instant::now() + std::time::Duration::from_secs(30),
             bodyless_mode: false,
+            retry_count: 0,
+            error_kind: None,
             phase,
             request_fin_received: false,
             upstream_result_rx: None,
@@ -4785,6 +4803,7 @@ mod tests {
         let send_result = result_tx.send(crate::UpstreamResult {
             forward: Err(spooky_errors::ProxyError::Transport("test".into())),
             hedge: crate::HedgeTelemetry::default(),
+            retry_count: 0,
         });
         assert!(
             send_result.is_err(),

@@ -158,6 +158,7 @@ pub struct HedgeTelemetry {
 pub struct UpstreamResult {
     pub forward: ForwardResult,
     pub hedge: HedgeTelemetry,
+    pub retry_count: u8,
 }
 
 /// Lifecycle phase of a single HTTP/3 request stream.
@@ -216,6 +217,9 @@ pub struct RequestEnvelope {
     pub start: Instant,
     pub total_request_deadline: Instant,
     pub bodyless_mode: bool,
+
+    pub retry_count: u8,
+    pub error_kind: Option<&'static str>,
 
     /// Current lifecycle phase of this stream.
     pub phase: StreamPhase,

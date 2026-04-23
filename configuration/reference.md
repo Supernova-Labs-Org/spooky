@@ -69,6 +69,7 @@ upstream:
 
 log:
   level: info
+  format: plain
 ```
 
 ## Top-Level Configuration
@@ -119,6 +120,7 @@ The following table lists all default configuration values used when properties 
 | `upstream[].backends[].health_check.cooldown_ms` | `5000` | Cooldown after failure (ms) |
 | `upstream[].load_balancing.type` | `"round-robin"` | Per-upstream load balancing algorithm |
 | `log.level` | `"info"` | Logging verbosity level |
+| `log.format` | `"plain"` | Log output format (`plain` or `json`) |
 | `log.file.enabled` | `false` | Write logs to file instead of stderr |
 | `log.file.path` | `"/var/log/spooky/spooky.log"` | Log file path (used when `log.file.enabled` is true) |
 | `performance.new_connections_per_sec` | `2000` | Token-bucket refill rate for new QUIC connections (conns/sec) |
@@ -435,6 +437,7 @@ Controls logging output, verbosity, and destination.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `level` | string | No | `info` | Log level |
+| `format` | string | No | `plain` | Output format: `plain` (human-readable) or `json` (structured) |
 | `file.enabled` | bool | No | `false` | Write logs to a file instead of stderr |
 | `file.path` | string | No | `/var/log/spooky/spooky.log` | Log file path (used when `file.enabled` is `true`) |
 
@@ -464,21 +467,30 @@ Standard log level mapping:
 # stderr only (default)
 log:
   level: info
+  format: plain
 
 # Write to file
 log:
   level: info
+  format: plain
   file:
     enabled: true
     path: /var/log/spooky/spooky.log
 
+# Structured JSON logs (recommended for log pipelines)
+log:
+  level: info
+  format: json
+
 # Development — debug to stderr
 log:
   level: haunt  # debug level
+  format: plain
 
 # Troubleshooting — trace to file
 log:
   level: whisper  # trace level
+  format: json
   file:
     enabled: true
     path: /tmp/spooky-trace.log
@@ -794,4 +806,5 @@ upstream:
 
 log:
   level: debug
+  format: plain
 ```

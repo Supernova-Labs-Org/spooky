@@ -69,16 +69,27 @@ impl AdaptiveAdmission {
             return;
         }
         let latency_ms = latency.as_millis() as u64;
-        if overloaded || latency_ms >= self.high_latency_ms {
+        let decrease = overloaded || latency_ms >= self.high_latency_ms;
+        loop {
             let cur = self.current_limit.load(Ordering::Relaxed);
-            let next = cur.saturating_sub(self.decrease_step).max(self.min_limit);
-            self.current_limit.store(next, Ordering::Relaxed);
-            return;
-        }
+            let next = if decrease {
+                cur.saturating_sub(self.decrease_step).max(self.min_limit)
+            } else {
+                cur.saturating_add(self.increase_step).min(self.max_limit)
+            };
 
-        let cur = self.current_limit.load(Ordering::Relaxed);
-        let next = cur.saturating_add(self.increase_step).min(self.max_limit);
-        self.current_limit.store(next, Ordering::Relaxed);
+            if next == cur {
+                return;
+            }
+
+            if self
+                .current_limit
+                .compare_exchange_weak(cur, next, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
     }
 
     pub fn current_limit(&self) -> usize {

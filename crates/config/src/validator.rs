@@ -1,6 +1,9 @@
 use crate::backend_endpoint::{BackendEndpoint, BackendScheme};
 use crate::config::Config;
 use log::{error, info, warn};
+use std::fs::File;
+use std::io::BufReader;
+use std::path::Path;
 
 pub const VALID_LOG_LEVELS: &[&str] = &[
     "whisper",
@@ -26,6 +29,67 @@ pub const VALID_LB_TYPES: &[&str] = &[
     "consistent_hash",
     "ch",
 ];
+
+fn validate_pem_certificates(path: &str, field_name: &str) -> bool {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            error!("Cannot open {} '{}': {}", field_name, path, err);
+            return false;
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    let certs = match rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>() {
+        Ok(certs) => certs,
+        Err(err) => {
+            error!(
+                "Cannot parse PEM certificates from {} '{}': {}",
+                field_name, path, err
+            );
+            return false;
+        }
+    };
+
+    if certs.is_empty() {
+        error!(
+            "{} '{}' does not contain any PEM certificate blocks",
+            field_name, path
+        );
+        return false;
+    }
+
+    true
+}
+
+fn validate_pem_private_key(path: &str, field_name: &str) -> bool {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            error!("Cannot open {} '{}': {}", field_name, path, err);
+            return false;
+        }
+    };
+
+    let mut reader = BufReader::new(file);
+    match rustls_pemfile::private_key(&mut reader) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            error!(
+                "{} '{}' does not contain a PEM private key",
+                field_name, path
+            );
+            false
+        }
+        Err(err) => {
+            error!(
+                "Cannot parse PEM private key from {} '{}': {}",
+                field_name, path, err
+            );
+            false
+        }
+    }
+}
 
 pub fn validate(config: &Config) -> bool {
     info!("Starting configuration validation...");
@@ -509,7 +573,7 @@ pub fn validate(config: &Config) -> bool {
     }
 
     // --- Validate TLS certs ---
-    if !std::path::Path::new(&config.listen.tls.cert).exists() {
+    if !Path::new(&config.listen.tls.cert).exists() {
         error!(
             "TLS certificate file does not exist: {}",
             config.listen.tls.cert
@@ -517,7 +581,7 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
-    if !std::path::Path::new(&config.listen.tls.key).exists() {
+    if !Path::new(&config.listen.tls.key).exists() {
         error!(
             "TLS private key file does not exist: {}",
             config.listen.tls.key
@@ -525,20 +589,11 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
-    // Optional: Try to read the files to ensure they're accessible
-    if let Err(e) = std::fs::read(&config.listen.tls.cert) {
-        error!(
-            "Cannot read TLS certificate file '{}': {}",
-            config.listen.tls.cert, e
-        );
+    if !validate_pem_certificates(&config.listen.tls.cert, "listen.tls.cert") {
         return false;
     }
 
-    if let Err(e) = std::fs::read(&config.listen.tls.key) {
-        error!(
-            "Cannot read TLS private key file '{}': {}",
-            config.listen.tls.key, e
-        );
+    if !validate_pem_private_key(&config.listen.tls.key, "listen.tls.key") {
         return false;
     }
 
@@ -557,15 +612,11 @@ pub fn validate(config: &Config) -> bool {
             error!("listen.tls.client_auth.ca_file cannot be empty");
             return false;
         }
-        if !std::path::Path::new(ca_file).exists() {
+        if !Path::new(ca_file).exists() {
             error!("listen.tls.client_auth.ca_file does not exist: {}", ca_file);
             return false;
         }
-        if let Err(err) = std::fs::read(ca_file) {
-            error!(
-                "Cannot read listen.tls.client_auth.ca_file '{}': {}",
-                ca_file, err
-            );
+        if !validate_pem_certificates(ca_file, "listen.tls.client_auth.ca_file") {
             return false;
         }
     }
@@ -582,12 +633,11 @@ pub fn validate(config: &Config) -> bool {
             error!("upstream_tls.ca_file cannot be empty when provided");
             return false;
         }
-        if !std::path::Path::new(ca_file).exists() {
+        if !Path::new(ca_file).exists() {
             error!("upstream_tls.ca_file does not exist: {}", ca_file);
             return false;
         }
-        if let Err(err) = std::fs::read(ca_file) {
-            error!("Cannot read upstream_tls.ca_file '{}': {}", ca_file, err);
+        if !validate_pem_certificates(ca_file, "upstream_tls.ca_file") {
             return false;
         }
     }
@@ -597,7 +647,7 @@ pub fn validate(config: &Config) -> bool {
             error!("upstream_tls.ca_dir cannot be empty when provided");
             return false;
         }
-        let ca_path = std::path::Path::new(ca_dir);
+        let ca_path = Path::new(ca_dir);
         if !ca_path.exists() {
             error!("upstream_tls.ca_dir does not exist: {}", ca_dir);
             return false;
@@ -769,8 +819,26 @@ mod tests {
         Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint,
         LogFormat, Observability, Performance, Resilience, RouteMatch, Tls, Upstream, UpstreamTls,
     };
+    use rcgen::{Certificate, CertificateParams, SanType};
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    fn write_test_certs(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let mut params = CertificateParams::new(vec!["localhost".into()]);
+        params
+            .subject_alt_names
+            .push(SanType::IpAddress("127.0.0.1".parse().expect("ip")));
+        let cert = Certificate::from_params(params).expect("failed to build cert");
+
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+
+        std::fs::write(&cert_path, cert.serialize_pem().expect("serialize cert"))
+            .expect("write cert");
+        std::fs::write(&key_path, cert.serialize_private_key_pem()).expect("write key");
+
+        (cert_path, key_path)
+    }
 
     fn base_config(cert: &str, key: &str) -> Config {
         let mut upstream = HashMap::new();
@@ -834,10 +902,7 @@ mod tests {
     #[test]
     fn yaml_parse_applies_performance_and_observability_defaults() {
         let dir = tempdir().expect("tempdir");
-        let cert = dir.path().join("cert.pem");
-        let key = dir.path().join("key.pem");
-        std::fs::write(&cert, "cert").expect("write cert");
-        std::fs::write(&key, "key").expect("write key");
+        let (cert, key) = write_test_certs(dir.path());
 
         let yaml = format!(
             r#"
@@ -922,10 +987,7 @@ upstream:
     #[test]
     fn rejects_invalid_performance_and_observability_values() {
         let dir = tempdir().expect("tempdir");
-        let cert = dir.path().join("cert.pem");
-        let key = dir.path().join("key.pem");
-        std::fs::write(&cert, "cert").expect("write cert");
-        std::fs::write(&key, "key").expect("write key");
+        let (cert, key) = write_test_certs(dir.path());
 
         let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 0;
@@ -1140,12 +1202,21 @@ upstream:
     }
 
     #[test]
-    fn accepts_valid_metrics_and_performance_configuration() {
+    fn rejects_unparseable_tls_material() {
         let dir = tempdir().expect("tempdir");
         let cert = dir.path().join("cert.pem");
         let key = dir.path().join("key.pem");
-        std::fs::write(&cert, "cert").expect("write cert");
-        std::fs::write(&key, "key").expect("write key");
+        std::fs::write(&cert, "not-a-pem-cert").expect("write cert");
+        std::fs::write(&key, "not-a-pem-key").expect("write key");
+
+        let cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn accepts_valid_metrics_and_performance_configuration() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
 
         let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.performance.worker_threads = 4;
@@ -1205,10 +1276,7 @@ upstream:
     #[test]
     fn backend_address_validation_supports_secure_default_and_explicit_http() {
         let dir = tempdir().expect("tempdir");
-        let cert = dir.path().join("cert.pem");
-        let key = dir.path().join("key.pem");
-        std::fs::write(&cert, "cert").expect("write cert");
-        std::fs::write(&key, "key").expect("write key");
+        let (cert, key) = write_test_certs(dir.path());
 
         // Bare host:port defaults to HTTPS policy.
         let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
@@ -1231,10 +1299,7 @@ upstream:
     #[test]
     fn backend_address_validation_rejects_invalid_urls() {
         let dir = tempdir().expect("tempdir");
-        let cert = dir.path().join("cert.pem");
-        let key = dir.path().join("key.pem");
-        std::fs::write(&cert, "cert").expect("write cert");
-        std::fs::write(&key, "key").expect("write key");
+        let (cert, key) = write_test_certs(dir.path());
 
         let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.upstream

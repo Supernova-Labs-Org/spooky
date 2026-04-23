@@ -32,6 +32,32 @@ struct IngressPacket {
     bytes: Vec<u8>,
 }
 
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    match signal(SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = sigterm.recv() => {}
+            }
+        }
+        Err(err) => {
+            warn!(
+                "Failed to register SIGTERM handler ({}); falling back to Ctrl+C only",
+                err
+            );
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
 #[tokio::main]
 async fn main() {
     // Parse CLI arguments
@@ -131,7 +157,7 @@ Use a port >= 1024 for unprivileged startup.",
     let shutdown_flag = shutdown.clone();
 
     tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
+        wait_for_shutdown_signal().await;
         shutdown_flag.store(true, Ordering::Relaxed);
     });
 

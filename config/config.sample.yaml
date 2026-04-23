@@ -61,6 +61,7 @@ load_balancing:
 
 log:
     level: debug
+    format: plain  # plain | json
     file:
         enabled: true
         path: /var/log/spooky/spooky.log

@@ -767,7 +767,7 @@ mod tests {
     use super::validate;
     use crate::config::{
         Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint,
-        Observability, Performance, Resilience, RouteMatch, Tls, Upstream, UpstreamTls,
+        LogFormat, Observability, Performance, Resilience, RouteMatch, Tls, Upstream, UpstreamTls,
     };
     use std::collections::HashMap;
     use tempfile::tempdir;
@@ -823,6 +823,7 @@ mod tests {
             log: Log {
                 level: "info".to_string(),
                 file: Default::default(),
+                format: LogFormat::Plain,
             },
             performance: Performance::default(),
             observability: Observability::default(),

@@ -27,6 +27,8 @@ use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
 use crate::resilience::{AdaptivePermit, RouteQueuePermit, RuntimeResilience};
 use crate::watchdog::WatchdogCoordinator;
 
+static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
 /// A streaming HTTP body backed by a tokio mpsc channel.
 /// The quiche Data handler sends chunks through the sender;
 /// hyper reads them from the receiver as the H2 request body.
@@ -156,6 +158,7 @@ pub struct HedgeTelemetry {
 pub struct UpstreamResult {
     pub forward: ForwardResult,
     pub hedge: HedgeTelemetry,
+    pub retry_count: u8,
 }
 
 /// Lifecycle phase of a single HTTP/3 request stream.
@@ -188,6 +191,8 @@ pub enum ResponseChunk {
 }
 
 pub struct RequestEnvelope {
+    pub request_id: u64,
+
     pub method: String,
     pub path: String,
     pub authority: Option<String>,
@@ -213,6 +218,9 @@ pub struct RequestEnvelope {
     pub total_request_deadline: Instant,
     pub bodyless_mode: bool,
 
+    pub retry_count: u8,
+    pub error_kind: Option<&'static str>,
+
     /// Current lifecycle phase of this stream.
     pub phase: StreamPhase,
     /// True once the client has sent FIN on the request stream.
@@ -225,6 +233,12 @@ pub struct RequestEnvelope {
     pub response_headers_sent: bool,
     /// A chunk that could not be written due to QUIC send backpressure; retried next poll.
     pub pending_chunk: Option<ResponseChunk>,
+}
+
+impl RequestEnvelope {
+    pub fn request_id(&self) -> u64 {
+        self.request_id
+    }
 }
 
 #[derive(Debug)]

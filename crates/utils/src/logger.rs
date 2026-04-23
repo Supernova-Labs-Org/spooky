@@ -1,12 +1,13 @@
 use std::{
     fs::{OpenOptions, create_dir_all},
+    io::Write,
     path::Path,
 };
 
 use env_logger::{Builder, Target};
 use log::LevelFilter;
 
-pub fn init_logger(log_level: &str, log_enabled: bool, log_file: &str) {
+pub fn init_logger(log_level: &str, log_enabled: bool, log_file: &str, json: bool) {
     let level = match log_level.to_lowercase().as_str() {
         "whisper" => LevelFilter::Trace,
         "haunt" => LevelFilter::Debug,
@@ -32,7 +33,23 @@ pub fn init_logger(log_level: &str, log_enabled: bool, log_file: &str) {
     };
 
     let mut builder = Builder::new();
-    builder.filter_level(level).format_timestamp_secs();
+    builder.filter_level(level);
+
+    if json {
+        builder.format(|buf, record| {
+            let ts = buf.timestamp_seconds();
+            let level = record.level().as_str().to_ascii_lowercase();
+            let msg = record.args().to_string();
+            // Escape the message string minimally so it stays valid JSON.
+            let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
+            writeln!(
+                buf,
+                "{{\"ts\":\"{ts}\",\"level\":\"{level}\",\"msg\":\"{escaped}\"}}"
+            )
+        });
+    } else {
+        builder.format_timestamp_secs();
+    }
 
     // only write to file if enabled
     if log_enabled {

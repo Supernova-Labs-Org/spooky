@@ -164,4 +164,4 @@ See [Contributing Guide](development/contributing.md) for more details.
 
 ## License
 
-Elastic License 2.0 (ELv2) - see [LICENSE](https://github.com/nishujangra/spooky/blob/master/LICENSE.md) for details.
+Elastic License 2.0 (ELv2) - see [LICENSE](https://github.com/Supernova-Labs-Org/spooky/blob/master/LICENSE.md) for details.

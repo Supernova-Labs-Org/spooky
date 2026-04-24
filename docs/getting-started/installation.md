@@ -21,18 +21,18 @@
 
 ### Pre-built Binaries
 
-Download the latest release from [GitHub Releases](https://github.com/nishujangra/spooky/releases).
+Download the latest release from [GitHub Releases](https://github.com/Supernova-Labs-Org/spooky/releases).
 
 **Linux (x86_64):**
 ```bash
-wget https://github.com/nishujangra/spooky/releases/download/v0.1.0/spooky-linux-x86_64.tar.gz
+wget https://github.com/Supernova-Labs-Org/spooky/releases/download/v0.1.0/spooky-linux-x86_64.tar.gz
 tar -xzf spooky-linux-x86_64.tar.gz
 sudo install -m 755 spooky /usr/local/bin/spooky
 ```
 
 **macOS (x86_64/ARM64):**
 ```bash
-wget https://github.com/nishujangra/spooky/releases/download/v0.1.0/spooky-macos-universal.tar.gz
+wget https://github.com/Supernova-Labs-Org/spooky/releases/download/v0.1.0/spooky-macos-universal.tar.gz
 tar -xzf spooky-macos-universal.tar.gz
 sudo install -m 755 spooky /usr/local/bin/spooky
 ```
@@ -51,7 +51,7 @@ This compiles from source and installs to `~/.cargo/bin/`. Ensure this directory
 
 **Clone and build:**
 ```bash
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 ```
@@ -83,7 +83,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 
 # Build and install
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 sudo install -m 755 target/release/spooky /usr/local/bin/spooky
@@ -101,7 +101,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 
 # Build and install
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 sudo install -m 755 target/release/spooky /usr/local/bin/spooky
@@ -114,7 +114,7 @@ sudo install -m 755 target/release/spooky /usr/local/bin/spooky
 brew install cmake pkg-config rust
 
 # Build and install
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 sudo install -m 755 target/release/spooky /usr/local/bin/spooky
@@ -128,7 +128,7 @@ sudo install -m 755 target/release/spooky /usr/local/bin/spooky
 
 **Build:**
 ```powershell
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 ```

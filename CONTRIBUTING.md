@@ -8,7 +8,7 @@ edge and forwards to HTTP/2 backends.
 Requirements: Rust 1.85+, cmake, pkg-config
 
 ```sh
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build
     cargo test

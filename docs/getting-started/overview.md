@@ -70,7 +70,7 @@ brew install cmake pkg-config
 
 ```bash
 # Clone and build
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 

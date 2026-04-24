@@ -1,8 +1,8 @@
 site_name: Spooky
 site_description: HTTP/3 to HTTP/2 reverse proxy and load balancer
-site_url: https://nishujangra.github.io/spooky/
-repo_url: https://github.com/nishujangra/spooky
-repo_name: nishujangra/spooky
+site_url: https://supernova-labs-org.github.io/spooky/
+repo_url: https://github.com/Supernova-Labs-Org/spooky
+repo_name: Supernova-Labs-Org/spooky
 edit_uri: edit/master/docs/
 
 docs_dir: docs
@@ -62,7 +62,7 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/nishujangra/spooky
+      link: https://github.com/Supernova-Labs-Org/spooky
   version:
     provider: mike
 

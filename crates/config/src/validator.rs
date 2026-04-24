@@ -697,6 +697,9 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    let mut seen_backend_origins: std::collections::HashMap<String, (String, String)> =
+        std::collections::HashMap::new();
+
     for (upstream_name, upstream) in &config.upstream {
         if upstream_name.is_empty() {
             error!("Upstream name is empty");
@@ -752,6 +755,17 @@ pub fn validate(config: &Config) -> bool {
                     "Backend '{}' in upstream '{}' uses explicit insecure cleartext transport ({})",
                     backend.id, upstream_name, backend.address
                 );
+            }
+
+            let origin = endpoint.origin();
+            if let Some((existing_upstream, existing_backend)) = seen_backend_origins
+                .insert(origin.clone(), (upstream_name.clone(), backend.id.clone()))
+            {
+                error!(
+                    "Duplicate backend address '{}' detected: upstream '{}' backend '{}' conflicts with upstream '{}' backend '{}'",
+                    origin, upstream_name, backend.id, existing_upstream, existing_backend
+                );
+                return false;
             }
 
             // Validate weight
@@ -816,8 +830,9 @@ pub fn validate(config: &Config) -> bool {
 mod tests {
     use super::validate;
     use crate::config::{
-        Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, MetricsEndpoint,
-        LogFormat, Observability, Performance, Resilience, RouteMatch, Tls, Upstream, UpstreamTls,
+        Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, LogFormat,
+        MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Tls, Upstream,
+        UpstreamTls,
     };
     use rcgen::{Certificate, CertificateParams, SanType};
     use std::collections::HashMap;
@@ -1314,6 +1329,21 @@ upstream:
             .expect("upstream")
             .backends[0]
             .address = "ftp://127.0.0.1:21".to_string();
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn rejects_duplicate_backend_addresses_across_upstreams() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        let mut duplicate = cfg.upstream.get("test_upstream").expect("upstream").clone();
+        duplicate.backends[0].id = "backend-2".to_string();
+        duplicate.route.path_prefix = Some("/v2".to_string());
+        cfg.upstream
+            .insert("test_upstream_2".to_string(), duplicate);
+
         assert!(!validate(&cfg));
     }
 }

@@ -988,7 +988,7 @@ log:
 <tr>
 <td><code>listen.protocol</code></td>
 <td><code>"http3"</code></td>
-<td>Network protocol</td>
+<td>Ingress protocol (HTTP/3 over QUIC only)</td>
 </tr>
 <tr>
 <td><code>listen.port</code></td>
@@ -1141,7 +1141,7 @@ log:
 <td>string</td>
 <td>No</td>
 <td><code>http3</code></td>
-<td>Protocol to listen on</td>
+<td>Protocol to listen on (HTTP/3 over QUIC only)</td>
 </tr>
 <tr>
 <td><code>address</code></td>
@@ -1170,6 +1170,7 @@ log:
 <ul>
 <li><code>http3</code>: HTTP/3 over QUIC (recommended)</li>
 </ul>
+<p>HTTP/1.1 and HTTP/2 ingress are not currently supported directly. If those clients must be supported, place an external frontend that terminates legacy protocols and forwards to Spooky over HTTP/3.</p>
 <h3 id="tls-configuration">TLS Configuration</h3>
 <div class="table-wrapper"><table>
 <thead>

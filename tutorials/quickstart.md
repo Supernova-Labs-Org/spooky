@@ -14,7 +14,7 @@ This guide demonstrates how to deploy a working Spooky HTTP/3 proxy in under 10 
 Clone the repository and build the release binary:
 
 ```bash
-git clone https://github.com/nishujangra/spooky.git
+git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build --release
 ```

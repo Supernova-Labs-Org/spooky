@@ -47,7 +47,7 @@ Production deployments should use compiled release binaries:
 # Download release binary
 VERSION="0.1.0"
 ARCH="x86_64"
-wget "https://github.com/nishujangra/spooky/releases/download/v${VERSION}/spooky-linux-${ARCH}.tar.gz"
+wget "https://github.com/Supernova-Labs-Org/spooky/releases/download/v${VERSION}/spooky-linux-${ARCH}.tar.gz"
 tar xzf "spooky-linux-${ARCH}.tar.gz"
 
 # Verify checksum
@@ -302,7 +302,7 @@ openssl x509 -noout -text -in /etc/spooky/certs/fullchain.pem | grep -A1 "Subjec
 # /etc/systemd/system/spooky.service
 [Unit]
 Description=Spooky HTTP/3 to HTTP/2 Proxy
-Documentation=https://github.com/nishujangra/spooky
+Documentation=https://github.com/Supernova-Labs-Org/spooky
 After=network-online.target
 Wants=network-online.target
 

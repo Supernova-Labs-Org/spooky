@@ -6,6 +6,7 @@ use std::{
 
 use env_logger::{Builder, Target};
 use log::LevelFilter;
+use serde_json::json;
 
 pub fn init_logger(log_level: &str, log_enabled: bool, log_file: &str, json: bool) {
     let level = match log_level.to_lowercase().as_str() {
@@ -37,15 +38,13 @@ pub fn init_logger(log_level: &str, log_enabled: bool, log_file: &str, json: boo
 
     if json {
         builder.format(|buf, record| {
-            let ts = buf.timestamp_seconds();
-            let level = record.level().as_str().to_ascii_lowercase();
-            let msg = record.args().to_string();
-            // Escape the message string minimally so it stays valid JSON.
-            let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
-            writeln!(
-                buf,
-                "{{\"ts\":\"{ts}\",\"level\":\"{level}\",\"msg\":\"{escaped}\"}}"
-            )
+            let payload = json!({
+                "ts": buf.timestamp_seconds().to_string(),
+                "level": record.level().as_str().to_ascii_lowercase(),
+                "target": record.target(),
+                "msg": record.args().to_string(),
+            });
+            writeln!(buf, "{payload}")
         });
     } else {
         builder.format_timestamp_secs();

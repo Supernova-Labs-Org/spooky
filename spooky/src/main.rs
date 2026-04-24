@@ -145,6 +145,10 @@ Use a port >= 1024 for unprivileged startup.",
     };
 
     info!("Spooky is starting");
+    warn!(
+        "Ingress compatibility: Spooky currently accepts HTTP/3/QUIC clients only. \
+Deploy an external HTTP/1.1 or HTTP/2 terminator in front if legacy clients must be supported."
+    );
     info!(
         "Data-plane workers={} packet_shards_per_worker={} reuseport={} pin_workers={}",
         sockets.len(),

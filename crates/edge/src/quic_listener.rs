@@ -38,8 +38,8 @@ use tokio::sync::{
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
-    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener,
-    QuicConnection, REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
+    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener, QuicConnection,
+    REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
     SharedRuntimeState, StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
@@ -479,12 +479,26 @@ impl QUICListener {
         );
 
         let mut backend_addresses = Vec::new();
+        let mut seen_backend_origins: HashMap<String, (String, String)> = HashMap::new();
         for (upstream_name, upstream) in &config.upstream {
             for backend in &upstream.backends {
-                if let Err(err) = BackendEndpoint::parse(&backend.address) {
+                let endpoint = match BackendEndpoint::parse(&backend.address) {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        return Err(ProxyError::Transport(format!(
+                            "invalid backend address '{}' in upstream '{}' (backend '{}'): {}",
+                            backend.address, upstream_name, backend.id, err
+                        )));
+                    }
+                };
+
+                let origin = endpoint.origin();
+                if let Some((existing_upstream, existing_backend)) = seen_backend_origins
+                    .insert(origin.clone(), (upstream_name.clone(), backend.id.clone()))
+                {
                     return Err(ProxyError::Transport(format!(
-                        "invalid backend address '{}' in upstream '{}' (backend '{}'): {}",
-                        backend.address, upstream_name, backend.id, err
+                        "duplicate backend address '{}' detected while building H2 pool: upstream '{}' backend '{}' conflicts with upstream '{}' backend '{}'",
+                        origin, upstream_name, backend.id, existing_upstream, existing_backend
                     )));
                 }
                 backend_addresses.push(backend.address.clone());
@@ -2433,7 +2447,8 @@ impl QUICListener {
                             error!(
                                 "request_id={} HTTP/3 recv_body protocol error on stream {}: {:?}",
                                 rid.map_or_else(|| "-".to_string(), |id| id.to_string()),
-                                stream_id, err
+                                stream_id,
+                                err
                             );
                             if let Some(req) = connection.streams.get(&stream_id) {
                                 metrics.inc_failure();
@@ -2956,7 +2971,10 @@ impl QUICListener {
                                                     p.pool.mark_success(idx)
                                                 }
                                                 crate::HealthClassification::Failure => {
-                                                    p.pool.mark_request_failure(idx, HealthFailureReason::HttpStatus5xx)
+                                                    p.pool.mark_request_failure(
+                                                        idx,
+                                                        HealthFailureReason::HttpStatus5xx,
+                                                    )
                                                 }
                                                 crate::HealthClassification::Neutral => None,
                                             },
@@ -3166,9 +3184,10 @@ impl QUICListener {
                             if let (Some(idx), Some(pool)) = (
                                 req.backend_index,
                                 upstream_name.and_then(|n| upstream_pools.get(n)),
-                            ) && let Some(t) =
-                                pool.lock().ok().and_then(|mut p| p.pool.mark_request_failure(idx, HealthFailureReason::HttpStatus5xx))
-                                && let Some(addr) = &req.backend_addr
+                            ) && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                                p.pool
+                                    .mark_request_failure(idx, HealthFailureReason::HttpStatus5xx)
+                            }) && let Some(addr) = &req.backend_addr
                             {
                                 Self::log_health_transition(addr, t);
                             }
@@ -3491,10 +3510,10 @@ impl QUICListener {
                 error!("Upstream transport error");
                 metrics.inc_health_failure(HealthFailureReason::Transport);
                 if let Some(pool) = &upstream_pool
-                    && let Some(t) = pool
-                        .lock()
-                        .ok()
-                        .and_then(|mut p| p.pool.mark_request_failure(backend_index, HealthFailureReason::Transport))
+                    && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                        p.pool
+                            .mark_request_failure(backend_index, HealthFailureReason::Transport)
+                    })
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -3528,10 +3547,10 @@ impl QUICListener {
                 error!("request_id={} Upstream request timed out", req.request_id);
                 metrics.inc_health_failure(HealthFailureReason::Timeout);
                 if let Some(pool) = &upstream_pool
-                    && let Some(t) = pool
-                        .lock()
-                        .ok()
-                        .and_then(|mut p| p.pool.mark_request_failure(backend_index, HealthFailureReason::Timeout))
+                    && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                        p.pool
+                            .mark_request_failure(backend_index, HealthFailureReason::Timeout)
+                    })
                 {
                     Self::log_health_transition(backend_addr, t);
                 }
@@ -4121,8 +4140,8 @@ static FALLBACK_RT_THREADS: AtomicUsize = AtomicUsize::new(2);
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use crate::cid_radix::CidRadix;
     use crate::REQUEST_ID_COUNTER;
+    use crate::cid_radix::CidRadix;
 
     use std::collections::HashSet;
     use std::net::SocketAddr;

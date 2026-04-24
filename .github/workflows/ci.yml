@@ -39,7 +39,7 @@ jobs:
           toolchain: stable
       - name: Run tests
         timeout-minutes: 20
-        run: sudo env "PATH=$PATH" "HOME=$HOME" cargo test
+        run: cargo test
 
   bench-regression:
     runs-on: ubuntu-latest

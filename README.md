@@ -54,6 +54,13 @@ brew install cmake pkg-config
 
 Spooky uses YAML configuration with validation at startup. See [configuration reference](docs/configuration/reference.md) for complete documentation.
 
+### Ingress Compatibility Posture
+
+Spooky currently accepts **HTTP/3 over QUIC only** on the ingress listener.
+
+- HTTP/1.1 and HTTP/2 clients are not accepted directly.
+- If legacy client compatibility is required, deploy an external frontend (CDN/LB/reverse proxy) that terminates HTTP/1.1 or HTTP/2 and forwards to a Spooky HTTP/3 ingress.
+
 ### Minimal Example
 
 ```yaml

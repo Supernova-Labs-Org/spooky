@@ -2,7 +2,6 @@ use bytes::Bytes;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
-    hash::{Hash, Hasher},
     net::UdpSocket,
     pin::Pin,
     sync::{
@@ -28,6 +27,38 @@ use crate::resilience::{AdaptivePermit, RouteQueuePermit, RuntimeResilience};
 use crate::watchdog::WatchdogCoordinator;
 
 static REQUEST_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+const FNV_OFFSET_BASIS_64: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME_64: u64 = 0x0000_0100_0000_01b3;
+
+pub fn stable_hash64(bytes: &[u8]) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS_64;
+    for byte in bytes {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME_64);
+    }
+    hash
+}
+
+pub fn stable_hash_socket_addr(addr: &SocketAddr) -> u64 {
+    match addr {
+        SocketAddr::V4(v4) => {
+            let mut bytes = [0u8; 7];
+            bytes[0] = 4;
+            bytes[1..5].copy_from_slice(&v4.ip().octets());
+            bytes[5..7].copy_from_slice(&v4.port().to_be_bytes());
+            stable_hash64(&bytes)
+        }
+        SocketAddr::V6(v6) => {
+            let mut bytes = [0u8; 31];
+            bytes[0] = 6;
+            bytes[1..17].copy_from_slice(&v6.ip().octets());
+            bytes[17..19].copy_from_slice(&v6.port().to_be_bytes());
+            bytes[19..23].copy_from_slice(&v6.flowinfo().to_be_bytes());
+            bytes[23..27].copy_from_slice(&v6.scope_id().to_be_bytes());
+            stable_hash64(&bytes)
+        }
+    }
+}
 
 /// A streaming HTTP body backed by a tokio mpsc channel.
 /// The quiche Data handler sends chunks through the sender;
@@ -677,10 +708,12 @@ impl Metrics {
                 self.retry_denied_budget.fetch_add(1, Ordering::Relaxed);
             }
             RetryReason::NotBodylessMode => {
-                self.retry_denied_no_bodyless.fetch_add(1, Ordering::Relaxed);
+                self.retry_denied_no_bodyless
+                    .fetch_add(1, Ordering::Relaxed);
             }
             RetryReason::NoAlternateBackend => {
-                self.retry_denied_no_alternate.fetch_add(1, Ordering::Relaxed);
+                self.retry_denied_no_alternate
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -694,7 +727,8 @@ impl Metrics {
                 self.health_failure_timeout.fetch_add(1, Ordering::Relaxed);
             }
             HealthFailureReason::Transport => {
-                self.health_failure_transport.fetch_add(1, Ordering::Relaxed);
+                self.health_failure_transport
+                    .fetch_add(1, Ordering::Relaxed);
             }
             HealthFailureReason::Tls => {
                 self.health_failure_tls.fetch_add(1, Ordering::Relaxed);
@@ -1069,7 +1103,9 @@ impl Metrics {
             self.retries_total.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_retry_denied_total Total retry attempts blocked, by denial reason.\n");
+        out.push_str(
+            "# HELP spooky_retry_denied_total Total retry attempts blocked, by denial reason.\n",
+        );
         out.push_str("# TYPE spooky_retry_denied_total counter\n");
         out.push_str(&format!(
             "spooky_retry_denied_total{{reason=\"budget\"}} {}\n",
@@ -1084,7 +1120,9 @@ impl Metrics {
             self.retry_denied_no_alternate.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_retry_attempts_total Total retries triggered, by error reason.\n");
+        out.push_str(
+            "# HELP spooky_retry_attempts_total Total retries triggered, by error reason.\n",
+        );
         out.push_str("# TYPE spooky_retry_attempts_total counter\n");
         out.push_str(&format!(
             "spooky_retry_attempts_total{{reason=\"timeout\"}} {}\n",
@@ -1099,7 +1137,9 @@ impl Metrics {
             self.retry_reason_pool.load(Ordering::Relaxed)
         ));
 
-        out.push_str("# HELP spooky_health_failures_total Backend health failures, by failure reason.\n");
+        out.push_str(
+            "# HELP spooky_health_failures_total Backend health failures, by failure reason.\n",
+        );
         out.push_str("# TYPE spooky_health_failures_total counter\n");
         out.push_str(&format!(
             "spooky_health_failures_total{{reason=\"5xx\"}} {}\n",
@@ -1178,9 +1218,7 @@ impl Metrics {
 }
 
 fn route_stats_shard(route: &str) -> usize {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    route.hash(&mut hasher);
-    (hasher.finish() as usize) % ROUTE_STATS_SHARDS
+    (stable_hash64(route.as_bytes()) as usize) % ROUTE_STATS_SHARDS
 }
 
 fn percentile_ms(stats: &RouteStats, quantile: f64) -> f64 {
@@ -1303,5 +1341,23 @@ mod tests {
         assert!(output.contains("spooky_hedge_primary_won_after_trigger_total 1"));
         assert!(output.contains("spooky_hedge_primary_late_ms_total 42"));
         assert!(output.contains("spooky_hedge_primary_late_samples_total 1"));
+    }
+
+    #[test]
+    fn stable_hash64_is_deterministic() {
+        let first = stable_hash64(b"/api/orders");
+        let second = stable_hash64(b"/api/orders");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn stable_hash_socket_addr_distinguishes_addresses() {
+        let addr_one: SocketAddr = "127.0.0.1:9889".parse().expect("addr one");
+        let addr_two: SocketAddr = "127.0.0.2:9889".parse().expect("addr two");
+
+        assert_ne!(
+            stable_hash_socket_addr(&addr_one),
+            stable_hash_socket_addr(&addr_two)
+        );
     }
 }

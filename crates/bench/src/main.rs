@@ -1381,7 +1381,7 @@ fn load_report(path: &Path) -> Result<BenchReport, String> {
 fn load_manifest(path: &Path) -> Result<BenchManifest, String> {
     let text = fs::read_to_string(path)
         .map_err(|err| format!("failed to read manifest '{}': {err}", path.display()))?;
-    let manifest: BenchManifest = serde_yaml::from_str(&text)
+    let manifest: BenchManifest = serde_yml::from_str(&text)
         .map_err(|err| format!("failed to parse manifest '{}': {err}", path.display()))?;
 
     if manifest.version != 1 {

@@ -1,7 +1,5 @@
 //! Spooky HTTP/3 Load Balancer - Main Entry Point
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 mod runtime_guard;
@@ -16,7 +14,9 @@ use clap::Parser;
 use log::{error, info, warn};
 
 use spooky_config::validator::validate as validate_config;
-use spooky_edge::{QUICListener, SharedRuntimeState, configure_async_runtime};
+use spooky_edge::{
+    QUICListener, SharedRuntimeState, configure_async_runtime, stable_hash_socket_addr,
+};
 
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
@@ -454,9 +454,7 @@ fn run_single_listener_worker(
 }
 
 fn shard_index_for_peer(peer: &SocketAddr, shard_count: usize) -> usize {
-    let mut hasher = DefaultHasher::new();
-    peer.hash(&mut hasher);
-    (hasher.finish() as usize) % shard_count.max(1)
+    (stable_hash_socket_addr(peer) as usize) % shard_count.max(1)
 }
 
 fn try_reserve_shard_queue_bytes(counter: &AtomicUsize, packet_bytes: usize, cap: usize) -> bool {

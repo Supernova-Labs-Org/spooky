@@ -28,14 +28,14 @@ upstream:
 
     backends:
       - id: "backend1"
-        address: "http://127.0.0.1:7001"   # explicit cleartext for local/dev; omit scheme for verified HTTPS default
+        address: "api-backend-1.internal.example:7001"   # verified HTTPS by default; use config.development.yaml for local cleartext
         weight: 100  # relative traffic share; must be 1–1000 (higher = more traffic)
         health_check:
           path: "/health"
           interval: 5000
 
       - id: "backend2"
-        address: "http://127.0.0.1:7002"   # explicit cleartext for local/dev; omit scheme for verified HTTPS default
+        address: "api-backend-2.internal.example:7002"   # verified HTTPS by default; use config.development.yaml for local cleartext
         weight: 50   # receives ~33% of traffic vs backend1's ~67%
         health_check:
           path: "/status"
@@ -50,7 +50,7 @@ upstream:
 
     backends:
       - id: "auth1"
-        address: "http://127.0.0.1:8001"   # explicit cleartext for local/dev; omit scheme for verified HTTPS default
+        address: "auth-backend-1.internal.example:8001"   # verified HTTPS by default; use config.development.yaml for local cleartext
         weight: 100  # relative traffic share; must be 1–1000
         health_check:
           path: "/health"
@@ -112,6 +112,7 @@ resilience:
     adaptive_admission:
         enabled: true
         min_limit: 64
+        max_limit: 4096      # optional ceiling for adaptive in-flight cap; defaults to performance.global_inflight_limit when omitted
         decrease_step: 16
         increase_step: 8
         high_latency_ms: 250

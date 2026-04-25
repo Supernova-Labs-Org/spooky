@@ -199,7 +199,7 @@ Administrative API endpoints are planned for runtime management and observabilit
 
 - **Health endpoint**: Spooky instance health status and backend health aggregation
 - **Metrics endpoint**: Real-time operational metrics exposition
-- **Configuration reload**: Dynamic configuration updates without restart
+- **Configuration reload (planned)**: Dynamic configuration updates without restart
 - **Connection management**: View active connections, drain connections gracefully
 - **Backend management**: Enable/disable backends, adjust weights dynamically
 

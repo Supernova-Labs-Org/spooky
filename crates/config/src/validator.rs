@@ -1,5 +1,5 @@
 use crate::backend_endpoint::{BackendEndpoint, BackendScheme};
-use crate::config::Config;
+use crate::config::{CURRENT_CONFIG_VERSION, Config, SUPPORTED_CONFIG_VERSIONS};
 use log::{error, info, warn};
 use std::fs::File;
 use std::io::BufReader;
@@ -95,9 +95,23 @@ pub fn validate(config: &Config) -> bool {
     info!("Starting configuration validation...");
 
     // --- Validate version ---
-    if config.version != 1 {
-        error!("Invalid version: expected '1', found '{}'", config.version);
+    if !SUPPORTED_CONFIG_VERSIONS.contains(&config.version) {
+        let supported = SUPPORTED_CONFIG_VERSIONS
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        error!(
+            "Invalid version: found '{}', supported versions are [{}]",
+            config.version, supported
+        );
         return false;
+    }
+    if config.version != CURRENT_CONFIG_VERSION {
+        warn!(
+            "Config version '{}' is supported but not current (current={}); please migrate when possible",
+            config.version, CURRENT_CONFIG_VERSION
+        );
     }
 
     // --- Validate protocol ---
@@ -375,6 +389,26 @@ pub fn validate(config: &Config) -> bool {
     if config.resilience.adaptive_admission.min_limit == 0 {
         error!("resilience.adaptive_admission.min_limit must be greater than 0");
         return false;
+    }
+    if let Some(max_limit) = config.resilience.adaptive_admission.max_limit {
+        if max_limit == 0 {
+            error!("resilience.adaptive_admission.max_limit must be greater than 0");
+            return false;
+        }
+        if max_limit < config.resilience.adaptive_admission.min_limit {
+            error!(
+                "resilience.adaptive_admission.max_limit ({}) must be >= min_limit ({})",
+                max_limit, config.resilience.adaptive_admission.min_limit
+            );
+            return false;
+        }
+        if max_limit > config.performance.global_inflight_limit {
+            error!(
+                "resilience.adaptive_admission.max_limit ({}) must be <= performance.global_inflight_limit ({})",
+                max_limit, config.performance.global_inflight_limit
+            );
+            return false;
+        }
     }
 
     if config.resilience.adaptive_admission.decrease_step == 0 {
@@ -945,7 +979,7 @@ upstream:
             key.display()
         );
 
-        let cfg: Config = serde_yaml::from_str(&yaml).expect("parse");
+        let cfg: Config = serde_yml::from_str(&yaml).expect("parse");
         assert_eq!(cfg.performance.worker_threads, 1);
         assert_eq!(cfg.performance.control_plane_threads, 2);
         assert_eq!(cfg.performance.packet_shards_per_worker, 1);
@@ -988,6 +1022,7 @@ upstream:
         assert!(!cfg.listen.tls.client_auth.require_client_cert);
         assert!(cfg.listen.tls.client_auth.ca_file.is_none());
         assert!(cfg.resilience.adaptive_admission.enabled);
+        assert!(cfg.resilience.adaptive_admission.max_limit.is_none());
         assert_eq!(cfg.resilience.route_queue.default_cap, 512);
         assert_eq!(cfg.resilience.route_queue.global_cap, 2048);
         assert_eq!(cfg.resilience.route_queue.shed_retry_after_seconds, 1);
@@ -1138,6 +1173,24 @@ upstream:
         assert!(!validate(&cfg));
 
         cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.adaptive_admission.max_limit = Some(0);
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.adaptive_admission.max_limit = Some(
+            cfg.resilience
+                .adaptive_admission
+                .min_limit
+                .saturating_sub(1),
+        );
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.adaptive_admission.max_limit =
+            Some(cfg.performance.global_inflight_limit.saturating_add(1));
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
         cfg.resilience.route_queue.default_cap = 0;
         assert!(!validate(&cfg));
 
@@ -1259,6 +1312,7 @@ upstream:
         cfg.performance.request_buffer_global_cap_bytes = 8 * 1024 * 1024;
         cfg.performance.unknown_length_response_prebuffer_bytes = 512 * 1024;
         cfg.performance.client_body_idle_timeout_ms = 7_500;
+        cfg.resilience.adaptive_admission.max_limit = Some(1024);
         cfg.resilience.route_queue.default_cap = 256;
         cfg.resilience.route_queue.global_cap = 2048;
         cfg.resilience.route_queue.shed_retry_after_seconds = 2;

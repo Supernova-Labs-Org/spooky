@@ -1,0 +1,36 @@
+version: 1
+
+listen:
+  protocol: http3
+  address: "0.0.0.0"
+  port: 9889
+  tls:
+    cert: "/etc/spooky/certs/fullchain.pem"
+    key: "/etc/spooky/certs/privkey.pem"
+
+upstream_tls:
+  verify_certificates: true
+  strict_sni: true
+
+upstream:
+  default:
+    load_balancing:
+      type: round-robin
+    route:
+      path_prefix: "/"
+    backends:
+      - id: "backend1"
+        address: "backend.internal.example:8443" # verified HTTPS by default (no scheme needed)
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+          timeout_ms: 1000
+          failure_threshold: 3
+          success_threshold: 2
+          cooldown_ms: 5000
+
+log:
+  level: info
+  format: json
+

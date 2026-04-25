@@ -1,6 +1,9 @@
 version: 1
 
 listen:
+  protocol: http3
+  address: "127.0.0.1"
+  port: 9889
   tls:
     cert: certs/proxy-fullchain.pem
     key: certs/proxy-key-pkcs8.pem
@@ -11,11 +14,17 @@ upstream:
       path_prefix: "/"
     backends:
       - id: "backend1"
-        address: "127.0.0.1:8080"  # verified HTTPS by default; use config.development.yaml for explicit local HTTP
+        address: "http://127.0.0.1:8080" # local/dev-only cleartext upstream
         health_check:
           path: "/health"
+          interval: 5000
 
+upstream_tls:
+  verify_certificates: false # development-only: do not copy into production
+  strict_sni: false
 
 performance:
+  worker_threads: 1
   packet_shards_per_worker: 1
   packet_shard_queue_capacity: 2048
+

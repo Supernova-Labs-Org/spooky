@@ -1,5 +1,5 @@
-use crate::config::Config;
-use serde_yaml::{Mapping, Value};
+use crate::config::{CURRENT_CONFIG_VERSION, Config, SUPPORTED_CONFIG_VERSIONS};
+use serde_yml::{Mapping, Value};
 use std::fs;
 
 pub fn read_config(filename: &str) -> Result<Config, String> {
@@ -10,10 +10,58 @@ pub fn read_config(filename: &str) -> Result<Config, String> {
         .map_err(|err| format!("Could not parse YAML file '{}': {}", filename, err))
 }
 
-fn parse_config_text(text: &str) -> Result<Config, serde_yaml::Error> {
-    let mut root: Value = serde_yaml::from_str(text)?;
+fn parse_config_text(text: &str) -> Result<Config, String> {
+    let mut root: Value =
+        serde_yml::from_str(text).map_err(|err| format!("failed to parse YAML: {}", err))?;
+    let config_version = extract_config_version(&root)?;
+    ensure_supported_version(config_version)?;
+    root = migrate_to_current_version(root, config_version)?;
     apply_global_lb_fallback(&mut root);
-    serde_yaml::from_value(root)
+    serde_yml::from_value(root)
+        .map_err(|err| format!("failed to deserialize config structure: {}", err))
+}
+
+fn extract_config_version(root: &Value) -> Result<u32, String> {
+    let Some(root_map) = root.as_mapping() else {
+        return Err("config root must be a YAML mapping/object".to_string());
+    };
+
+    let version_key = Value::String("version".to_string());
+    let Some(version_value) = root_map.get(&version_key) else {
+        return Ok(CURRENT_CONFIG_VERSION);
+    };
+
+    let raw = version_value
+        .as_u64()
+        .ok_or_else(|| "config 'version' must be a positive integer".to_string())?;
+
+    u32::try_from(raw).map_err(|_| format!("config 'version' value {} is out of range", raw))
+}
+
+fn ensure_supported_version(version: u32) -> Result<(), String> {
+    if SUPPORTED_CONFIG_VERSIONS.contains(&version) {
+        return Ok(());
+    }
+
+    let supported = SUPPORTED_CONFIG_VERSIONS
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "unsupported config version '{}'; supported versions: [{}]",
+        version, supported
+    ))
+}
+
+fn migrate_to_current_version(root: Value, from_version: u32) -> Result<Value, String> {
+    match from_version {
+        CURRENT_CONFIG_VERSION => Ok(root),
+        _ => Err(format!(
+            "config version '{}' cannot be migrated to current version '{}'",
+            from_version, CURRENT_CONFIG_VERSION
+        )),
+    }
 }
 
 fn apply_global_lb_fallback(root: &mut Value) {
@@ -99,5 +147,31 @@ upstream:
                 .map(|u| u.load_balancing.lb_type.as_str()),
             Some("random")
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_config_version() {
+        let yaml = r#"
+version: 2
+listen:
+  protocol: http3
+  address: "127.0.0.1"
+  port: 9889
+  tls:
+    cert: "certs/cert.pem"
+    key: "certs/key.pem"
+upstream:
+  default:
+    route:
+      path_prefix: "/"
+    backends:
+      - id: b1
+        address: "http://127.0.0.1:7001"
+        weight: 1
+        health_check: {}
+"#;
+
+        let err = parse_config_text(yaml).expect_err("version 2 should be rejected");
+        assert!(err.contains("unsupported config version"));
     }
 }

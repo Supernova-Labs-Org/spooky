@@ -22,6 +22,7 @@ use log::{debug, error, info, warn};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
+use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
 use spooky_errors::{PoolError, ProxyError, is_retryable};
@@ -34,6 +35,7 @@ use tokio::sync::{
     mpsc::error::{TryRecvError, TrySendError},
     oneshot,
 };
+use tracing::info_span;
 
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
@@ -112,6 +114,41 @@ struct RequestValidationResult {
     method: String,
     path: String,
     authority: Option<String>,
+}
+
+#[derive(Clone)]
+struct ControlApiPaths {
+    health_path: String,
+    ready_path: String,
+    runtime_path: String,
+    restart_path: String,
+}
+
+#[derive(Clone)]
+struct ControlApiState {
+    metrics: Arc<Metrics>,
+    resilience: Arc<RuntimeResilience>,
+    watchdog: Arc<WatchdogCoordinator>,
+    upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    expected_workers: usize,
+    started_at: Instant,
+}
+
+impl ControlApiState {
+    fn snapshot_backend_health(&self) -> (usize, usize) {
+        let mut healthy = 0usize;
+        let mut total = 0usize;
+        for pool in self.upstream_pools.values() {
+            let guard = match pool.lock() {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
+            let pool_total = guard.pool.len();
+            total = total.saturating_add(pool_total);
+            healthy = healthy.saturating_add(guard.pool.healthy_indices().len().min(pool_total));
+        }
+        (healthy, total)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -292,6 +329,58 @@ fn validate_request_headers(
         path,
         authority: authority.or(host),
     })
+}
+
+fn extract_header_value<'a>(headers: &'a [quiche::h3::Header], name: &[u8]) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(name))
+        .and_then(|header| std::str::from_utf8(header.value()).ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_traceparent(value: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = value.split('-').collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    if parts[0] != "00" {
+        return None;
+    }
+    let trace_id = parts[1];
+    let parent_span_id = parts[2];
+    let flags = parts[3];
+
+    let trace_valid = trace_id.len() == 32
+        && trace_id.chars().all(|c| c.is_ascii_hexdigit())
+        && trace_id != "00000000000000000000000000000000";
+    let span_valid = parent_span_id.len() == 16
+        && parent_span_id.chars().all(|c| c.is_ascii_hexdigit())
+        && parent_span_id != "0000000000000000";
+    let flags_valid = flags.len() == 2 && flags.chars().all(|c| c.is_ascii_hexdigit());
+
+    if !(trace_valid && span_valid && flags_valid) {
+        return None;
+    }
+
+    Some((
+        trace_id.to_ascii_lowercase(),
+        parent_span_id.to_ascii_lowercase(),
+    ))
+}
+
+fn generated_trace_id(conn_trace_id: &str, request_id: u64) -> String {
+    let mut seed = conn_trace_id.as_bytes().to_vec();
+    seed.extend_from_slice(&request_id.to_be_bytes());
+    let lo = crate::stable_hash64(&seed);
+    seed.extend_from_slice(b"trace-hi");
+    let hi = crate::stable_hash64(&seed);
+    format!("{hi:016x}{lo:016x}")
+}
+
+fn generated_span_id(request_id: u64) -> String {
+    format!("{:016x}", crate::stable_hash64(&request_id.to_be_bytes()))
 }
 
 fn resolve_primary_from_radix_prefix<T>(
@@ -577,6 +666,7 @@ impl QUICListener {
             Arc::clone(&shared_state.metrics),
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
+        Self::spawn_control_api_endpoint(config, shared_state, worker_count);
         Self::spawn_watchdog(
             config,
             Arc::clone(&shared_state.metrics),
@@ -1401,6 +1491,7 @@ impl QUICListener {
                 self.request_buffer_global_cap_bytes,
                 self.unknown_length_response_prebuffer_bytes,
                 self.client_body_idle_timeout,
+                self.config.observability.tracing.enabled,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -1640,6 +1731,7 @@ impl QUICListener {
         request_buffer_global_cap_bytes: usize,
         unknown_length_response_prebuffer_bytes: usize,
         client_body_idle_timeout: Duration,
+        tracing_enabled: bool,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -1732,6 +1824,10 @@ impl QUICListener {
                         route_queue_permit,
                         request_fin_received,
                         bodyless_mode,
+                        trace_id,
+                        span_id,
+                        traceparent,
+                        trace_span,
                         request_id,
                     ) = match resolved {
                         Ok((upstream_name, addr, idx, upstream_pool)) => {
@@ -1964,6 +2060,33 @@ impl QUICListener {
                             }
 
                             let request_id = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+                            let incoming_traceparent = extract_header_value(&list, b"traceparent")
+                                .and_then(parse_traceparent);
+                            let trace_id = incoming_traceparent
+                                .as_ref()
+                                .map(|(trace_id, _)| trace_id.clone())
+                                .or_else(|| {
+                                    tracing_enabled.then(|| {
+                                        generated_trace_id(connection.quic.trace_id(), request_id)
+                                    })
+                                });
+                            let span_id = trace_id.as_ref().map(|_| generated_span_id(request_id));
+                            let traceparent = trace_id
+                                .as_ref()
+                                .zip(span_id.as_ref())
+                                .map(|(trace_id, span_id)| format!("00-{trace_id}-{span_id}-01"));
+                            let trace_span = trace_id.as_ref().zip(span_id.as_ref()).map(
+                                |(trace_id, span_id)| {
+                                    info_span!(
+                                        "spooky.request",
+                                        request_id = request_id,
+                                        trace_id = %trace_id,
+                                        span_id = %span_id,
+                                        method = %method,
+                                        path = %path
+                                    )
+                                },
+                            );
                             let content_length = request_content_length(&list);
                             let bodyless_mode = content_length.unwrap_or(0) == 0
                                 && (method.eq_ignore_ascii_case("GET")
@@ -1988,6 +2111,7 @@ impl QUICListener {
                                     client_addr: connection.peer_address,
                                     request_authority: authority.as_deref(),
                                     request_id,
+                                    traceparent: traceparent.as_deref(),
                                 },
                             ) {
                                 Ok(request) => request,
@@ -2030,6 +2154,7 @@ impl QUICListener {
                             let authority_owned = authority.clone();
                             let client_addr = connection.peer_address;
                             let headers_owned = list.clone();
+                            let traceparent_for_upstream = traceparent.clone();
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
                                 let mut hedge_telemetry = crate::HedgeTelemetry::default();
@@ -2077,6 +2202,8 @@ impl QUICListener {
                                                         request_authority: authority_owned
                                                             .as_deref(),
                                                         request_id,
+                                                        traceparent: traceparent_for_upstream
+                                                            .as_deref(),
                                                     },
                                                 )
                                                 .ok()
@@ -2171,6 +2298,8 @@ impl QUICListener {
                                                             request_authority: authority_owned
                                                                 .as_deref(),
                                                             request_id,
+                                                            traceparent: traceparent_for_upstream
+                                                                .as_deref(),
                                                         },
                                                     )
                                                 {
@@ -2219,6 +2348,10 @@ impl QUICListener {
                                 Some(route_queue_permit),
                                 request_fin_received,
                                 bodyless_mode,
+                                trace_id,
+                                span_id,
+                                traceparent,
+                                trace_span,
                                 request_id,
                             )
                         }
@@ -2288,6 +2421,10 @@ impl QUICListener {
                         stream_id,
                         RequestEnvelope {
                             request_id,
+                            trace_id,
+                            span_id,
+                            traceparent,
+                            trace_span,
                             method,
                             path,
                             authority,
@@ -3356,10 +3493,14 @@ impl QUICListener {
     }
 
     fn log_access(req: &RequestEnvelope, status: u16) {
+        let trace_id = req.trace_id.as_deref().unwrap_or("-");
+        let span_id = req.span_id.as_deref().unwrap_or("-");
         match req.error_kind {
             Some(e) => info!(
-                "request_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={} error={}",
+                "request_id={} trace_id={} span_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={} error={}",
                 req.request_id,
+                trace_id,
+                span_id,
                 req.method,
                 req.path,
                 status,
@@ -3370,8 +3511,10 @@ impl QUICListener {
                 e,
             ),
             None => info!(
-                "request_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={}",
+                "request_id={} trace_id={} span_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={}",
                 req.request_id,
+                trace_id,
+                span_id,
                 req.method,
                 req.path,
                 status,
@@ -3773,6 +3916,234 @@ impl QUICListener {
         {
             Ok(resp) => resp,
             Err(_) => Response::new(Full::new(Bytes::from_static(b"failed to render metrics\n"))),
+        }
+    }
+
+    fn spawn_control_api_endpoint(
+        config: &SpookyConfig,
+        shared_state: &SharedRuntimeState,
+        worker_count: usize,
+    ) {
+        let endpoint = &config.observability.control_api;
+        if !endpoint.enabled {
+            return;
+        }
+
+        let bind = format!("{}:{}", endpoint.address, endpoint.port);
+        let paths = ControlApiPaths {
+            health_path: endpoint.health_path.clone(),
+            ready_path: endpoint.ready_path.clone(),
+            runtime_path: endpoint.runtime_path.clone(),
+            restart_path: endpoint.restart_path.clone(),
+        };
+        let state = ControlApiState {
+            metrics: Arc::clone(&shared_state.metrics),
+            resilience: Arc::clone(&shared_state.resilience),
+            watchdog: Arc::clone(&shared_state.watchdog),
+            upstream_pools: shared_state.upstream_pools.clone(),
+            expected_workers: worker_count.max(1),
+            started_at: Instant::now(),
+        };
+
+        let handle = match runtime_handle() {
+            Some(handle) => handle,
+            None => {
+                error!("Control API disabled (no Tokio runtime available)");
+                return;
+            }
+        };
+
+        let std_listener = match std::net::TcpListener::bind(&bind) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!("Failed to bind control API endpoint {}: {}", bind, err);
+                return;
+            }
+        };
+        if let Err(err) = std_listener.set_nonblocking(true) {
+            error!(
+                "Failed to set control API endpoint listener nonblocking ({}): {}",
+                bind, err
+            );
+            return;
+        }
+        let listener = match tokio::net::TcpListener::from_std(std_listener) {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!(
+                    "Failed to register control API endpoint listener {}: {}",
+                    bind, err
+                );
+                return;
+            }
+        };
+
+        spawn_supervised_async_task(
+            &handle,
+            "control-api-endpoint",
+            Some(Arc::clone(&shared_state.metrics)),
+            async move {
+                info!(
+                    "Control API endpoint listening on http://{}{} (ready={}, runtime={})",
+                    bind, paths.health_path, paths.ready_path, paths.runtime_path
+                );
+
+                loop {
+                    let (stream, _peer) = match listener.accept().await {
+                        Ok(v) => v,
+                        Err(err) => {
+                            error!("Control API endpoint accept failed: {}", err);
+                            continue;
+                        }
+                    };
+
+                    let io = TokioIo::new(stream);
+                    let paths = paths.clone();
+                    let state = state.clone();
+
+                    tokio::spawn(async move {
+                        let service = service_fn(move |req: Request<Incoming>| {
+                            let paths = paths.clone();
+                            let state = state.clone();
+                            async move {
+                                Ok::<_, hyper::Error>(Self::handle_control_api_request(
+                                    req, &paths, &state,
+                                ))
+                            }
+                        });
+
+                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
+                        {
+                            error!("Control API endpoint connection failed: {}", err);
+                        }
+                    });
+                }
+            },
+        );
+    }
+
+    fn json_response(status: StatusCode, value: serde_json::Value) -> Response<Full<Bytes>> {
+        match Response::builder()
+            .status(status)
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(value.to_string())))
+        {
+            Ok(resp) => resp,
+            Err(_) => Response::new(Full::new(Bytes::from_static(b"{\"error\":\"response\"}"))),
+        }
+    }
+
+    fn handle_control_api_request(
+        req: Request<Incoming>,
+        paths: &ControlApiPaths,
+        state: &ControlApiState,
+    ) -> Response<Full<Bytes>> {
+        let path = req.uri().path();
+
+        if req.method() == http::Method::GET && path == paths.health_path {
+            let response = json!({
+                "status": "ok",
+                "uptime_ms": state.started_at.elapsed().as_millis() as u64,
+                "watchdog": {
+                    "enabled": state.watchdog.enabled(),
+                    "degraded": state.watchdog.is_degraded(),
+                    "restart_requested": state.watchdog.restart_requested(),
+                },
+            });
+            return Self::json_response(StatusCode::OK, response);
+        }
+
+        if req.method() == http::Method::GET && path == paths.ready_path {
+            let (healthy_backends, total_backends) = state.snapshot_backend_health();
+            let restart_requested = state.watchdog.restart_requested();
+            let ready = !restart_requested && (total_backends == 0 || healthy_backends > 0);
+            let response = json!({
+                "ready": ready,
+                "healthy_backends": healthy_backends,
+                "total_backends": total_backends,
+                "restart_requested": restart_requested,
+            });
+            return Self::json_response(
+                if ready {
+                    StatusCode::OK
+                } else {
+                    StatusCode::SERVICE_UNAVAILABLE
+                },
+                response,
+            );
+        }
+
+        if req.method() == http::Method::GET && path == paths.runtime_path {
+            let (healthy_backends, total_backends) = state.snapshot_backend_health();
+            let response = json!({
+                "uptime_ms": state.started_at.elapsed().as_millis() as u64,
+                "workers": {
+                    "expected": state.expected_workers,
+                },
+                "watchdog": {
+                    "enabled": state.watchdog.enabled(),
+                    "degraded": state.watchdog.is_degraded(),
+                    "restart_requested": state.watchdog.restart_requested(),
+                    "restart_reason": state.watchdog.restart_reason(),
+                    "restart_requested_at_ms": state.watchdog.restart_requested_at_ms(),
+                },
+                "adaptive_admission": {
+                    "enabled": state.resilience.adaptive_admission.enabled(),
+                    "current_limit": state.resilience.adaptive_admission.current_limit(),
+                    "inflight_percent": state.resilience.adaptive_admission.inflight_percent(),
+                },
+                "backends": {
+                    "healthy": healthy_backends,
+                    "total": total_backends,
+                },
+                "metrics": {
+                    "requests_total": state.metrics.requests_total.load(Ordering::Relaxed),
+                    "requests_success": state.metrics.requests_success.load(Ordering::Relaxed),
+                    "requests_failure": state.metrics.requests_failure.load(Ordering::Relaxed),
+                    "active_connections": state.metrics.active_connections.load(Ordering::Relaxed),
+                    "backend_timeouts": state.metrics.backend_timeouts.load(Ordering::Relaxed),
+                    "backend_errors": state.metrics.backend_errors.load(Ordering::Relaxed),
+                },
+                "extension_model": {
+                    "status": "non_goal",
+                    "details": "No plugin/middleware ABI is exposed in-process today; extension support remains a deliberate non-goal until a safe isolation model is designed.",
+                },
+            });
+            return Self::json_response(StatusCode::OK, response);
+        }
+
+        if req.method() == http::Method::POST && path == paths.restart_path {
+            if !state.watchdog.enabled() {
+                return Self::json_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({
+                        "accepted": false,
+                        "error": "watchdog disabled",
+                    }),
+                );
+            }
+
+            let accepted = state.watchdog.request_restart("admin_runtime_api");
+            return Self::json_response(
+                if accepted {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::CONFLICT
+                },
+                json!({
+                    "accepted": accepted,
+                    "restart_requested": state.watchdog.restart_requested(),
+                    "reason": if accepted { "admin_runtime_api" } else { "restart pending or cooldown active" },
+                }),
+            );
+        }
+
+        match Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::new(Bytes::from_static(b"not found\n")))
+        {
+            Ok(resp) => resp,
+            Err(_) => Response::new(Full::new(Bytes::from_static(b"not found\n"))),
         }
     }
 
@@ -4728,6 +5099,10 @@ mod tests {
     fn make_envelope(phase: StreamPhase) -> RequestEnvelope {
         RequestEnvelope {
             request_id: REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            trace_id: None,
+            span_id: None,
+            traceparent: None,
+            trace_span: None,
             method: "GET".into(),
             path: "/".into(),
             authority: None,
@@ -4932,5 +5307,18 @@ mod tests {
             1,
             "must not double-release permit"
         );
+    }
+
+    #[test]
+    fn traceparent_parser_accepts_valid_value() {
+        let parsed =
+            super::parse_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01");
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn traceparent_parser_rejects_invalid_value() {
+        let parsed = super::parse_traceparent("00-xyz-123-01");
+        assert!(parsed.is_none());
     }
 }

@@ -104,6 +104,10 @@ impl AdaptiveAdmission {
         let limit = self.current_limit().max(1);
         ((self.inflight() * 100) / limit).min(100) as u8
     }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
 }
 
 pub struct AdaptivePermit {

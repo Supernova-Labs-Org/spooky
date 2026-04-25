@@ -343,6 +343,38 @@ pub fn observe_default_metrics_path() -> String {
     String::from("/metrics")
 }
 
+pub fn observe_default_control_api_address() -> String {
+    String::from("127.0.0.1")
+}
+
+pub fn observe_default_control_api_port() -> u16 {
+    9902
+}
+
+pub fn observe_default_control_api_health_path() -> String {
+    String::from("/health")
+}
+
+pub fn observe_default_control_api_ready_path() -> String {
+    String::from("/ready")
+}
+
+pub fn observe_default_control_api_runtime_path() -> String {
+    String::from("/admin/runtime")
+}
+
+pub fn observe_default_control_api_restart_path() -> String {
+    String::from("/admin/runtime/restart")
+}
+
+pub fn observe_default_tracing_service_name() -> String {
+    String::from("spooky")
+}
+
+pub fn observe_default_tracing_sample_ratio() -> f64 {
+    1.0
+}
+
 pub fn upstream_tls_default_verify_certificates() -> bool {
     true
 }

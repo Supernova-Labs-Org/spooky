@@ -7,7 +7,11 @@ use crate::default::{
     get_default_health_timeout, get_default_interval, get_default_load_balancing, get_default_log,
     get_default_log_file_path, get_default_log_level, get_default_path, get_default_port,
     get_default_protocol, get_default_success_threshold, get_default_version, get_default_weight,
-    observe_default_address, observe_default_metrics_path, observe_default_port,
+    observe_default_address, observe_default_control_api_address,
+    observe_default_control_api_health_path, observe_default_control_api_port,
+    observe_default_control_api_ready_path, observe_default_control_api_restart_path,
+    observe_default_control_api_runtime_path, observe_default_metrics_path, observe_default_port,
+    observe_default_tracing_sample_ratio, observe_default_tracing_service_name,
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
     perf_default_backend_total_request_timeout_ms, perf_default_client_body_idle_timeout_ms,
@@ -680,6 +684,10 @@ impl Default for Watchdog {
 pub struct Observability {
     #[serde(default)]
     pub metrics: MetricsEndpoint,
+    #[serde(default)]
+    pub control_api: ControlApi,
+    #[serde(default)]
+    pub tracing: Tracing,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -704,6 +712,70 @@ impl Default for MetricsEndpoint {
             address: observe_default_address(),
             port: observe_default_port(),
             path: observe_default_metrics_path(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct ControlApi {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "observe_default_control_api_address")]
+    pub address: String,
+
+    #[serde(default = "observe_default_control_api_port")]
+    pub port: u16,
+
+    #[serde(default = "observe_default_control_api_health_path")]
+    pub health_path: String,
+
+    #[serde(default = "observe_default_control_api_ready_path")]
+    pub ready_path: String,
+
+    #[serde(default = "observe_default_control_api_runtime_path")]
+    pub runtime_path: String,
+
+    #[serde(default = "observe_default_control_api_restart_path")]
+    pub restart_path: String,
+}
+
+impl Default for ControlApi {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            address: observe_default_control_api_address(),
+            port: observe_default_control_api_port(),
+            health_path: observe_default_control_api_health_path(),
+            ready_path: observe_default_control_api_ready_path(),
+            runtime_path: observe_default_control_api_runtime_path(),
+            restart_path: observe_default_control_api_restart_path(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct Tracing {
+    #[serde(default)]
+    pub enabled: bool,
+
+    #[serde(default = "observe_default_tracing_service_name")]
+    pub service_name: String,
+
+    #[serde(default)]
+    pub otlp_endpoint: Option<String>,
+
+    #[serde(default = "observe_default_tracing_sample_ratio")]
+    pub sample_ratio: f64,
+}
+
+impl Default for Tracing {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            service_name: observe_default_tracing_service_name(),
+            otlp_endpoint: None,
+            sample_ratio: observe_default_tracing_sample_ratio(),
         }
     }
 }

@@ -94,6 +94,12 @@ Use a port >= 1024 for unprivileged startup.",
         &config_yaml.log.file.path,
         config_yaml.log.format == spooky_config::config::LogFormat::Json,
     );
+    spooky_utils::telemetry::init_tracing(
+        config_yaml.observability.tracing.enabled,
+        &config_yaml.observability.tracing.service_name,
+        config_yaml.observability.tracing.otlp_endpoint.as_deref(),
+        config_yaml.observability.tracing.sample_ratio,
+    );
     runtime_guard::install_panic_hook();
 
     // Validate Configurations
@@ -247,8 +253,10 @@ Deploy an external HTTP/1.1 or HTTP/2 terminator in front if legacy clients must
     }
 
     if worker_failed {
+        spooky_utils::telemetry::shutdown_tracing();
         std::process::exit(1);
     }
+    spooky_utils::telemetry::shutdown_tracing();
     info!("Spooky shutdown complete");
 }
 

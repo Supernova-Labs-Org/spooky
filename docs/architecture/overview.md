@@ -371,7 +371,7 @@ Distributed tracing via OpenTelemetry (planned).
 
 ### Planned Features
 
-- Hot configuration reload without restart
+- Hot configuration reload without restart (planned)
 - Prometheus metrics endpoint
 - OpenTelemetry distributed tracing
 - Mutual TLS to backends

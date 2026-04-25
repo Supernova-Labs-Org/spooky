@@ -1,8 +1,8 @@
-use crate::config::{LoadBalancing, Log, LogFile, LogFormat};
+use crate::config::{CURRENT_CONFIG_VERSION, LoadBalancing, Log, LogFile, LogFormat};
 
 // default values
 pub fn get_default_version() -> u32 {
-    1
+    CURRENT_CONFIG_VERSION
 }
 
 pub fn get_default_protocol() -> String {

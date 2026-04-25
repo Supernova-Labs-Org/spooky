@@ -24,7 +24,7 @@ cargo build --release
 make certs-selfsigned
 
 # Run with default configuration
-./target/release/spooky --config config/config.yaml
+./target/release/spooky --config config/config.development.yaml
 
 # Test with HTTP/3 client
 curl --http3-only -k \
@@ -53,6 +53,12 @@ brew install cmake pkg-config
 ## Configuration
 
 Spooky uses YAML configuration with validation at startup. See [configuration reference](docs/configuration/reference.md) for complete documentation.
+
+Repository config templates:
+
+- `config/config.production.yaml`: secure production baseline (`upstream_tls.verify_certificates=true`)
+- `config/config.development.yaml`: explicit local-development profile (allows insecure upstream TLS)
+- `config/config.sample.yaml`: full reference sample with all major sections
 
 ### Ingress Compatibility Posture
 
@@ -231,7 +237,7 @@ See [contributing guide](CONTRIBUTING.md) for development setup and guidelines.
 cargo build
 
 # Run with debug logging
-RUST_LOG=debug cargo run -- --config config/config.yaml
+RUST_LOG=debug cargo run -- --config config/config.development.yaml
 
 # Format code
 cargo fmt

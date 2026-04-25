@@ -47,6 +47,9 @@ use crate::default::{
     upstream_tls_default_verify_certificates,
 };
 
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+pub const SUPPORTED_CONFIG_VERSIONS: &[u32] = &[CURRENT_CONFIG_VERSION];
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "get_default_version")] // Make version optional with default
@@ -425,6 +428,8 @@ pub struct AdaptiveAdmission {
     pub enabled: bool,
     #[serde(default = "resilience_default_adaptive_min_limit")]
     pub min_limit: usize,
+    #[serde(default)]
+    pub max_limit: Option<usize>,
     #[serde(default = "resilience_default_adaptive_decrease_step")]
     pub decrease_step: usize,
     #[serde(default = "resilience_default_adaptive_increase_step")]
@@ -439,14 +444,24 @@ impl Resilience {
             return Err(format!(
                 "resilience.brownout: recover_inflight_percent ({}) must be \
                  less than trigger_inflight_percent ({})",
-                self.brownout.recover_inflight_percent,
-                self.brownout.trigger_inflight_percent,
+                self.brownout.recover_inflight_percent, self.brownout.trigger_inflight_percent,
             ));
         }
         if self.adaptive_admission.min_limit == 0 {
-            return Err(
-                "resilience.adaptive_admission: min_limit must be > 0".into(),
-            );
+            return Err("resilience.adaptive_admission: min_limit must be > 0".into());
+        }
+        if let Some(max_limit) = self.adaptive_admission.max_limit {
+            if max_limit == 0 {
+                return Err(
+                    "resilience.adaptive_admission: max_limit must be > 0 when provided".into(),
+                );
+            }
+            if max_limit < self.adaptive_admission.min_limit {
+                return Err(format!(
+                    "resilience.adaptive_admission: max_limit ({}) must be >= min_limit ({})",
+                    max_limit, self.adaptive_admission.min_limit
+                ));
+            }
         }
         if self.retry_budget.ratio_percent > 100 {
             return Err(format!(
@@ -455,9 +470,7 @@ impl Resilience {
             ));
         }
         if self.hedging.enabled && self.hedging.delay_ms == 0 {
-            return Err(
-                "resilience.hedging: delay_ms must be > 0 when hedging is enabled".into(),
-            );
+            return Err("resilience.hedging: delay_ms must be > 0 when hedging is enabled".into());
         }
         Ok(())
     }
@@ -468,6 +481,7 @@ impl Default for AdaptiveAdmission {
         Self {
             enabled: resilience_default_adaptive_enabled(),
             min_limit: resilience_default_adaptive_min_limit(),
+            max_limit: None,
             decrease_step: resilience_default_adaptive_decrease_step(),
             increase_step: resilience_default_adaptive_increase_step(),
             high_latency_ms: resilience_default_adaptive_high_latency_ms(),

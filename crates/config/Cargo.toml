@@ -7,7 +7,7 @@ license.workspace = true
 [dependencies]
 log.workspace = true
 serde.workspace = true
-serde_yaml.workspace = true
+serde_yml.workspace = true
 rustls-pemfile.workspace = true
 
 [dev-dependencies]

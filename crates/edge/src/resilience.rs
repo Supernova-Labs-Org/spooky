@@ -449,10 +449,11 @@ pub struct RuntimeResilience {
 impl RuntimeResilience {
     pub fn from_config(config: &ResilienceConfig, global_limit: usize) -> Self {
         let adaptive = &config.adaptive_admission;
+        let adaptive_max_limit = adaptive.max_limit.unwrap_or(global_limit);
         let admission = Arc::new(AdaptiveAdmission::new(
             adaptive.enabled,
             adaptive.min_limit,
-            global_limit.max(adaptive.min_limit),
+            adaptive_max_limit.max(adaptive.min_limit),
             adaptive.increase_step,
             adaptive.decrease_step,
             adaptive.high_latency_ms,
@@ -571,6 +572,14 @@ mod tests {
         assert_eq!(admission.current_limit(), 7);
         admission.observe(Duration::from_millis(10), false);
         assert_eq!(admission.current_limit(), 9);
+    }
+
+    #[test]
+    fn runtime_resilience_honors_adaptive_max_limit_override() {
+        let mut cfg = ResilienceConfig::default();
+        cfg.adaptive_admission.max_limit = Some(256);
+        let runtime = RuntimeResilience::from_config(&cfg, 4096);
+        assert_eq!(runtime.adaptive_admission.current_limit(), 256);
     }
 
     #[test]

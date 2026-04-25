@@ -78,6 +78,10 @@ log:
 
 Configuration schema version.
 
+- Current version: `1`
+- Supported versions: `1`
+- Backward-compatibility policy: unsupported versions are rejected at load time, and version-specific migration hooks are used when introducing future schema versions.
+
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `version` | integer | No | 1 | Configuration schema version |
@@ -582,6 +586,7 @@ Dynamically adjusts the global in-flight request limit based on observed backend
 |----------|------|----------|---------|-------------|
 | `enabled` | bool | No | `true` | Enable adaptive admission control |
 | `min_limit` | integer | No | `64` | Floor for the dynamic in-flight limit; must be > 0 |
+| `max_limit` | integer | No | `performance.global_inflight_limit` | Optional ceiling for the adaptive in-flight limit; must be >= `min_limit` and <= `performance.global_inflight_limit` |
 | `decrease_step` | integer | No | `16` | Amount to subtract from the limit on high-latency observation |
 | `increase_step` | integer | No | `16` | Amount to add to the limit on healthy-latency observation |
 | `high_latency_ms` | integer | No | `500` | Latency threshold (ms) above which the limit is decreased |
@@ -679,6 +684,9 @@ The following resilience configurations are rejected at startup with a descripti
 |-----------|-------|
 | `recover_inflight_percent >= trigger_inflight_percent` | brownout hysteresis inverted |
 | `adaptive_admission.min_limit == 0` | min_limit must be > 0 |
+| `adaptive_admission.max_limit == 0` | max_limit must be > 0 when provided |
+| `adaptive_admission.max_limit < adaptive_admission.min_limit` | max_limit must be >= min_limit |
+| `adaptive_admission.max_limit > performance.global_inflight_limit` | max_limit must be <= global_inflight_limit |
 | `retry_budget.ratio_percent > 100` | ratio_percent must be 0–100 |
 | `hedging.enabled && delay_ms == 0` | delay_ms must be > 0 when hedging is enabled |
 
@@ -689,6 +697,7 @@ resilience:
   adaptive_admission:
     enabled: true
     min_limit: 64
+    max_limit: 4096
     high_latency_ms: 500
 
   circuit_breaker:

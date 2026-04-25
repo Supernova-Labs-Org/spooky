@@ -191,17 +191,16 @@ The metrics path is configurable (`observability.metrics.path`) and defaults to 
 
 ### Admin API
 
-**Status**: Future capability
+**Status**: Available (control API)
 
-Administrative API endpoints are planned for runtime management and observability:
+Administrative API endpoints are available for runtime management and observability when `observability.control_api.enabled=true`.
 
-#### Planned Admin Capabilities
+#### Control API Endpoints
 
-- **Health endpoint**: Spooky instance health status and backend health aggregation
-- **Metrics endpoint**: Real-time operational metrics exposition
-- **Configuration reload (planned)**: Dynamic configuration updates without restart
-- **Connection management**: View active connections, drain connections gracefully
-- **Backend management**: Enable/disable backends, adjust weights dynamically
+- `GET /health`: Process liveness and watchdog state
+- `GET /ready`: Readiness state based on restart drain state and backend health
+- `GET /admin/runtime`: Runtime snapshot (worker count, adaptive admission state, key counters, backend health)
+- `POST /admin/runtime/restart`: Request safe restart/drain cycle via watchdog coordinator
 
 ## Health Check API
 
@@ -237,24 +236,23 @@ Content-Type: application/json
 
 ### Spooky Health Endpoint
 
-**Status**: Future feature
+**Status**: Available (control API)
 
-A dedicated health endpoint for the Spooky instance is planned for future implementation:
+A dedicated health endpoint is exposed on the control API address/port:
 
 ```http
 GET /health HTTP/1.1
 ```
 
-Planned response format:
+Response format (example):
 ```json
 {
-  "status": "healthy",
-  "version": "0.1.0",
-  "uptime": 3600,
-  "backends": {
-    "web-01": "healthy",
-    "web-02": "healthy",
-    "api-01": "unhealthy"
+  "status": "ok",
+  "uptime_ms": 3600,
+  "watchdog": {
+    "enabled": true,
+    "degraded": false,
+    "restart_requested": false
   }
 }
 ```

@@ -660,7 +660,7 @@ pub fn validate(config: &Config) -> bool;
 
 **Configuration Loading:**
 1. Read file from path
-2. Parse YAML via serde_yaml
+2. Parse YAML via serde_yml
 3. Apply default values via serde defaults
 4. Return Config or error message
 
@@ -694,24 +694,17 @@ pub fn validate(config: &Config) -> bool;
 ### Dependencies
 
 - `serde`: Serialization framework
-- `serde_yaml`: YAML parsing
+- `serde_yml`: YAML parsing
 - `log`: Logging
 
 ## Utilities (`spooky-utils`)
 
 ### Responsibilities
 
-- TLS certificate and key loading
 - Logging initialization
 - Common helper functions
 
 ### Modules
-
-**tls.rs:**
-```rust
-pub fn load_certs(path: &str) -> Result<Vec<Certificate>, String>;
-pub fn load_private_key(path: &str) -> Result<PrivateKey, String>;
-```
 
 **logger.rs:**
 ```rust
@@ -720,12 +713,6 @@ pub fn init_logger(level: &str);
 
 ### Implementation Details
 
-**TLS Loading:**
-- Reads PEM files from filesystem
-- Parses DER-encoded certificates
-- Validates format
-- Returns rustls-compatible types
-
 **Logger Initialization:**
 - Configures env_logger with specified level
 - Maps custom log levels (if configured)
@@ -733,7 +720,6 @@ pub fn init_logger(level: &str);
 
 ### Dependencies
 
-- `rustls-pki-types`: TLS types
 - `env_logger`: Logging implementation
 - `log`: Logging facade
 

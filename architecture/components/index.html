@@ -1490,7 +1490,7 @@ pub fn validate(config: &amp;Config) -&gt; bool;
 <h3 id="implementation-details_4">Implementation Details</h3>
 <p><strong>Configuration Loading:</strong>
 1. Read file from path
-2. Parse YAML via serde_yaml
+2. Parse YAML via serde_yml
 3. Apply default values via serde defaults
 4. Return Config or error message</p>
 <p><strong>Default Values:</strong>
@@ -1520,37 +1520,26 @@ pub fn validate(config: &amp;Config) -&gt; bool;
 <h3 id="dependencies_5">Dependencies</h3>
 <ul>
 <li><code>serde</code>: Serialization framework</li>
-<li><code>serde_yaml</code>: YAML parsing</li>
+<li><code>serde_yml</code>: YAML parsing</li>
 <li><code>log</code>: Logging</li>
 </ul>
 <h2 id="utilities-spooky-utils">Utilities (<code>spooky-utils</code>)</h2>
 <h3 id="responsibilities_6">Responsibilities</h3>
 <ul>
-<li>TLS certificate and key loading</li>
 <li>Logging initialization</li>
 <li>Common helper functions</li>
 </ul>
 <h3 id="modules">Modules</h3>
-<p><strong>tls.rs:</strong></p>
-<pre><code class="language-rust">pub fn load_certs(path: &amp;str) -&gt; Result&lt;Vec&lt;Certificate&gt;, String&gt;;
-pub fn load_private_key(path: &amp;str) -&gt; Result&lt;PrivateKey, String&gt;;
-</code></pre>
 <p><strong>logger.rs:</strong></p>
 <pre><code class="language-rust">pub fn init_logger(level: &amp;str);
 </code></pre>
 <h3 id="implementation-details_5">Implementation Details</h3>
-<p><strong>TLS Loading:</strong>
-- Reads PEM files from filesystem
-- Parses DER-encoded certificates
-- Validates format
-- Returns rustls-compatible types</p>
 <p><strong>Logger Initialization:</strong>
 - Configures env_logger with specified level
 - Maps custom log levels (if configured)
 - Enables timestamp and module path</p>
 <h3 id="dependencies_6">Dependencies</h3>
 <ul>
-<li><code>rustls-pki-types</code>: TLS types</li>
 <li><code>env_logger</code>: Logging implementation</li>
 <li><code>log</code>: Logging facade</li>
 </ul>

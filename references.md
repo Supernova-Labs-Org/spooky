@@ -35,7 +35,7 @@ Technical references and external resources for Spooky development.
 
 ### Serialization
 - [serde](https://docs.rs/serde/) - Serialization framework
-- [serde_yaml](https://docs.rs/serde_yaml/) - YAML support for serde
+- [serde_yml](https://docs.rs/serde_yml/) - YAML support for serde
 
 ### CLI and Configuration
 - [clap](https://docs.rs/clap/) - Command-line argument parser

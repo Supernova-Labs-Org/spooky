@@ -8,7 +8,7 @@ Technical reference for diagnosing and resolving operational issues in Spooky HT
 
 **Error Messages**:
 ```
-Invalid version: expected '1', found '2'
+Invalid version: found '2', supported versions are [1]
 Invalid protocol: expected 'http3', found 'http2'
 Invalid log level: debug-verbose
 Invalid load balancing type: 'weighted' for upstream 'api'
@@ -36,7 +36,7 @@ grep "load_balancing:" -A 2 config.yaml
 ```
 
 **Resolution**:
-- Set `version: 1` in configuration file
+- Set `version` to one of the supported schema versions (currently: `1`)
 - Use `protocol: http3` for listen configuration
 - Correct log levels according to valid options
 - Update load balancing type to supported algorithms

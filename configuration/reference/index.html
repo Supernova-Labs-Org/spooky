@@ -941,6 +941,11 @@ log:
 <h2 id="top-level-configuration">Top-Level Configuration</h2>
 <h3 id="version">version</h3>
 <p>Configuration schema version.</p>
+<ul>
+<li>Current version: <code>1</code></li>
+<li>Supported versions: <code>1</code></li>
+<li>Backward-compatibility policy: unsupported versions are rejected at load time, and version-specific migration hooks are used when introducing future schema versions.</li>
+</ul>
 <div class="table-wrapper"><table>
 <thead>
 <tr>
@@ -1932,6 +1937,13 @@ performance:
 <td>Floor for the dynamic in-flight limit; must be &gt; 0</td>
 </tr>
 <tr>
+<td><code>max_limit</code></td>
+<td>integer</td>
+<td>No</td>
+<td><code>performance.global_inflight_limit</code></td>
+<td>Optional ceiling for the adaptive in-flight limit; must be &gt;= <code>min_limit</code> and &lt;= <code>performance.global_inflight_limit</code></td>
+</tr>
+<tr>
 <td><code>decrease_step</code></td>
 <td>integer</td>
 <td>No</td>
@@ -2330,6 +2342,18 @@ performance:
 <td>min_limit must be &gt; 0</td>
 </tr>
 <tr>
+<td><code>adaptive_admission.max_limit == 0</code></td>
+<td>max_limit must be &gt; 0 when provided</td>
+</tr>
+<tr>
+<td><code>adaptive_admission.max_limit &lt; adaptive_admission.min_limit</code></td>
+<td>max_limit must be &gt;= min_limit</td>
+</tr>
+<tr>
+<td><code>adaptive_admission.max_limit &gt; performance.global_inflight_limit</code></td>
+<td>max_limit must be &lt;= global_inflight_limit</td>
+</tr>
+<tr>
 <td><code>retry_budget.ratio_percent &gt; 100</code></td>
 <td>ratio_percent must be 0–100</td>
 </tr>
@@ -2344,6 +2368,7 @@ performance:
   adaptive_admission:
     enabled: true
     min_limit: 64
+    max_limit: 4096
     high_latency_ms: 500
 
   circuit_breaker:

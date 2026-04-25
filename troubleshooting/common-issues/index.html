@@ -878,7 +878,7 @@
 <h2 id="configuration-errors">Configuration Errors</h2>
 <h3 id="invalid-configuration-schema">Invalid Configuration Schema</h3>
 <p><strong>Error Messages</strong>:</p>
-<pre><code>Invalid version: expected '1', found '2'
+<pre><code>Invalid version: found '2', supported versions are [1]
 Invalid protocol: expected 'http3', found 'http2'
 Invalid log level: debug-verbose
 Invalid load balancing type: 'weighted' for upstream 'api'
@@ -902,7 +902,7 @@ grep &quot;log:&quot; -A 2 config.yaml
 grep &quot;load_balancing:&quot; -A 2 config.yaml
 </code></pre>
 <p><strong>Resolution</strong>:
-- Set <code>version: 1</code> in configuration file
+- Set <code>version</code> to one of the supported schema versions (currently: <code>1</code>)
 - Use <code>protocol: http3</code> for listen configuration
 - Correct log levels according to valid options
 - Update load balancing type to supported algorithms</p>

@@ -30,7 +30,11 @@ enum HealthState {
     Healthy,
     // `reason` is stored for future introspection; suppressed until wired to metrics
     #[allow(dead_code)]
-    Unhealthy { until: Instant, successes: u32, reason: HealthFailureReason },
+    Unhealthy {
+        until: Instant,
+        successes: u32,
+        reason: HealthFailureReason,
+    },
 }
 
 pub enum HealthTransition {
@@ -78,7 +82,9 @@ impl BackendState {
                 self.consecutive_failures = 0;
                 None
             }
-            HealthState::Unhealthy { until, successes, .. } => {
+            HealthState::Unhealthy {
+                until, successes, ..
+            } => {
                 if Instant::now() < *until {
                     return None;
                 }

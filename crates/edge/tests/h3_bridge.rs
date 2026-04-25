@@ -993,7 +993,6 @@ fn run_h3_client_concurrent_get(
         if finished == paths.len() {
             return Ok(observations);
         }
-
     }
 }
 

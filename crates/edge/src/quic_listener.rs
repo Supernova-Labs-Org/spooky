@@ -35,7 +35,7 @@ use tokio::sync::{
     mpsc::error::{TryRecvError, TrySendError},
     oneshot,
 };
-use tracing::info_span;
+use tracing::{Instrument, info_span};
 
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
@@ -2155,6 +2155,7 @@ impl QUICListener {
                             let client_addr = connection.peer_address;
                             let headers_owned = list.clone();
                             let traceparent_for_upstream = traceparent.clone();
+                            let trace_span_for_upstream = trace_span.clone();
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
                                 let mut hedge_telemetry = crate::HedgeTelemetry::default();
@@ -2333,7 +2334,11 @@ impl QUICListener {
                                     retry_count,
                                 });
                             };
-                            if !spawn_async_task(fut, "upstream") {
+                            let spawned = match trace_span_for_upstream {
+                                Some(span) => spawn_async_task(fut.instrument(span), "upstream"),
+                                None => spawn_async_task(fut, "upstream"),
+                            };
+                            if !spawned {
                                 error!("dropping upstream task: no runtime available");
                             }
                             (
@@ -3079,7 +3084,13 @@ impl QUICListener {
                                 }
                             }
                         };
-                        let spawned = spawn_async_task(fut, "body-pump");
+                        let request_span = streams
+                            .get(&stream_id)
+                            .and_then(|req| req.trace_span.clone());
+                        let spawned = match request_span {
+                            Some(span) => spawn_async_task(fut.instrument(span), "body-pump"),
+                            None => spawn_async_task(fut, "body-pump"),
+                        };
                         if !spawned {
                             let _ = fail_tx.try_send(ResponseChunk::Error(ProxyError::Transport(
                                 "runtime unavailable".into(),
@@ -3495,6 +3506,40 @@ impl QUICListener {
     fn log_access(req: &RequestEnvelope, status: u16) {
         let trace_id = req.trace_id.as_deref().unwrap_or("-");
         let span_id = req.span_id.as_deref().unwrap_or("-");
+        let latency_ms = req.start.elapsed().as_millis() as u64;
+
+        if let Some(span) = req.trace_span.as_ref() {
+            span.in_scope(|| match req.error_kind.as_ref() {
+                Some(e) => tracing::warn!(
+                    request_id = req.request_id,
+                    trace_id = trace_id,
+                    span_id = span_id,
+                    method = %req.method,
+                    path = %req.path,
+                    status = status,
+                    backend = %req.backend_addr.as_deref().unwrap_or("-"),
+                    upstream = %req.upstream_name.as_deref().unwrap_or("-"),
+                    latency_ms = latency_ms,
+                    retries = req.retry_count,
+                    error = %e,
+                    "request completed with error"
+                ),
+                None => tracing::info!(
+                    request_id = req.request_id,
+                    trace_id = trace_id,
+                    span_id = span_id,
+                    method = %req.method,
+                    path = %req.path,
+                    status = status,
+                    backend = %req.backend_addr.as_deref().unwrap_or("-"),
+                    upstream = %req.upstream_name.as_deref().unwrap_or("-"),
+                    latency_ms = latency_ms,
+                    retries = req.retry_count,
+                    "request completed"
+                ),
+            });
+        }
+
         match req.error_kind {
             Some(e) => info!(
                 "request_id={} trace_id={} span_id={} method={} path={} status={} backend={} upstream={} latency_ms={} retries={} error={}",
@@ -3506,7 +3551,7 @@ impl QUICListener {
                 status,
                 req.backend_addr.as_deref().unwrap_or("-"),
                 req.upstream_name.as_deref().unwrap_or("-"),
-                req.start.elapsed().as_millis(),
+                latency_ms,
                 req.retry_count,
                 e,
             ),
@@ -3520,7 +3565,7 @@ impl QUICListener {
                 status,
                 req.backend_addr.as_deref().unwrap_or("-"),
                 req.upstream_name.as_deref().unwrap_or("-"),
-                req.start.elapsed().as_millis(),
+                latency_ms,
                 req.retry_count,
             ),
         }

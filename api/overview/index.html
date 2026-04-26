@@ -1038,15 +1038,14 @@ log:                          # Logging configuration (optional, defaults applie
 <li><strong>System metrics</strong>: Process resource usage, runtime statistics</li>
 </ul>
 <h3 id="admin-api">Admin API</h3>
-<p><strong>Status</strong>: Future capability</p>
-<p>Administrative API endpoints are planned for runtime management and observability:</p>
-<h4 id="planned-admin-capabilities">Planned Admin Capabilities</h4>
+<p><strong>Status</strong>: Available (control API)</p>
+<p>Administrative API endpoints are available for runtime management and observability when <code>observability.control_api.enabled=true</code>.</p>
+<h4 id="control-api-endpoints">Control API Endpoints</h4>
 <ul>
-<li><strong>Health endpoint</strong>: Spooky instance health status and backend health aggregation</li>
-<li><strong>Metrics endpoint</strong>: Real-time operational metrics exposition</li>
-<li><strong>Configuration reload (planned)</strong>: Dynamic configuration updates without restart</li>
-<li><strong>Connection management</strong>: View active connections, drain connections gracefully</li>
-<li><strong>Backend management</strong>: Enable/disable backends, adjust weights dynamically</li>
+<li><code>GET /health</code>: Process liveness and watchdog state</li>
+<li><code>GET /ready</code>: Readiness state based on restart drain state and backend health</li>
+<li><code>GET /admin/runtime</code>: Runtime snapshot (worker count, adaptive admission state, key counters, backend health)</li>
+<li><code>POST /admin/runtime/restart</code>: Request safe restart/drain cycle via watchdog coordinator</li>
 </ul>
 <h2 id="health-check-api">Health Check API</h2>
 <h3 id="backend-health-checks">Backend Health Checks</h3>
@@ -1070,19 +1069,18 @@ Content-Type: application/json
 {&quot;status&quot;: &quot;unhealthy&quot;, &quot;reason&quot;: &quot;database connection failed&quot;}
 </code></pre>
 <h3 id="spooky-health-endpoint">Spooky Health Endpoint</h3>
-<p><strong>Status</strong>: Future feature</p>
-<p>A dedicated health endpoint for the Spooky instance is planned for future implementation:</p>
+<p><strong>Status</strong>: Available (control API)</p>
+<p>A dedicated health endpoint is exposed on the control API address/port:</p>
 <pre><code class="language-http">GET /health HTTP/1.1
 </code></pre>
-<p>Planned response format:</p>
+<p>Response format (example):</p>
 <pre><code class="language-json">{
-  &quot;status&quot;: &quot;healthy&quot;,
-  &quot;version&quot;: &quot;0.1.0&quot;,
-  &quot;uptime&quot;: 3600,
-  &quot;backends&quot;: {
-    &quot;web-01&quot;: &quot;healthy&quot;,
-    &quot;web-02&quot;: &quot;healthy&quot;,
-    &quot;api-01&quot;: &quot;unhealthy&quot;
+  &quot;status&quot;: &quot;ok&quot;,
+  &quot;uptime_ms&quot;: 3600,
+  &quot;watchdog&quot;: {
+    &quot;enabled&quot;: true,
+    &quot;degraded&quot;: false,
+    &quot;restart_requested&quot;: false
   }
 }
 </code></pre>

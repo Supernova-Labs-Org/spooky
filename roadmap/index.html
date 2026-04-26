@@ -952,10 +952,8 @@
 <li><strong>Traffic replay</strong>: Record and replay production traffic</li>
 <li><strong>Query logs</strong>: SQL-like queries over request logs</li>
 </ul>
-<h3 id="extensions">Extensions</h3>
+<h3 id="protocol-features">Protocol Features</h3>
 <ul>
-<li><strong>WebAssembly plugins</strong>: Custom routing logic via WASM</li>
-<li><strong>Lua scripting</strong>: Dynamic request/response transformation</li>
 <li><strong>gRPC support</strong>: Native gRPC proxying</li>
 <li><strong>WebSocket support</strong>: WebSocket over HTTP/3</li>
 </ul>
@@ -1010,7 +1008,7 @@
 <ol>
 <li>Dynamic backend discovery - integration complexity</li>
 <li>Advanced load balancing - diminishing returns</li>
-<li>WebAssembly plugins - adds complexity</li>
+<li>Advanced protocol features - adds complexity</li>
 <li>Protocol extensions - limited immediate value</li>
 <li>Multi-tenancy - niche use case</li>
 </ol>
@@ -1041,6 +1039,7 @@
 <li><strong>WAF capabilities</strong>: Use dedicated security tools</li>
 <li><strong>Database proxying</strong>: Use specialized database proxies</li>
 <li><strong>Custom protocols</strong>: Stick to HTTP family</li>
+<li><strong>In-process plugin/extension ABI</strong>: No WASM/eBPF/Lua middleware model until a safe isolation and lifecycle model is defined</li>
 </ul>
 <h2 id="contributing">Contributing</h2>
 <p>Contributions are welcome. See <a href="development/contributing.md">contributing guide</a> for development setup and guidelines.</p>
@@ -1413,10 +1412,10 @@
             Advanced Observability
         </a>
         
-        <a href="#extensions"
+        <a href="#protocol-features"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#extensions');">
-            Extensions
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#protocol-features');">
+            Protocol Features
         </a>
         
         <a href="#high-availability"

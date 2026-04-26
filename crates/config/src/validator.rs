@@ -606,6 +606,60 @@ pub fn validate(config: &Config) -> bool {
         }
     }
 
+    if config.observability.control_api.enabled {
+        if config.observability.control_api.address.is_empty() {
+            error!("observability.control_api.address cannot be empty when control_api is enabled");
+            return false;
+        }
+
+        if config.observability.control_api.port == 0 {
+            error!("observability.control_api.port must be between 1 and 65535");
+            return false;
+        }
+
+        let paths = [
+            (
+                "observability.control_api.health_path",
+                config.observability.control_api.health_path.as_str(),
+            ),
+            (
+                "observability.control_api.ready_path",
+                config.observability.control_api.ready_path.as_str(),
+            ),
+            (
+                "observability.control_api.runtime_path",
+                config.observability.control_api.runtime_path.as_str(),
+            ),
+            (
+                "observability.control_api.restart_path",
+                config.observability.control_api.restart_path.as_str(),
+            ),
+        ];
+        for (name, path) in paths {
+            if !path.starts_with('/') {
+                error!("{} must start with '/'", name);
+                return false;
+            }
+        }
+    }
+
+    if config.observability.tracing.enabled {
+        if config.observability.tracing.service_name.trim().is_empty() {
+            error!("observability.tracing.service_name cannot be empty when tracing is enabled");
+            return false;
+        }
+        if !(0.0..=1.0).contains(&config.observability.tracing.sample_ratio) {
+            error!("observability.tracing.sample_ratio must be between 0.0 and 1.0");
+            return false;
+        }
+        if let Some(endpoint) = config.observability.tracing.otlp_endpoint.as_ref()
+            && endpoint.trim().is_empty()
+        {
+            error!("observability.tracing.otlp_endpoint cannot be empty when provided");
+            return false;
+        }
+    }
+
     // --- Validate TLS certs ---
     if !Path::new(&config.listen.tls.cert).exists() {
         error!(
@@ -864,9 +918,9 @@ pub fn validate(config: &Config) -> bool {
 mod tests {
     use super::validate;
     use crate::config::{
-        Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, LogFormat,
-        MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Tls, Upstream,
-        UpstreamTls,
+        Backend, ClientAuth, Config, ControlApi, HealthCheck, Listen, LoadBalancing, Log,
+        LogFormat, MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Tls,
+        Tracing, Upstream, UpstreamTls,
     };
     use rcgen::{Certificate, CertificateParams, SanType};
     use std::collections::HashMap;
@@ -1265,6 +1319,8 @@ upstream:
                 port: 9901,
                 path: "metrics".to_string(),
             },
+            control_api: ControlApi::default(),
+            tracing: Tracing::default(),
         };
         assert!(!validate(&cfg));
     }
@@ -1337,6 +1393,8 @@ upstream:
                 port: 9901,
                 path: "/metrics".to_string(),
             },
+            control_api: ControlApi::default(),
+            tracing: Tracing::default(),
         };
 
         assert!(validate(&cfg));

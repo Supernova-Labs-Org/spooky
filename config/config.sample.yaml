@@ -107,6 +107,19 @@ observability:
         address: "127.0.0.1"
         port: 9901
         path: "/metrics"
+    control_api:
+        enabled: true
+        address: "127.0.0.1"
+        port: 9902
+        health_path: "/health"
+        ready_path: "/ready"
+        runtime_path: "/admin/runtime"
+        restart_path: "/admin/runtime/restart"
+    tracing:
+        enabled: false
+        service_name: "spooky"
+        otlp_endpoint: null # e.g. "http://127.0.0.1:4317"
+        sample_ratio: 1.0
 
 resilience:
     adaptive_admission:

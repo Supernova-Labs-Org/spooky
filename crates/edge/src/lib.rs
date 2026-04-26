@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use std::thread;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
@@ -20,6 +21,7 @@ use spooky_errors::ProxyError;
 use spooky_lb::UpstreamPool;
 use spooky_transport::h2_pool::H2Pool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tracing::Span;
 
 use crate::cid_radix::CidRadix;
 use crate::constants::MAX_DATAGRAM_SIZE_BYTES;
@@ -117,6 +119,23 @@ impl SharedRuntimeState {
 
     pub fn inc_ingress_queue_drop_bytes(&self, bytes: usize) {
         self.metrics.inc_ingress_queue_drop_bytes(bytes);
+    }
+
+    pub fn snapshot_backend_health(&self) -> (usize, usize) {
+        let mut healthy = 0usize;
+        let mut total = 0usize;
+
+        for pool in self.upstream_pools.values() {
+            let guard = match pool.lock() {
+                Ok(guard) => guard,
+                Err(_) => continue,
+            };
+            let pool_total = guard.pool.len();
+            total = total.saturating_add(pool_total);
+            healthy = healthy.saturating_add(guard.pool.healthy_indices().len().min(pool_total));
+        }
+
+        (healthy, total)
     }
 }
 
@@ -223,6 +242,10 @@ pub enum ResponseChunk {
 
 pub struct RequestEnvelope {
     pub request_id: u64,
+    pub trace_id: Option<String>,
+    pub span_id: Option<String>,
+    pub traceparent: Option<String>,
+    pub trace_span: Option<Span>,
 
     pub method: String,
     pub path: String,
@@ -348,12 +371,14 @@ pub struct Metrics {
     pub health_failure_transport: AtomicU64,
     pub health_failure_tls: AtomicU64,
     route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
+    worker_stats_shards: Vec<Mutex<HashMap<String, WorkerStats>>>,
 }
 
 const LATENCY_BUCKETS_MS: [u64; 14] = [
     1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000,
 ];
 const ROUTE_STATS_SHARDS: usize = 32;
+const WORKER_STATS_SHARDS: usize = 32;
 
 #[derive(Default, Clone)]
 struct RouteStats {
@@ -364,6 +389,16 @@ struct RouteStats {
     backend_error: u64,
     overload_shed: u64,
     latency_buckets: [u64; LATENCY_BUCKETS_MS.len() + 1],
+}
+
+#[derive(Default, Clone)]
+struct WorkerStats {
+    requests_total: u64,
+    requests_success: u64,
+    requests_failure: u64,
+    ingress_packets_total: u64,
+    ingress_queue_drops: u64,
+    ingress_queue_drop_bytes: u64,
 }
 
 pub enum RouteOutcome {
@@ -405,6 +440,10 @@ impl Default for Metrics {
         let mut shards = Vec::with_capacity(ROUTE_STATS_SHARDS);
         for _ in 0..ROUTE_STATS_SHARDS {
             shards.push(Mutex::new(HashMap::new()));
+        }
+        let mut worker_shards = Vec::with_capacity(WORKER_STATS_SHARDS);
+        for _ in 0..WORKER_STATS_SHARDS {
+            worker_shards.push(Mutex::new(HashMap::new()));
         }
         Self {
             requests_total: AtomicU64::new(0),
@@ -462,6 +501,7 @@ impl Default for Metrics {
             health_failure_transport: AtomicU64::new(0),
             health_failure_tls: AtomicU64::new(0),
             route_stats_shards: shards,
+            worker_stats_shards: worker_shards,
         }
     }
 }
@@ -469,14 +509,17 @@ impl Default for Metrics {
 impl Metrics {
     pub fn inc_total(&self) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
+        self.inc_worker_requests_total();
     }
 
     pub fn inc_success(&self) {
         self.requests_success.fetch_add(1, Ordering::Relaxed);
+        self.inc_worker_requests_success();
     }
 
     pub fn inc_failure(&self) {
         self.requests_failure.fetch_add(1, Ordering::Relaxed);
+        self.inc_worker_requests_failure();
     }
 
     pub fn inc_request_validation_reject(&self) {
@@ -596,15 +639,70 @@ impl Metrics {
 
     pub fn inc_ingress_packet(&self) {
         self.ingress_packets_total.fetch_add(1, Ordering::Relaxed);
+        self.inc_worker_ingress_packets_total();
     }
 
     pub fn inc_ingress_queue_drop(&self) {
         self.ingress_queue_drops.fetch_add(1, Ordering::Relaxed);
+        self.inc_worker_ingress_queue_drops();
     }
 
     pub fn inc_ingress_queue_drop_bytes(&self, bytes: usize) {
         self.ingress_queue_drop_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
+        self.inc_worker_ingress_queue_drop_bytes(bytes as u64);
+    }
+
+    fn with_worker_stats_mut<F>(&self, mut update: F)
+    where
+        F: FnMut(&mut WorkerStats),
+    {
+        let worker = current_worker_label();
+        let shard_idx = worker_stats_shard(&worker);
+        let Some(shard) = self.worker_stats_shards.get(shard_idx) else {
+            return;
+        };
+        let Ok(mut guard) = shard.lock() else {
+            return;
+        };
+        let entry = guard.entry(worker).or_default();
+        update(entry);
+    }
+
+    fn inc_worker_requests_total(&self) {
+        self.with_worker_stats_mut(|entry| {
+            entry.requests_total = entry.requests_total.saturating_add(1);
+        });
+    }
+
+    fn inc_worker_requests_success(&self) {
+        self.with_worker_stats_mut(|entry| {
+            entry.requests_success = entry.requests_success.saturating_add(1);
+        });
+    }
+
+    fn inc_worker_requests_failure(&self) {
+        self.with_worker_stats_mut(|entry| {
+            entry.requests_failure = entry.requests_failure.saturating_add(1);
+        });
+    }
+
+    fn inc_worker_ingress_packets_total(&self) {
+        self.with_worker_stats_mut(|entry| {
+            entry.ingress_packets_total = entry.ingress_packets_total.saturating_add(1);
+        });
+    }
+
+    fn inc_worker_ingress_queue_drops(&self) {
+        self.with_worker_stats_mut(|entry| {
+            entry.ingress_queue_drops = entry.ingress_queue_drops.saturating_add(1);
+        });
+    }
+
+    fn inc_worker_ingress_queue_drop_bytes(&self, bytes: u64) {
+        self.with_worker_stats_mut(|entry| {
+            entry.ingress_queue_drop_bytes = entry.ingress_queue_drop_bytes.saturating_add(bytes);
+        });
     }
 
     pub fn try_reserve_request_buffer(&self, bytes: usize, cap_bytes: usize) -> bool {
@@ -1213,12 +1311,88 @@ impl Metrics {
             ));
         }
 
+        let mut worker_snapshot: Vec<(String, WorkerStats)> = Vec::new();
+        for shard in &self.worker_stats_shards {
+            if let Ok(worker_stats) = shard.lock() {
+                worker_snapshot.extend(
+                    worker_stats
+                        .iter()
+                        .map(|(worker, stats)| (worker.clone(), stats.clone())),
+                );
+            }
+        }
+        worker_snapshot.sort_by(|(left, _), (right, _)| left.cmp(right));
+
+        out.push_str(
+            "# HELP spooky_worker_requests_total Total requests handled by each worker thread.\n",
+        );
+        out.push_str("# TYPE spooky_worker_requests_total counter\n");
+        out.push_str(
+            "# HELP spooky_worker_requests_success Total successful requests by worker thread.\n",
+        );
+        out.push_str("# TYPE spooky_worker_requests_success counter\n");
+        out.push_str(
+            "# HELP spooky_worker_requests_failure Total failed requests by worker thread.\n",
+        );
+        out.push_str("# TYPE spooky_worker_requests_failure counter\n");
+        out.push_str(
+            "# HELP spooky_worker_ingress_packets_total Total ingress packets by worker thread.\n",
+        );
+        out.push_str("# TYPE spooky_worker_ingress_packets_total counter\n");
+        out.push_str(
+            "# HELP spooky_worker_ingress_queue_drops Total ingress queue drops by worker thread.\n",
+        );
+        out.push_str("# TYPE spooky_worker_ingress_queue_drops counter\n");
+        out.push_str(
+            "# HELP spooky_worker_ingress_queue_drop_bytes Total ingress queue drop bytes by worker thread.\n",
+        );
+        out.push_str("# TYPE spooky_worker_ingress_queue_drop_bytes counter\n");
+
+        for (worker, stats) in worker_snapshot {
+            let worker = escape_prometheus_label(&worker);
+            out.push_str(&format!(
+                "spooky_worker_requests_total{{worker=\"{}\"}} {}\n",
+                worker, stats.requests_total
+            ));
+            out.push_str(&format!(
+                "spooky_worker_requests_success{{worker=\"{}\"}} {}\n",
+                worker, stats.requests_success
+            ));
+            out.push_str(&format!(
+                "spooky_worker_requests_failure{{worker=\"{}\"}} {}\n",
+                worker, stats.requests_failure
+            ));
+            out.push_str(&format!(
+                "spooky_worker_ingress_packets_total{{worker=\"{}\"}} {}\n",
+                worker, stats.ingress_packets_total
+            ));
+            out.push_str(&format!(
+                "spooky_worker_ingress_queue_drops{{worker=\"{}\"}} {}\n",
+                worker, stats.ingress_queue_drops
+            ));
+            out.push_str(&format!(
+                "spooky_worker_ingress_queue_drop_bytes{{worker=\"{}\"}} {}\n",
+                worker, stats.ingress_queue_drop_bytes
+            ));
+        }
+
         out
     }
 }
 
 fn route_stats_shard(route: &str) -> usize {
     (stable_hash64(route.as_bytes()) as usize) % ROUTE_STATS_SHARDS
+}
+
+fn worker_stats_shard(worker: &str) -> usize {
+    (stable_hash64(worker.as_bytes()) as usize) % WORKER_STATS_SHARDS
+}
+
+fn current_worker_label() -> String {
+    thread::current()
+        .name()
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn percentile_ms(stats: &RouteStats, quantile: f64) -> f64 {
@@ -1341,6 +1515,32 @@ mod tests {
         assert!(output.contains("spooky_hedge_primary_won_after_trigger_total 1"));
         assert!(output.contains("spooky_hedge_primary_late_ms_total 42"));
         assert!(output.contains("spooky_hedge_primary_late_samples_total 1"));
+    }
+
+    #[test]
+    fn metrics_render_includes_worker_labels() {
+        let metrics = Metrics::default();
+        metrics.inc_total();
+        metrics.inc_success();
+        metrics.inc_failure();
+        metrics.inc_ingress_packet();
+        metrics.inc_ingress_queue_drop();
+        metrics.inc_ingress_queue_drop_bytes(128);
+
+        let output = metrics.render_prometheus();
+        assert!(output.contains("spooky_worker_requests_total{worker=\""));
+        assert!(output.contains("spooky_worker_requests_success{worker=\""));
+        assert!(output.contains("spooky_worker_requests_failure{worker=\""));
+        assert!(output.contains("spooky_worker_ingress_packets_total{worker=\""));
+        assert!(output.contains("spooky_worker_ingress_queue_drops{worker=\""));
+        assert!(output.contains("spooky_worker_ingress_queue_drop_bytes{worker=\""));
+        assert!(
+            output.contains("spooky_worker_requests_total{worker=\"") && output.contains("} 1")
+        );
+        assert!(
+            output.contains("spooky_worker_ingress_queue_drop_bytes{worker=\"")
+                && output.contains("} 128")
+        );
     }
 
     #[test]

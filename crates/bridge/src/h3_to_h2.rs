@@ -16,6 +16,7 @@ pub struct ForwardedContext<'a> {
     pub client_addr: SocketAddr,
     pub request_authority: Option<&'a str>,
     pub request_id: u64,
+    pub traceparent: Option<&'a str>,
 }
 
 /// Build an HTTP/2 request with a pre-boxed streaming body.
@@ -82,6 +83,16 @@ pub fn build_h2_request(
             HeaderName::from_static("x-request-id"),
             HeaderValue::from_str(&forwarded_ctx.request_id.to_string())
                 .map_err(|_| BridgeError::InvalidHeader)?,
+        );
+    }
+
+    let has_traceparent = builder
+        .headers_ref()
+        .is_some_and(|h| h.contains_key("traceparent"));
+    if !has_traceparent && let Some(traceparent) = forwarded_ctx.traceparent {
+        builder = builder.header(
+            HeaderName::from_static("traceparent"),
+            HeaderValue::from_str(traceparent).map_err(|_| BridgeError::InvalidHeader)?,
         );
     }
 
@@ -193,6 +204,7 @@ mod tests {
                 client_addr: "203.0.113.10:44321".parse().expect("client"),
                 request_authority: Some("api.example.com"),
                 request_id: 0,
+                traceparent: None,
             },
         )
         .expect("request");
@@ -223,6 +235,7 @@ mod tests {
                 client_addr: "198.51.100.3:5555".parse().expect("client"),
                 request_authority: None,
                 request_id: 0,
+                traceparent: None,
             },
         )
         .expect("request");
@@ -247,6 +260,7 @@ mod tests {
                 client_addr: "127.0.0.1:12345".parse().expect("client"),
                 request_authority: None,
                 request_id: 0,
+                traceparent: None,
             },
         )
         .expect_err("invalid backend endpoint should fail");
@@ -278,6 +292,7 @@ mod tests {
                 client_addr: "203.0.113.55:43210".parse().expect("client"),
                 request_authority: Some("api.example.com"),
                 request_id: 0,
+                traceparent: None,
             },
         )
         .expect("request");
@@ -318,6 +333,7 @@ mod tests {
                 client_addr: "[2001:db8::1]:4444".parse().expect("client"),
                 request_authority: Some("api.example.com"),
                 request_id: 0,
+                traceparent: None,
             },
         )
         .expect("request");

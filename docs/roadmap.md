@@ -99,10 +99,8 @@
 - **Traffic replay**: Record and replay production traffic
 - **Query logs**: SQL-like queries over request logs
 
-### Extensions
+### Protocol Features
 
-- **WebAssembly plugins**: Custom routing logic via WASM
-- **Lua scripting**: Dynamic request/response transformation
 - **gRPC support**: Native gRPC proxying
 - **WebSocket support**: WebSocket over HTTP/3
 
@@ -160,7 +158,7 @@
 
 1. Dynamic backend discovery - integration complexity
 2. Advanced load balancing - diminishing returns
-3. WebAssembly plugins - adds complexity
+3. Advanced protocol features - adds complexity
 4. Protocol extensions - limited immediate value
 5. Multi-tenancy - niche use case
 
@@ -193,6 +191,7 @@ Features explicitly not planned:
 - **WAF capabilities**: Use dedicated security tools
 - **Database proxying**: Use specialized database proxies
 - **Custom protocols**: Stick to HTTP family
+- **In-process plugin/extension ABI**: No WASM/eBPF/Lua middleware model until a safe isolation and lifecycle model is defined
 
 ## Contributing
 

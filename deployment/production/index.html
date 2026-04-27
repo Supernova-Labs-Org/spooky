@@ -1287,14 +1287,20 @@ sudo chmod 644 /etc/spooky/certs/fullchain.pem
 </code></pre>
 <h2 id="monitoring-and-observability">Monitoring and Observability</h2>
 <h3 id="metrics-exposition">Metrics Exposition</h3>
-<p><strong>Note</strong>: Metrics exposition is planned for future releases but not currently implemented. Spooky currently maintains internal counters only.</p>
-<p>When metrics are implemented, they will follow Prometheus exposition format for easy integration with monitoring systems. Example configuration (for future reference):</p>
-<pre><code class="language-yaml"># prometheus.yml (planned)
+<p>Spooky exposes a Prometheus-compatible metrics endpoint. Configure it in <code>config.yaml</code>:</p>
+<pre><code class="language-yaml">metrics:
+  enabled: true
+  address: &quot;127.0.0.1&quot;
+  port: 9090
+  path: &quot;/metrics&quot;
+</code></pre>
+<p>Scrape it with Prometheus:</p>
+<pre><code class="language-yaml"># prometheus.yml
 scrape_configs:
   - job_name: 'spooky'
     scrape_interval: 15s
     scrape_timeout: 10s
-    metrics_path: '/metrics'  # To be implemented
+    metrics_path: '/metrics'
     static_configs:
       - targets: ['spooky-01.internal:9090', 'spooky-02.internal:9090']
         labels:
@@ -1303,24 +1309,34 @@ scrape_configs:
 </code></pre>
 <h3 id="key-metrics-to-monitor">Key Metrics to Monitor</h3>
 <p><strong>Throughput Metrics</strong>
-- Requests per second (by route, backend, status code)
-- Bytes transferred (ingress/egress)
-- Active connections (QUIC, HTTP/2)</p>
+- <code>spooky_requests_total</code> — total requests processed
+- <code>spooky_route_requests_total{route="..."}</code> — per-route request count
+- <code>spooky_worker_ingress_packets_total{worker="..."}</code> — UDP packets received per worker</p>
 <p><strong>Latency Metrics</strong>
-- Request duration percentiles (p50, p95, p99)
-- Backend response time
-- Connection establishment time
-- TLS handshake duration</p>
-<p><strong>Error Metrics</strong>
-- HTTP 5xx error rate
-- Backend connection failures
-- Health check failure count
-- TLS handshake failures</p>
+- <code>spooky_route_latency_ms_p50/p95/p99{route="..."}</code> — per-route latency percentiles</p>
+<p><strong>Connection and Queue Gauges</strong>
+- <code>spooky_active_connections</code> — current live QUIC connections
+- <code>spooky_ingress_queue_bytes</code> — bytes currently buffered in ingress shard queues</p>
+<p><strong>Drop and Error Counters</strong>
+- <code>spooky_ingress_queue_drops</code> — packets dropped due to full shard queues
+- <code>spooky_ingress_queue_drop_bytes</code> — bytes dropped due to full shard queues
+- <code>spooky_ingress_bad_header_total</code> — packets with unparseable QUIC headers
+- <code>spooky_ingress_rate_limited_total</code> — Initial packets dropped by the connection rate limiter
+- <code>spooky_ingress_unroutable_total</code> — non-Initial packets for unknown connections
+- <code>spooky_ingress_draining_drops_total</code> — packets dropped during graceful shutdown
+- <code>spooky_ingress_connection_create_failed_total</code> — packets dropped due to QUIC accept failure
+- <code>spooky_connection_cap_rejects</code> — packets dropped because the connection cap was reached</p>
+<p><strong>Overload Shed Counters</strong>
+- <code>spooky_overload_shed_by_reason_total{reason="..."}</code> — requests shed by the overload system, broken down by reason (<code>brownout</code>, <code>adaptive_admission</code>, <code>route_cap</code>, <code>route_global_cap</code>, <code>global_inflight</code>, <code>upstream_inflight</code>, <code>backend_inflight</code>, <code>request_buffer_cap</code>, <code>response_prebuffer_cap</code>, <code>connection_cap</code>)
+- <code>spooky_route_overload_shed_total{route="..."}</code> — overload shed per route</p>
+<p><strong>Backend Health Metrics</strong>
+- <code>spooky_health_checks_total</code> / <code>spooky_health_checks_success</code> / <code>spooky_health_checks_failure</code>
+- <code>spooky_backend_timeouts</code> / <code>spooky_backend_errors</code>
+- <code>spooky_health_failures_total{reason="..."}</code> — health failures by reason (<code>5xx</code>, <code>timeout</code>, <code>transport</code>, <code>tls</code>)</p>
 <p><strong>Resource Metrics</strong>
-- CPU utilization
-- Memory usage (RSS, heap)
-- File descriptor usage
-- Network buffer utilization</p>
+- <code>spooky_request_buffered_bytes</code> — bytes currently buffered in request backpressure queues
+- <code>spooky_request_buffered_high_watermark_bytes</code> — peak request buffer usage since start
+- CPU utilization, memory (RSS), file descriptors — use node_exporter alongside Spooky</p>
 <h3 id="alerting-rules">Alerting Rules</h3>
 <pre><code class="language-yaml"># prometheus-alerts.yml
 groups:

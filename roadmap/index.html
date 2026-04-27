@@ -888,7 +888,7 @@
 </ul>
 <h3 id="observability">Observability</h3>
 <ul>
-<li><strong>Metrics export</strong>: Prometheus endpoint for scraping metrics</li>
+<li><strong>Metrics export</strong>: Prometheus endpoint live — per-route counters, latency percentiles, active-connection and queue-size gauges, full drop counter coverage across all ingress paths</li>
 <li><strong>Distributed tracing</strong>: OpenTelemetry integration</li>
 <li><strong>Request logging</strong>: Per-request structured logs with correlation IDs</li>
 <li><strong>Connection metrics</strong>: Track QUIC RTT, packet loss, stream count</li>
@@ -991,7 +991,6 @@
 <h3 id="high-priority-next-3-months">High Priority (Next 3 months)</h3>
 <ol>
 <li>Async data plane - unblock main thread</li>
-<li>Metrics export - essential for production</li>
 <li>Configuration hot reload - reduce operational friction</li>
 <li>Streaming bodies - reduce memory usage</li>
 <li>TLS peer verification - production security</li>
@@ -1000,7 +999,7 @@
 <ol>
 <li>Circuit breakers - improve reliability</li>
 <li>Distributed tracing - debugging complex issues</li>
-<li>Rate limiting - protect backends</li>
+<li>Rate limiting - protect backends </li>
 <li>Health check improvements - reduce contention</li>
 <li>Admin API - operational visibility</li>
 </ol>
@@ -1018,7 +1017,6 @@
 <li><strong>Blocking backend calls</strong>: Main thread blocks during HTTP/2 requests</li>
 <li><strong>Full body buffering</strong>: High memory usage for large requests/responses</li>
 <li><strong>Consistent hash rebuilds</strong>: Ring rebuilt on every request</li>
-<li><strong>No metrics export</strong>: Metrics collected but not exposed</li>
 <li><strong>Health check contention</strong>: Shares connection pool with production traffic</li>
 <li><strong>Single-threaded</strong>: QUIC processing limited to one thread</li>
 <li><strong>No TLS verification</strong>: Development-only security posture</li>
@@ -1045,9 +1043,9 @@
 <p>Contributions are welcome. See <a href="development/contributing.md">contributing guide</a> for development setup and guidelines.</p>
 <p>Priority areas for contributions:</p>
 <ol>
-<li>Metrics export (Prometheus)</li>
 <li>Streaming request/response bodies</li>
 <li>Configuration hot reload</li>
+<li>Distributed tracing (OpenTelemetry)</li>
 <li>Integration tests</li>
 <li>Documentation and examples</li>
 </ol>

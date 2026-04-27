@@ -472,17 +472,25 @@ For environments requiring mandatory access control, create appropriate policies
 
 ### Metrics Exposition
 
-**Note**: Metrics exposition is planned for future releases but not currently implemented. Spooky currently maintains internal counters only.
-
-When metrics are implemented, they will follow Prometheus exposition format for easy integration with monitoring systems. Example configuration (for future reference):
+Spooky exposes a Prometheus-compatible metrics endpoint. Configure it in `config.yaml`:
 
 ```yaml
-# prometheus.yml (planned)
+metrics:
+  enabled: true
+  address: "127.0.0.1"
+  port: 9090
+  path: "/metrics"
+```
+
+Scrape it with Prometheus:
+
+```yaml
+# prometheus.yml
 scrape_configs:
   - job_name: 'spooky'
     scrape_interval: 15s
     scrape_timeout: 10s
-    metrics_path: '/metrics'  # To be implemented
+    metrics_path: '/metrics'
     static_configs:
       - targets: ['spooky-01.internal:9090', 'spooky-02.internal:9090']
         labels:
@@ -493,27 +501,40 @@ scrape_configs:
 ### Key Metrics to Monitor
 
 **Throughput Metrics**
-- Requests per second (by route, backend, status code)
-- Bytes transferred (ingress/egress)
-- Active connections (QUIC, HTTP/2)
+- `spooky_requests_total` — total requests processed
+- `spooky_route_requests_total{route="..."}` — per-route request count
+- `spooky_worker_ingress_packets_total{worker="..."}` — UDP packets received per worker
 
 **Latency Metrics**
-- Request duration percentiles (p50, p95, p99)
-- Backend response time
-- Connection establishment time
-- TLS handshake duration
+- `spooky_route_latency_ms_p50/p95/p99{route="..."}` — per-route latency percentiles
 
-**Error Metrics**
-- HTTP 5xx error rate
-- Backend connection failures
-- Health check failure count
-- TLS handshake failures
+**Connection and Queue Gauges**
+- `spooky_active_connections` — current live QUIC connections
+- `spooky_ingress_queue_bytes` — bytes currently buffered in ingress shard queues
+
+**Drop and Error Counters**
+- `spooky_ingress_queue_drops` — packets dropped due to full shard queues
+- `spooky_ingress_queue_drop_bytes` — bytes dropped due to full shard queues
+- `spooky_ingress_bad_header_total` — packets with unparseable QUIC headers
+- `spooky_ingress_rate_limited_total` — Initial packets dropped by the connection rate limiter
+- `spooky_ingress_unroutable_total` — non-Initial packets for unknown connections
+- `spooky_ingress_draining_drops_total` — packets dropped during graceful shutdown
+- `spooky_ingress_connection_create_failed_total` — packets dropped due to QUIC accept failure
+- `spooky_connection_cap_rejects` — packets dropped because the connection cap was reached
+
+**Overload Shed Counters**
+- `spooky_overload_shed_by_reason_total{reason="..."}` — requests shed by the overload system, broken down by reason (`brownout`, `adaptive_admission`, `route_cap`, `route_global_cap`, `global_inflight`, `upstream_inflight`, `backend_inflight`, `request_buffer_cap`, `response_prebuffer_cap`, `connection_cap`)
+- `spooky_route_overload_shed_total{route="..."}` — overload shed per route
+
+**Backend Health Metrics**
+- `spooky_health_checks_total` / `spooky_health_checks_success` / `spooky_health_checks_failure`
+- `spooky_backend_timeouts` / `spooky_backend_errors`
+- `spooky_health_failures_total{reason="..."}` — health failures by reason (`5xx`, `timeout`, `transport`, `tls`)
 
 **Resource Metrics**
-- CPU utilization
-- Memory usage (RSS, heap)
-- File descriptor usage
-- Network buffer utilization
+- `spooky_request_buffered_bytes` — bytes currently buffered in request backpressure queues
+- `spooky_request_buffered_high_watermark_bytes` — peak request buffer usage since start
+- CPU utilization, memory (RSS), file descriptors — use node_exporter alongside Spooky
 
 ### Alerting Rules
 

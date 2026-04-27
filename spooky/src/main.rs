@@ -373,6 +373,11 @@ fn run_sharded_listener_worker(
                 ) {
                     worker_shared.inc_ingress_queue_drop();
                     worker_shared.inc_ingress_queue_drop_bytes(packet_len);
+                    let total: usize = shard_queue_bytes
+                        .iter()
+                        .map(|c| c.load(Ordering::Relaxed))
+                        .sum();
+                    worker_shared.set_ingress_queue_bytes(total);
                     continue;
                 }
                 let packet = IngressPacket {
@@ -381,7 +386,13 @@ fn run_sharded_listener_worker(
                     bytes: recv_buf[..len].to_vec(),
                 };
                 match shard_txs[shard_idx].try_send(packet) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        let total: usize = shard_queue_bytes
+                            .iter()
+                            .map(|c| c.load(Ordering::Relaxed))
+                            .sum();
+                        worker_shared.set_ingress_queue_bytes(total);
+                    }
                     Err(TrySendError::Full(packet)) => {
                         release_shard_queue_bytes(
                             shard_queue_bytes[shard_idx].as_ref(),
@@ -389,6 +400,11 @@ fn run_sharded_listener_worker(
                         );
                         worker_shared.inc_ingress_queue_drop();
                         worker_shared.inc_ingress_queue_drop_bytes(packet.bytes.len());
+                        let total: usize = shard_queue_bytes
+                            .iter()
+                            .map(|c| c.load(Ordering::Relaxed))
+                            .sum();
+                        worker_shared.set_ingress_queue_bytes(total);
                     }
                     Err(TrySendError::Disconnected(packet)) => {
                         release_shard_queue_bytes(

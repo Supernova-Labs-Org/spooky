@@ -121,6 +121,10 @@ impl SharedRuntimeState {
         self.metrics.inc_ingress_queue_drop_bytes(bytes);
     }
 
+    pub fn set_ingress_queue_bytes(&self, bytes: usize) {
+        self.metrics.set_ingress_queue_bytes(bytes);
+    }
+
     pub fn snapshot_backend_health(&self) -> (usize, usize) {
         let mut healthy = 0usize;
         let mut total = 0usize;
@@ -350,6 +354,13 @@ pub struct Metrics {
     pub ingress_packets_total: AtomicU64,
     pub ingress_queue_drops: AtomicU64,
     pub ingress_queue_drop_bytes: AtomicU64,
+    pub ingress_queue_bytes: AtomicU64,
+    pub ingress_bad_header_total: AtomicU64,
+    pub ingress_rate_limited_total: AtomicU64,
+    pub ingress_unroutable_total: AtomicU64,
+    pub ingress_draining_drops_total: AtomicU64,
+    pub ingress_connection_create_failed_total: AtomicU64,
+    pub ingress_version_neg_failed_total: AtomicU64,
     pub request_buffered_bytes: AtomicU64,
     pub request_buffered_high_watermark_bytes: AtomicU64,
     pub request_buffer_limit_rejects: AtomicU64,
@@ -480,6 +491,13 @@ impl Default for Metrics {
             ingress_packets_total: AtomicU64::new(0),
             ingress_queue_drops: AtomicU64::new(0),
             ingress_queue_drop_bytes: AtomicU64::new(0),
+            ingress_queue_bytes: AtomicU64::new(0),
+            ingress_bad_header_total: AtomicU64::new(0),
+            ingress_rate_limited_total: AtomicU64::new(0),
+            ingress_unroutable_total: AtomicU64::new(0),
+            ingress_draining_drops_total: AtomicU64::new(0),
+            ingress_connection_create_failed_total: AtomicU64::new(0),
+            ingress_version_neg_failed_total: AtomicU64::new(0),
             request_buffered_bytes: AtomicU64::new(0),
             request_buffered_high_watermark_bytes: AtomicU64::new(0),
             request_buffer_limit_rejects: AtomicU64::new(0),
@@ -651,6 +669,41 @@ impl Metrics {
         self.ingress_queue_drop_bytes
             .fetch_add(bytes as u64, Ordering::Relaxed);
         self.inc_worker_ingress_queue_drop_bytes(bytes as u64);
+    }
+
+    pub fn set_ingress_queue_bytes(&self, bytes: usize) {
+        self.ingress_queue_bytes
+            .store(bytes as u64, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_bad_header(&self) {
+        self.ingress_bad_header_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_rate_limited(&self) {
+        self.ingress_rate_limited_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_unroutable(&self) {
+        self.ingress_unroutable_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_draining_drop(&self) {
+        self.ingress_draining_drops_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_connection_create_failed(&self) {
+        self.ingress_connection_create_failed_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_ingress_version_neg_failed(&self) {
+        self.ingress_version_neg_failed_total
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn with_worker_stats_mut<F>(&self, mut update: F)
@@ -1118,6 +1171,71 @@ impl Metrics {
         ));
 
         out.push_str(
+            "# HELP spooky_ingress_queue_bytes Current bytes buffered in ingress shard queues.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_queue_bytes gauge\n");
+        out.push_str(&format!(
+            "spooky_ingress_queue_bytes {}\n",
+            self.ingress_queue_bytes.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_bad_header_total Ingress packets dropped due to unparseable QUIC header.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_bad_header_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_bad_header_total {}\n",
+            self.ingress_bad_header_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_rate_limited_total Initial packets dropped by the new-connection rate limiter.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_rate_limited_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_rate_limited_total {}\n",
+            self.ingress_rate_limited_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_unroutable_total Non-Initial packets received for unknown connections.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_unroutable_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_unroutable_total {}\n",
+            self.ingress_unroutable_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_draining_drops_total Packets dropped because the listener is draining.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_draining_drops_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_draining_drops_total {}\n",
+            self.ingress_draining_drops_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_connection_create_failed_total Packets dropped because quiche::accept() failed to create a new connection.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_connection_create_failed_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_connection_create_failed_total {}\n",
+            self.ingress_connection_create_failed_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
+            "# HELP spooky_ingress_version_neg_failed_total Packets dropped because version negotiation response could not be constructed.\n",
+        );
+        out.push_str("# TYPE spooky_ingress_version_neg_failed_total counter\n");
+        out.push_str(&format!(
+            "spooky_ingress_version_neg_failed_total {}\n",
+            self.ingress_version_neg_failed_total
+                .load(Ordering::Relaxed)
+        ));
+
+        out.push_str(
             "# HELP spooky_request_buffered_bytes Current bytes buffered in request backpressure queues.\n",
         );
         out.push_str("# TYPE spooky_request_buffered_bytes gauge\n");
@@ -1515,6 +1633,35 @@ mod tests {
         assert!(output.contains("spooky_hedge_primary_won_after_trigger_total 1"));
         assert!(output.contains("spooky_hedge_primary_late_ms_total 42"));
         assert!(output.contains("spooky_hedge_primary_late_samples_total 1"));
+        assert!(output.contains("spooky_ingress_queue_bytes 0\n"));
+        assert!(output.contains("spooky_ingress_bad_header_total 0\n"));
+        assert!(output.contains("spooky_ingress_rate_limited_total 0\n"));
+        assert!(output.contains("spooky_ingress_unroutable_total 0\n"));
+        assert!(output.contains("spooky_ingress_draining_drops_total 0\n"));
+        assert!(output.contains("spooky_ingress_connection_create_failed_total 0\n"));
+        assert!(output.contains("spooky_ingress_version_neg_failed_total 0\n"));
+    }
+
+    #[test]
+    fn ingress_drop_counters_increment_correctly() {
+        let metrics = Metrics::default();
+        metrics.inc_ingress_bad_header();
+        metrics.inc_ingress_bad_header();
+        metrics.inc_ingress_rate_limited();
+        metrics.inc_ingress_unroutable();
+        metrics.inc_ingress_unroutable();
+        metrics.inc_ingress_unroutable();
+        metrics.inc_ingress_draining_drop();
+        metrics.inc_ingress_connection_create_failed();
+        metrics.inc_ingress_version_neg_failed();
+        metrics.inc_ingress_version_neg_failed();
+        let output = metrics.render_prometheus();
+        assert!(output.contains("spooky_ingress_bad_header_total 2\n"));
+        assert!(output.contains("spooky_ingress_rate_limited_total 1\n"));
+        assert!(output.contains("spooky_ingress_unroutable_total 3\n"));
+        assert!(output.contains("spooky_ingress_draining_drops_total 1\n"));
+        assert!(output.contains("spooky_ingress_connection_create_failed_total 1\n"));
+        assert!(output.contains("spooky_ingress_version_neg_failed_total 2\n"));
     }
 
     #[test]

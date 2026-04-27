@@ -1014,6 +1014,7 @@ impl QUICListener {
             Ok(hdr) => hdr,
             Err(_) => {
                 error!("Failed to parse QUIC packet header");
+                self.metrics.inc_ingress_bad_header();
                 return None;
             }
         };
@@ -1058,12 +1059,14 @@ impl QUICListener {
         }
 
         if self.draining {
+            self.metrics.inc_ingress_draining_drop();
             return None;
         }
 
         // Only create new connections for Initial packets
         if header.ty != quiche::Type::Initial {
             debug!("Non-Initial packet for unknown connection, ignoring");
+            self.metrics.inc_ingress_unroutable();
             return None;
         }
 
@@ -1080,6 +1083,7 @@ impl QUICListener {
                 "New connection rate limit exceeded, dropping Initial packet from {}",
                 peer
             );
+            self.metrics.inc_ingress_rate_limited();
             return None;
         }
 
@@ -1101,8 +1105,14 @@ impl QUICListener {
 
         let scid = quiche::ConnectionId::from_ref(&scid_bytes);
 
-        let quic_connection =
-            quiche::accept(&scid, None, local_addr, peer, &mut self.quic_config).ok()?;
+        let quic_connection = match quiche::accept(&scid, None, local_addr, peer, &mut self.quic_config) {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!("quiche::accept failed: {:?}", e);
+                self.metrics.inc_ingress_connection_create_failed();
+                return None;
+            }
+        };
 
         let connection = QuicConnection {
             quic: quic_connection,
@@ -1318,6 +1328,7 @@ impl QUICListener {
             Ok(hdr) => hdr,
             Err(_) => {
                 error!("Failed to parse QUIC packet header");
+                self.metrics.inc_ingress_bad_header();
                 return;
             }
         };
@@ -1328,6 +1339,7 @@ impl QUICListener {
                     Ok(len) => len,
                     Err(e) => {
                         error!("Version negotiation failed: {:?}", e);
+                        self.metrics.inc_ingress_version_neg_failed();
                         return;
                     }
                 };

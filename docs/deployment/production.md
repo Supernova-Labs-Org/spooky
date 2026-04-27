@@ -526,6 +526,18 @@ scrape_configs:
 - `spooky_overload_shed_by_reason_total{reason="..."}` — requests shed by the overload system, broken down by reason (`brownout`, `adaptive_admission`, `route_cap`, `route_global_cap`, `global_inflight`, `upstream_inflight`, `backend_inflight`, `request_buffer_cap`, `response_prebuffer_cap`, `connection_cap`)
 - `spooky_route_overload_shed_total{route="..."}` — overload shed per route
 
+**Resilience Metrics**
+- `spooky_retries_total` — total retry attempts fired across all routes
+- `spooky_retry_attempts_total{reason="timeout|transport|pool"}` — retries broken down by the error that triggered them
+- `spooky_retry_denied_total{reason="budget|no_bodyless|no_alternate"}` — retry denials broken down by reason: `budget` (retry budget exhausted), `no_bodyless` (request has a body so retry is unsafe), `no_alternate` (no alternate backend available)
+- `spooky_hedge_triggered_total` — hedge requests launched
+- `spooky_hedge_won_total` — times the hedge response was used (primary was slower)
+- `spooky_hedge_wasted_total` — times the hedge response arrived after the primary (wasted work)
+- `spooky_hedge_primary_won_after_trigger_total` — times the primary response arrived after the hedge launched but before it responded
+- `spooky_hedge_primary_late_ms_total` / `spooky_hedge_primary_late_samples_total` — aggregate and sample count for primary latency past the hedge trigger point
+- `spooky_circuit_breaker_rejected_total` — requests rejected because a backend circuit breaker was open
+- `spooky_brownout_active` — gauge; `1` while brownout mode is active (non-core routes are being shed), `0` otherwise
+
 **Backend Health Metrics**
 - `spooky_health_checks_total` / `spooky_health_checks_success` / `spooky_health_checks_failure`
 - `spooky_backend_timeouts` / `spooky_backend_errors`

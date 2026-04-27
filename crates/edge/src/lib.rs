@@ -213,6 +213,10 @@ pub struct UpstreamResult {
     pub forward: ForwardResult,
     pub hedge: HedgeTelemetry,
     pub retry_count: u8,
+    /// Set when a retry was attempted; the error reason that triggered it.
+    pub retry_attempt_reason: Option<RetryReason>,
+    /// Set when a retry was denied; the first denial reason encountered.
+    pub retry_denial_reason: Option<RetryReason>,
 }
 
 /// Lifecycle phase of a single HTTP/3 request stream.
@@ -377,6 +381,8 @@ pub struct Metrics {
     pub retry_reason_timeout: AtomicU64,
     pub retry_reason_transport: AtomicU64,
     pub retry_reason_pool: AtomicU64,
+    pub circuit_breaker_rejected_total: AtomicU64,
+    pub brownout_active: AtomicU64,
     pub health_failure_5xx: AtomicU64,
     pub health_failure_timeout: AtomicU64,
     pub health_failure_transport: AtomicU64,
@@ -514,6 +520,8 @@ impl Default for Metrics {
             retry_reason_timeout: AtomicU64::new(0),
             retry_reason_transport: AtomicU64::new(0),
             retry_reason_pool: AtomicU64::new(0),
+            circuit_breaker_rejected_total: AtomicU64::new(0),
+            brownout_active: AtomicU64::new(0),
             health_failure_5xx: AtomicU64::new(0),
             health_failure_timeout: AtomicU64::new(0),
             health_failure_transport: AtomicU64::new(0),
@@ -867,6 +875,16 @@ impl Metrics {
                     .fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    pub fn inc_circuit_breaker_rejected(&self) {
+        self.circuit_breaker_rejected_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn set_brownout_active(&self, active: bool) {
+        self.brownout_active
+            .store(if active { 1 } else { 0 }, Ordering::Relaxed);
     }
 
     pub fn inc_health_failure(&self, reason: HealthFailureReason) {
@@ -1353,6 +1371,20 @@ impl Metrics {
             self.retry_reason_pool.load(Ordering::Relaxed)
         ));
 
+        out.push_str("# HELP spooky_circuit_breaker_rejected_total Requests rejected by an open circuit breaker.\n");
+        out.push_str("# TYPE spooky_circuit_breaker_rejected_total counter\n");
+        out.push_str(&format!(
+            "spooky_circuit_breaker_rejected_total {}\n",
+            self.circuit_breaker_rejected_total.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spooky_brownout_active Whether brownout mode is currently active (1=active, 0=inactive).\n");
+        out.push_str("# TYPE spooky_brownout_active gauge\n");
+        out.push_str(&format!(
+            "spooky_brownout_active {}\n",
+            self.brownout_active.load(Ordering::Relaxed)
+        ));
+
         out.push_str(
             "# HELP spooky_health_failures_total Backend health failures, by failure reason.\n",
         );
@@ -1640,6 +1672,27 @@ mod tests {
         assert!(output.contains("spooky_ingress_draining_drops_total 0\n"));
         assert!(output.contains("spooky_ingress_connection_create_failed_total 0\n"));
         assert!(output.contains("spooky_ingress_version_neg_failed_total 0\n"));
+        assert!(output.contains("spooky_circuit_breaker_rejected_total 0\n"));
+        assert!(output.contains("spooky_brownout_active 0\n"));
+    }
+
+    #[test]
+    fn resilience_metrics_increment_correctly() {
+        let metrics = Metrics::default();
+        metrics.inc_retry(RetryReason::BackendTimeout);
+        metrics.inc_retry(RetryReason::BudgetDenied);
+        metrics.inc_circuit_breaker_rejected();
+        metrics.inc_circuit_breaker_rejected();
+        metrics.set_brownout_active(true);
+        let output = metrics.render_prometheus();
+        assert!(output.contains("spooky_retries_total 2\n"));
+        assert!(output.contains("spooky_retry_attempts_total{reason=\"timeout\"} 1\n"));
+        assert!(output.contains("spooky_retry_denied_total{reason=\"budget\"} 1\n"));
+        assert!(output.contains("spooky_circuit_breaker_rejected_total 2\n"));
+        assert!(output.contains("spooky_brownout_active 1\n"));
+        metrics.set_brownout_active(false);
+        let output2 = metrics.render_prometheus();
+        assert!(output2.contains("spooky_brownout_active 0\n"));
     }
 
     #[test]

@@ -63,3 +63,19 @@ pub fn drop_privileges(_user: &str, _group: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::drop_privileges;
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_unknown_group_or_user_before_system_calls() {
+        let missing_group = format!("missing-group-{}", std::process::id());
+        let result = drop_privileges("nobody", &missing_group);
+        assert!(result.is_err());
+
+        let missing_user = format!("missing-user-{}", std::process::id());
+        let result = drop_privileges(&missing_user, "nogroup");
+        assert!(result.is_err());
+    }
+}

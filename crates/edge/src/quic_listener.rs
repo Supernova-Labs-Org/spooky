@@ -132,6 +132,7 @@ struct ControlApiState {
     upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
     expected_workers: usize,
     started_at: Instant,
+    auth_token: Option<String>,
 }
 
 impl ControlApiState {
@@ -4024,6 +4025,7 @@ impl QUICListener {
             upstream_pools: shared_state.upstream_pools.clone(),
             expected_workers: worker_count.max(1),
             started_at: Instant::now(),
+            auth_token: endpoint.auth_token.clone(),
         };
 
         let handle = match runtime_handle() {
@@ -4155,6 +4157,14 @@ impl QUICListener {
         }
 
         if req.method() == http::Method::GET && path == paths.runtime_path {
+            if !Self::control_api_is_authorized(&req, state) {
+                return Self::json_response(
+                    StatusCode::UNAUTHORIZED,
+                    json!({
+                        "error": "unauthorized",
+                    }),
+                );
+            }
             let (healthy_backends, total_backends) = state.snapshot_backend_health();
             let response = json!({
                 "uptime_ms": state.started_at.elapsed().as_millis() as u64,
@@ -4194,6 +4204,15 @@ impl QUICListener {
         }
 
         if req.method() == http::Method::POST && path == paths.restart_path {
+            if !Self::control_api_is_authorized(&req, state) {
+                return Self::json_response(
+                    StatusCode::UNAUTHORIZED,
+                    json!({
+                        "accepted": false,
+                        "error": "unauthorized",
+                    }),
+                );
+            }
             if !state.watchdog.enabled() {
                 return Self::json_response(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -4226,6 +4245,22 @@ impl QUICListener {
             Ok(resp) => resp,
             Err(_) => Response::new(Full::new(Bytes::from_static(b"not found\n"))),
         }
+    }
+
+    fn control_api_is_authorized(req: &Request<Incoming>, state: &ControlApiState) -> bool {
+        let Some(token) = state.auth_token.as_ref() else {
+            return true;
+        };
+        let Some(header) = req.headers().get(http::header::AUTHORIZATION) else {
+            return false;
+        };
+        let Ok(raw) = header.to_str() else {
+            return false;
+        };
+        let Some(provided) = raw.strip_prefix("Bearer ") else {
+            return false;
+        };
+        provided == token
     }
 
     fn spawn_watchdog(

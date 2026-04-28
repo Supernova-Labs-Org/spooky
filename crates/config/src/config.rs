@@ -8,9 +8,11 @@ use crate::default::{
     get_default_log_file_path, get_default_log_level, get_default_path, get_default_port,
     get_default_protocol, get_default_success_threshold, get_default_version, get_default_weight,
     observe_default_address, observe_default_control_api_address,
-    observe_default_control_api_health_path, observe_default_control_api_port,
+    observe_default_control_api_connection_timeout_ms, observe_default_control_api_health_path,
+    observe_default_control_api_max_connections, observe_default_control_api_port,
     observe_default_control_api_ready_path, observe_default_control_api_restart_path,
-    observe_default_control_api_runtime_path, observe_default_metrics_path, observe_default_port,
+    observe_default_control_api_runtime_path, observe_default_metrics_connection_timeout_ms,
+    observe_default_metrics_max_connections, observe_default_metrics_path, observe_default_port,
     observe_default_tracing_sample_ratio, observe_default_tracing_service_name,
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
@@ -47,7 +49,8 @@ use crate::default::{
     resilience_default_watchdog_poll_stall_timeout_ms,
     resilience_default_watchdog_restart_cooldown_ms,
     resilience_default_watchdog_timeout_error_rate_percent,
-    resilience_default_watchdog_unhealthy_consecutive_windows, upstream_tls_default_strict_sni,
+    resilience_default_watchdog_unhealthy_consecutive_windows, security_default_drop_privileges,
+    security_default_group, security_default_user, upstream_tls_default_strict_sni,
     upstream_tls_default_verify_certificates,
 };
 
@@ -55,6 +58,7 @@ pub const CURRENT_CONFIG_VERSION: u32 = 1;
 pub const SUPPORTED_CONFIG_VERSIONS: &[u32] = &[CURRENT_CONFIG_VERSION];
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "get_default_version")] // Make version optional with default
     pub version: u32,
@@ -80,9 +84,41 @@ pub struct Config {
 
     #[serde(default)]
     pub resilience: Resilience,
+
+    #[serde(default)]
+    pub security: Security,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Security {
+    #[serde(default)]
+    pub privileges: PrivilegeDrop,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PrivilegeDrop {
+    #[serde(default = "security_default_drop_privileges")]
+    pub enabled: bool,
+    #[serde(default = "security_default_user")]
+    pub user: String,
+    #[serde(default = "security_default_group")]
+    pub group: String,
+}
+
+impl Default for PrivilegeDrop {
+    fn default() -> Self {
+        Self {
+            enabled: security_default_drop_privileges(),
+            user: security_default_user(),
+            group: security_default_group(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Listen {
     #[serde(default = "get_default_protocol")]
     pub protocol: String, // "http3"
@@ -96,6 +132,7 @@ pub struct Listen {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Tls {
     pub cert: String, // "/path/to/cert"
     pub key: String,  // "/path/to/key"
@@ -104,6 +141,7 @@ pub struct Tls {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ClientAuth {
     #[serde(default)]
     pub enabled: bool,
@@ -114,6 +152,7 @@ pub struct ClientAuth {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamTls {
     #[serde(default = "upstream_tls_default_verify_certificates")]
     pub verify_certificates: bool,
@@ -137,6 +176,7 @@ impl Default for UpstreamTls {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Upstream {
     #[serde(default = "get_default_load_balancing")]
     pub load_balancing: LoadBalancing,
@@ -147,6 +187,7 @@ pub struct Upstream {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Backend {
     pub id: String, // "backend1"
     /// Backend endpoint.
@@ -161,6 +202,7 @@ pub struct Backend {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RouteMatch {
     #[serde(default)]
     pub host: Option<String>, // host-based routing (e.g., "api.example.com")
@@ -173,6 +215,7 @@ pub struct RouteMatch {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheck {
     #[serde(default = "get_default_path")]
     pub path: String, // "/health"
@@ -194,6 +237,7 @@ pub struct HealthCheck {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LoadBalancing {
     #[serde(rename = "type")]
     pub lb_type: String, // "random","round_robin","consistent_hash"
@@ -204,6 +248,7 @@ pub struct LoadBalancing {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Log {
     // whisper -> trace
     // haunt -> debug
@@ -230,6 +275,7 @@ pub enum LogFormat {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LogFile {
     pub enabled: bool,
 
@@ -238,6 +284,7 @@ pub struct LogFile {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Performance {
     #[serde(default = "perf_default_worker_threads")]
     pub worker_threads: usize,
@@ -407,6 +454,7 @@ impl Default for Performance {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Resilience {
     #[serde(default)]
     pub adaptive_admission: AdaptiveAdmission,
@@ -427,6 +475,7 @@ pub struct Resilience {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AdaptiveAdmission {
     #[serde(default = "resilience_default_adaptive_enabled")]
     pub enabled: bool,
@@ -494,6 +543,7 @@ impl Default for AdaptiveAdmission {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteQueue {
     #[serde(default = "resilience_default_route_queue_default_cap")]
     pub default_cap: usize,
@@ -517,6 +567,7 @@ impl Default for RouteQueue {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProtocolPolicy {
     #[serde(default = "resilience_default_protocol_allow_0rtt")]
     pub allow_0rtt: bool,
@@ -550,6 +601,7 @@ impl Default for ProtocolPolicy {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct CircuitBreaker {
     #[serde(default = "resilience_default_cb_enabled")]
     pub enabled: bool,
@@ -573,6 +625,7 @@ impl Default for CircuitBreaker {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Hedging {
     #[serde(default = "resilience_default_hedging_enabled")]
     pub enabled: bool,
@@ -596,6 +649,7 @@ impl Default for Hedging {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RetryBudget {
     #[serde(default = "resilience_default_retry_budget_enabled")]
     pub enabled: bool,
@@ -616,6 +670,7 @@ impl Default for RetryBudget {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Brownout {
     #[serde(default = "resilience_default_brownout_enabled")]
     pub enabled: bool,
@@ -639,6 +694,7 @@ impl Default for Brownout {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Watchdog {
     #[serde(default = "resilience_default_watchdog_enabled")]
     pub enabled: bool,
@@ -658,6 +714,14 @@ pub struct Watchdog {
     pub drain_grace_ms: u64,
     #[serde(default = "resilience_default_watchdog_restart_cooldown_ms")]
     pub restart_cooldown_ms: u64,
+
+    /// Structured restart hook command: first element is executable, rest are args.
+    /// Preferred over `restart_hook` because it avoids shell evaluation.
+    #[serde(default)]
+    pub restart_command: Vec<String>,
+
+    /// Legacy shell command restart hook.
+    /// Deprecated: use `restart_command` instead.
     #[serde(default)]
     pub restart_hook: Option<String>,
 }
@@ -675,12 +739,14 @@ impl Default for Watchdog {
                 resilience_default_watchdog_unhealthy_consecutive_windows(),
             drain_grace_ms: resilience_default_watchdog_drain_grace_ms(),
             restart_cooldown_ms: resilience_default_watchdog_restart_cooldown_ms(),
+            restart_command: Vec::new(),
             restart_hook: None,
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Observability {
     #[serde(default)]
     pub metrics: MetricsEndpoint,
@@ -691,6 +757,7 @@ pub struct Observability {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsEndpoint {
     #[serde(default)]
     pub enabled: bool,
@@ -703,6 +770,12 @@ pub struct MetricsEndpoint {
 
     #[serde(default = "observe_default_metrics_path")]
     pub path: String,
+
+    #[serde(default = "observe_default_metrics_max_connections")]
+    pub max_connections: usize,
+
+    #[serde(default = "observe_default_metrics_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
 }
 
 impl Default for MetricsEndpoint {
@@ -712,11 +785,14 @@ impl Default for MetricsEndpoint {
             address: observe_default_address(),
             port: observe_default_port(),
             path: observe_default_metrics_path(),
+            max_connections: observe_default_metrics_max_connections(),
+            connection_timeout_ms: observe_default_metrics_connection_timeout_ms(),
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ControlApi {
     #[serde(default)]
     pub enabled: bool,
@@ -738,6 +814,15 @@ pub struct ControlApi {
 
     #[serde(default = "observe_default_control_api_restart_path")]
     pub restart_path: String,
+
+    #[serde(default)]
+    pub auth_token: Option<String>,
+
+    #[serde(default = "observe_default_control_api_max_connections")]
+    pub max_connections: usize,
+
+    #[serde(default = "observe_default_control_api_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
 }
 
 impl Default for ControlApi {
@@ -750,11 +835,15 @@ impl Default for ControlApi {
             ready_path: observe_default_control_api_ready_path(),
             runtime_path: observe_default_control_api_runtime_path(),
             restart_path: observe_default_control_api_restart_path(),
+            auth_token: None,
+            max_connections: observe_default_control_api_max_connections(),
+            connection_timeout_ms: observe_default_control_api_connection_timeout_ms(),
         }
     }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Tracing {
     #[serde(default)]
     pub enabled: bool,

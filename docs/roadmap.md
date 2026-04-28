@@ -168,10 +168,10 @@
 
 1. **Blocking backend calls**: Main thread blocks during HTTP/2 requests
 2. **Full body buffering**: High memory usage for large requests/responses
-3. **Consistent hash rebuilds**: Ring rebuilt on every request
-4. **Health check contention**: Shares connection pool with production traffic
-5. **Single-threaded**: QUIC processing limited to one thread
-6. **No TLS verification**: Development-only security posture
+3. **Configuration hot reload missing**: Runtime config updates still require restart
+4. **HTTP/3-only ingress**: No native HTTP/1.1 or HTTP/2 client ingress support
+5. **Method-based route matching unimplemented**: `route.method` remains reserved for future use
+6. **Control/metrics endpoint hardening is operator-dependent**: endpoints should remain network-isolated unless explicitly protected
 
 ### Refactoring Needs
 

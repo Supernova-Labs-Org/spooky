@@ -2,6 +2,42 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
+fn parsed_host_for_routing(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let host = if let Some(rest) = trimmed.strip_prefix('[') {
+        let end = rest.find(']')?;
+        &rest[..end]
+    } else if let Some((candidate_host, candidate_port)) = trimmed.rsplit_once(':') {
+        if !candidate_host.contains(':') && candidate_port.chars().all(|c| c.is_ascii_digit()) {
+            candidate_host
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
+    let host = host.trim_end_matches('.');
+    if host.is_empty() { None } else { Some(host) }
+}
+
+fn host_has_uppercase_ascii(host: &str) -> bool {
+    host.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+pub(crate) fn normalize_host_for_routing(raw: &str) -> Option<String> {
+    let host = parsed_host_for_routing(raw)?;
+    if host_has_uppercase_ascii(host) {
+        Some(host.to_ascii_lowercase())
+    } else {
+        Some(host.to_string())
+    }
+}
+
 /// Route precedence (deterministic):
 /// 1) Longest matching path_prefix wins.
 /// 2) On equal path length, host-specific routes win over host-agnostic routes.
@@ -53,18 +89,33 @@ impl RouteTrie {
 
     fn longest_prefix(&self, path: &str) -> Option<IndexedRoute> {
         let mut node = &self.root;
-        let mut best = node.route;
+        let mut best = node
+            .route
+            .filter(|route| prefix_boundary_matches(path, route.path_len));
 
         for byte in path.as_bytes() {
             let Some(next) = node.children.get(byte) else {
                 break;
             };
             node = next;
-            best = prefer_route(best, node.route);
+            let candidate = node
+                .route
+                .filter(|route| prefix_boundary_matches(path, route.path_len));
+            best = prefer_route(best, candidate);
         }
 
         best
     }
+}
+
+fn prefix_boundary_matches(path: &str, prefix_len: usize) -> bool {
+    if prefix_len <= 1 {
+        return true;
+    }
+    if path.len() == prefix_len {
+        return true;
+    }
+    path.as_bytes().get(prefix_len) == Some(&b'/')
 }
 
 pub(crate) struct RouteIndex {
@@ -103,10 +154,21 @@ impl RouteIndex {
             };
 
             match upstream.route.host.as_deref() {
-                Some(host) => host_tries
-                    .entry(host.to_string())
-                    .or_insert_with(RouteTrie::default)
-                    .insert(upstream.route.path_prefix.as_deref(), route),
+                Some(host) => {
+                    let normalized_host = parsed_host_for_routing(host)
+                        .map(|value| {
+                            if host_has_uppercase_ascii(value) {
+                                value.to_ascii_lowercase()
+                            } else {
+                                value.to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| host.to_ascii_lowercase());
+                    host_tries
+                        .entry(normalized_host)
+                        .or_insert_with(RouteTrie::default)
+                        .insert(upstream.route.path_prefix.as_deref(), route)
+                }
                 None => {
                     default_max_path_len = default_max_path_len.max(path_len);
                     default_trie.insert(upstream.route.path_prefix.as_deref(), route);
@@ -123,9 +185,16 @@ impl RouteIndex {
     }
 
     pub(crate) fn lookup<'a>(&'a self, path: &str, host: Option<&str>) -> Option<&'a str> {
-        let host_best = host
-            .and_then(|host_name| self.host_tries.get(host_name))
-            .and_then(|host_trie| host_trie.longest_prefix(path));
+        let host_best = host.and_then(|raw_host| {
+            let parsed_host = parsed_host_for_routing(raw_host)?;
+            let host_trie = if host_has_uppercase_ascii(parsed_host) {
+                let normalized = parsed_host.to_ascii_lowercase();
+                self.host_tries.get(normalized.as_str())
+            } else {
+                self.host_tries.get(parsed_host)
+            }?;
+            host_trie.longest_prefix(path)
+        });
 
         if let Some(best) = host_best
             && best.path_len >= self.default_max_path_len
@@ -168,11 +237,19 @@ pub(crate) fn scan_lookup<'a>(
     host: Option<&str>,
 ) -> Option<&'a str> {
     let path_bytes = path.as_bytes();
+    let normalized_request_host = host.and_then(parsed_host_for_routing);
     let mut best_match: Option<(&str, usize, bool)> = None;
 
     for (upstream_name, upstream) in upstreams {
-        let has_host_match = match (&upstream.route.host, host) {
-            (Some(route_host), Some(request_host)) => route_host == request_host,
+        let has_host_match = match (&upstream.route.host, normalized_request_host) {
+            (Some(route_host), Some(request_host)) => {
+                if route_host == request_host {
+                    true
+                } else {
+                    parsed_host_for_routing(route_host)
+                        .is_some_and(|route_host| route_host.eq_ignore_ascii_case(request_host))
+                }
+            }
             (None, _) => true,
             (Some(_), None) => false,
         };
@@ -190,6 +267,9 @@ pub(crate) fn scan_lookup<'a>(
                     continue;
                 }
                 if !path_bytes.starts_with(prefix) {
+                    continue;
+                }
+                if !prefix_boundary_matches(path, prefix.len()) {
                     continue;
                 }
                 prefix.len()
@@ -309,6 +389,53 @@ mod tests {
             scan_lookup(&upstreams, "/api/users", Some("api.example.com")),
             Some("z-host")
         );
+    }
+
+    #[test]
+    fn lookup_normalizes_request_host_case_and_port() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "api".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+        upstreams.insert("default".to_string(), test_upstream(None, Some("/")));
+        let index = RouteIndex::from_upstreams(&upstreams);
+
+        assert_eq!(
+            index.lookup("/api/v1", Some("API.EXAMPLE.COM:443")),
+            Some("api")
+        );
+        assert_eq!(
+            scan_lookup(&upstreams, "/api/v1", Some("API.EXAMPLE.COM:443")),
+            Some("api")
+        );
+    }
+
+    #[test]
+    fn lookup_normalizes_configured_host_case() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "api".to_string(),
+            test_upstream(Some("API.Example.COM"), Some("/api")),
+        );
+        upstreams.insert("default".to_string(), test_upstream(None, Some("/")));
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(
+            index.lookup("/api/v1", Some("api.example.com")),
+            Some("api")
+        );
+    }
+
+    #[test]
+    fn path_prefix_requires_segment_boundary() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert("api".to_string(), test_upstream(None, Some("/api")));
+        upstreams.insert("root".to_string(), test_upstream(None, Some("/")));
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(index.lookup("/api", None), Some("api"));
+        assert_eq!(index.lookup("/api/v1", None), Some("api"));
+        assert_eq!(index.lookup("/api2", None), Some("root"));
+        assert_eq!(scan_lookup(&upstreams, "/api2", None), Some("root"));
     }
 
     #[test]

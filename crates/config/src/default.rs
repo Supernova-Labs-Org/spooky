@@ -71,6 +71,18 @@ pub fn get_default_log() -> Log {
     }
 }
 
+pub fn security_default_drop_privileges() -> bool {
+    true
+}
+
+pub fn security_default_user() -> String {
+    String::from("nobody")
+}
+
+pub fn security_default_group() -> String {
+    String::from("nogroup")
+}
+
 pub fn perf_default_worker_threads() -> usize {
     1
 }
@@ -343,6 +355,14 @@ pub fn observe_default_metrics_path() -> String {
     String::from("/metrics")
 }
 
+pub fn observe_default_metrics_max_connections() -> usize {
+    512
+}
+
+pub fn observe_default_metrics_connection_timeout_ms() -> u64 {
+    30_000
+}
+
 pub fn observe_default_control_api_address() -> String {
     String::from("127.0.0.1")
 }
@@ -365,6 +385,14 @@ pub fn observe_default_control_api_runtime_path() -> String {
 
 pub fn observe_default_control_api_restart_path() -> String {
     String::from("/admin/runtime/restart")
+}
+
+pub fn observe_default_control_api_max_connections() -> usize {
+    256
+}
+
+pub fn observe_default_control_api_connection_timeout_ms() -> u64 {
+    30_000
 }
 
 pub fn observe_default_tracing_service_name() -> String {

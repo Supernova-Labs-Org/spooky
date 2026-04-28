@@ -40,8 +40,8 @@ use tracing::{Instrument, info_span};
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
-    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener, QuicConnection,
-    REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
+    ChannelBody, ForwardResult, HealthClassification, Metrics, OverloadShedReason, QUICListener,
+    QuicConnection, REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
     SharedRuntimeState, StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
@@ -53,7 +53,7 @@ use crate::{
     },
     outcome_from_status,
     resilience::{RouteQueueRejection, RuntimeResilience},
-    route_index::RouteIndex,
+    route_index::{RouteIndex, normalize_host_for_routing},
     watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
 
@@ -132,6 +132,7 @@ struct ControlApiState {
     upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
     expected_workers: usize,
     started_at: Instant,
+    auth_token: Option<String>,
 }
 
 impl ControlApiState {
@@ -299,13 +300,18 @@ fn validate_request_headers(
 
     if resilience.enforce_authority_host_match
         && let (Some(authority_value), Some(host_value)) = (authority.as_deref(), host.as_deref())
-        && !authority_value.eq_ignore_ascii_case(host_value)
     {
-        return Err((
-            http::StatusCode::BAD_REQUEST,
-            b":authority and host headers must match\n",
-            false,
-        ));
+        let normalized_authority = normalize_host_for_routing(authority_value)
+            .unwrap_or_else(|| authority_value.to_ascii_lowercase());
+        let normalized_host = normalize_host_for_routing(host_value)
+            .unwrap_or_else(|| host_value.to_ascii_lowercase());
+        if normalized_authority != normalized_host {
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                b":authority and host headers must match\n",
+                false,
+            ));
+        }
     }
 
     if !resilience.method_allowed(&method) {
@@ -1105,14 +1111,15 @@ impl QUICListener {
 
         let scid = quiche::ConnectionId::from_ref(&scid_bytes);
 
-        let quic_connection = match quiche::accept(&scid, None, local_addr, peer, &mut self.quic_config) {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("quiche::accept failed: {:?}", e);
-                self.metrics.inc_ingress_connection_create_failed();
-                return None;
-            }
-        };
+        let quic_connection =
+            match quiche::accept(&scid, None, local_addr, peer, &mut self.quic_config) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("quiche::accept failed: {:?}", e);
+                    self.metrics.inc_ingress_connection_create_failed();
+                    return None;
+                }
+            };
 
         let connection = QuicConnection {
             quic: quic_connection,
@@ -3893,6 +3900,8 @@ impl QUICListener {
 
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
         let metrics_path = endpoint.path.clone();
+        let max_connections = endpoint.max_connections.max(1);
+        let connection_timeout = Duration::from_millis(endpoint.connection_timeout_ms.max(1));
 
         let handle = match runtime_handle() {
             Some(handle) => handle,
@@ -3934,9 +3943,13 @@ impl QUICListener {
             Some(Arc::clone(&metrics)),
             async move {
                 info!(
-                    "Metrics endpoint listening on http://{}{}",
-                    bind, metrics_path
+                    "Metrics endpoint listening on http://{}{} (max_connections={}, connection_timeout_ms={})",
+                    bind,
+                    metrics_path,
+                    max_connections,
+                    connection_timeout.as_millis()
                 );
+                let connection_limiter = Arc::new(Semaphore::new(max_connections));
 
                 loop {
                     let (stream, _peer) = match listener.accept().await {
@@ -3946,12 +3959,21 @@ impl QUICListener {
                             continue;
                         }
                     };
+                    let permit = match Arc::clone(&connection_limiter).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            // Drop excess connections immediately under load.
+                            continue;
+                        }
+                    };
 
                     let io = TokioIo::new(stream);
                     let metrics = Arc::clone(&metrics);
                     let metrics_path = metrics_path.clone();
+                    let timeout = connection_timeout;
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let service = service_fn(move |req: Request<Incoming>| {
                             let metrics = Arc::clone(&metrics);
                             let metrics_path = metrics_path.clone();
@@ -3964,9 +3986,15 @@ impl QUICListener {
                             }
                         });
 
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
-                        {
-                            error!("Metrics endpoint connection failed: {}", err);
+                        let serve = http1::Builder::new().serve_connection(io, service);
+                        match tokio::time::timeout(timeout, serve).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                error!("Metrics endpoint connection failed: {}", err);
+                            }
+                            Err(_) => {
+                                debug!("Metrics endpoint connection timed out");
+                            }
                         }
                     });
                 }
@@ -4011,6 +4039,8 @@ impl QUICListener {
         }
 
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
+        let max_connections = endpoint.max_connections.max(1);
+        let connection_timeout = Duration::from_millis(endpoint.connection_timeout_ms.max(1));
         let paths = ControlApiPaths {
             health_path: endpoint.health_path.clone(),
             ready_path: endpoint.ready_path.clone(),
@@ -4024,6 +4054,7 @@ impl QUICListener {
             upstream_pools: shared_state.upstream_pools.clone(),
             expected_workers: worker_count.max(1),
             started_at: Instant::now(),
+            auth_token: endpoint.auth_token.clone(),
         };
 
         let handle = match runtime_handle() {
@@ -4065,9 +4096,15 @@ impl QUICListener {
             Some(Arc::clone(&shared_state.metrics)),
             async move {
                 info!(
-                    "Control API endpoint listening on http://{}{} (ready={}, runtime={})",
-                    bind, paths.health_path, paths.ready_path, paths.runtime_path
+                    "Control API endpoint listening on http://{}{} (ready={}, runtime={}, max_connections={}, connection_timeout_ms={})",
+                    bind,
+                    paths.health_path,
+                    paths.ready_path,
+                    paths.runtime_path,
+                    max_connections,
+                    connection_timeout.as_millis()
                 );
+                let connection_limiter = Arc::new(Semaphore::new(max_connections));
 
                 loop {
                     let (stream, _peer) = match listener.accept().await {
@@ -4077,12 +4114,20 @@ impl QUICListener {
                             continue;
                         }
                     };
+                    let permit = match Arc::clone(&connection_limiter).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            continue;
+                        }
+                    };
 
                     let io = TokioIo::new(stream);
                     let paths = paths.clone();
                     let state = state.clone();
+                    let timeout = connection_timeout;
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let service = service_fn(move |req: Request<Incoming>| {
                             let paths = paths.clone();
                             let state = state.clone();
@@ -4093,9 +4138,15 @@ impl QUICListener {
                             }
                         });
 
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
-                        {
-                            error!("Control API endpoint connection failed: {}", err);
+                        let serve = http1::Builder::new().serve_connection(io, service);
+                        match tokio::time::timeout(timeout, serve).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                error!("Control API endpoint connection failed: {}", err);
+                            }
+                            Err(_) => {
+                                debug!("Control API endpoint connection timed out");
+                            }
                         }
                     });
                 }
@@ -4155,6 +4206,14 @@ impl QUICListener {
         }
 
         if req.method() == http::Method::GET && path == paths.runtime_path {
+            if !Self::control_api_is_authorized(&req, state) {
+                return Self::json_response(
+                    StatusCode::UNAUTHORIZED,
+                    json!({
+                        "error": "unauthorized",
+                    }),
+                );
+            }
             let (healthy_backends, total_backends) = state.snapshot_backend_health();
             let response = json!({
                 "uptime_ms": state.started_at.elapsed().as_millis() as u64,
@@ -4194,6 +4253,15 @@ impl QUICListener {
         }
 
         if req.method() == http::Method::POST && path == paths.restart_path {
+            if !Self::control_api_is_authorized(&req, state) {
+                return Self::json_response(
+                    StatusCode::UNAUTHORIZED,
+                    json!({
+                        "accepted": false,
+                        "error": "unauthorized",
+                    }),
+                );
+            }
             if !state.watchdog.enabled() {
                 return Self::json_response(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -4226,6 +4294,22 @@ impl QUICListener {
             Ok(resp) => resp,
             Err(_) => Response::new(Full::new(Bytes::from_static(b"not found\n"))),
         }
+    }
+
+    fn control_api_is_authorized(req: &Request<Incoming>, state: &ControlApiState) -> bool {
+        let Some(token) = state.auth_token.as_ref() else {
+            return true;
+        };
+        let Some(header) = req.headers().get(http::header::AUTHORIZATION) else {
+            return false;
+        };
+        let Ok(raw) = header.to_str() else {
+            return false;
+        };
+        let Some(provided) = raw.strip_prefix("Bearer ") else {
+            return false;
+        };
+        provided == token
     }
 
     fn spawn_watchdog(
@@ -4266,11 +4350,22 @@ impl QUICListener {
                 let mut interval =
                     tokio::time::interval(Duration::from_millis(watchdog_config.check_interval_ms));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let has_restart_hook = watchdog_config
+                let restart_program = watchdog_config
+                    .restart_command
+                    .first()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let has_restart_command = restart_program.is_some();
+                if watchdog_config
                     .restart_hook
                     .as_deref()
                     .map(str::trim)
-                    .is_some_and(|value| !value.is_empty());
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    warn!(
+                        "Watchdog restart_hook is deprecated and ignored; configure resilience.watchdog.restart_command instead"
+                    );
+                }
 
                 let mut previous_requests = metrics.requests_total.load(Ordering::Relaxed);
                 let mut previous_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
@@ -4310,9 +4405,9 @@ impl QUICListener {
                     }
 
                     if degraded_windows >= watchdog_config.unhealthy_consecutive_windows {
-                        if !has_restart_hook {
+                        if !has_restart_command {
                             warn!(
-                                "Watchdog detected unhealthy runtime state, but restart_hook is not configured"
+                                "Watchdog detected unhealthy runtime state, but restart_command is not configured"
                             );
                             degraded_windows = 0;
                             continue;
@@ -4359,14 +4454,15 @@ impl QUICListener {
                         );
                     }
 
-                    let cmd = watchdog_config
-                        .restart_hook
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or_default();
-                    let status = tokio::process::Command::new("/bin/sh")
-                        .arg("-c")
-                        .arg(cmd)
+                    let program = restart_program.as_deref().unwrap_or_default();
+                    let args: Vec<&str> = watchdog_config
+                        .restart_command
+                        .iter()
+                        .skip(1)
+                        .map(String::as_str)
+                        .collect();
+                    let status = tokio::process::Command::new(program)
+                        .args(args)
                         .env("SPOOKY_WATCHDOG_REASON", &restart_reason)
                         .status()
                         .await;
@@ -4472,24 +4568,25 @@ impl QUICListener {
                         let result =
                             tokio::time::timeout(timeout, health_client.send(request)).await;
 
-                        let healthy = match result {
-                            Ok(Ok(response)) => response.status().is_success(),
-                            _ => false,
+                        let outcome = match result {
+                            Ok(Ok(response)) => {
+                                classify_active_health_check_response(response.status())
+                            }
+                            _ => HealthClassification::Failure,
                         };
-                        if healthy {
-                            task_metrics.inc_health_check_success();
-                        } else {
-                            task_metrics.inc_health_check_failure();
-                        }
 
                         let transition = match upstream_pool.lock() {
-                            Ok(mut pool) => {
-                                if healthy {
+                            Ok(mut pool) => match outcome {
+                                HealthClassification::Success => {
+                                    task_metrics.inc_health_check_success();
                                     pool.pool.mark_success(index)
-                                } else {
+                                }
+                                HealthClassification::Failure => {
+                                    task_metrics.inc_health_check_failure();
                                     pool.pool.mark_failure(index)
                                 }
-                            }
+                                HealthClassification::Neutral => None,
+                            },
                             Err(_) => None,
                         };
 
@@ -4510,6 +4607,10 @@ fn classify_retry_reason(err: &ProxyError) -> RetryReason {
         ProxyError::Pool(_) => RetryReason::BackendPool,
         _ => RetryReason::BackendTransport,
     }
+}
+
+fn classify_active_health_check_response(status: StatusCode) -> HealthClassification {
+    outcome_from_status(status)
 }
 
 pub fn configure_async_runtime(worker_threads: usize) {
@@ -4594,14 +4695,15 @@ mod tests {
 
     use crate::REQUEST_ID_COUNTER;
     use crate::cid_radix::CidRadix;
+    use http::StatusCode;
 
     use std::collections::HashSet;
     use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
 
     use super::{
-        ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,
-        resolve_primary_from_radix_prefix, sweep_closed_connections,
+        ConnectionRoutes, TokenBucket, abort_stream, classify_active_health_check_response,
+        purge_connection_routes, resolve_primary_from_radix_prefix, sweep_closed_connections,
     };
     type RoutingMaps = (
         HashMap<Arc<[u8]>, Arc<[u8]>>,
@@ -4611,6 +4713,22 @@ mod tests {
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
+    }
+
+    #[test]
+    fn active_health_check_classification_matches_shared_policy() {
+        assert!(matches!(
+            classify_active_health_check_response(StatusCode::MOVED_PERMANENTLY),
+            crate::HealthClassification::Success
+        ));
+        assert!(matches!(
+            classify_active_health_check_response(StatusCode::BAD_REQUEST),
+            crate::HealthClassification::Neutral
+        ));
+        assert!(matches!(
+            classify_active_health_check_response(StatusCode::BAD_GATEWAY),
+            crate::HealthClassification::Failure
+        ));
     }
 
     #[test]

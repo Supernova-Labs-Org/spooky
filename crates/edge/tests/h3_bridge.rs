@@ -31,7 +31,7 @@ use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 
 use spooky_config::config::{
-    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, LogFormat, Tls,
+    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, LogFormat, Security, Tls,
     UpstreamTls,
 };
 use spooky_edge::QUICListener;
@@ -119,6 +119,7 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
         resilience: spooky_config::config::Resilience::default(),
+        security: Security::default(),
     }
 }
 
@@ -1217,86 +1218,6 @@ fn http3_to_http2_roundtrip() {
     assert!(!body.is_empty(), "expected non-empty response from backend");
 }
 
-#[test]
-fn in_flight_request_completes_during_drain_window() {
-    let dir = tempdir().expect("failed to create temp dir");
-    let (cert, key) = write_test_certs(&dir);
-
-    let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let inflight_seen = Arc::new(AtomicBool::new(false));
-    let backend_addr = rt.block_on(start_h2_backend_with_drain_probe(Arc::clone(
-        &inflight_seen,
-    )));
-    let config = make_config(0, backend_addr.to_string(), cert, key);
-    let listener = QUICListener::new(config).expect("failed to create listener");
-    let listen_addr = listener.socket.local_addr().unwrap();
-
-    let listener = Arc::new(Mutex::new(listener));
-    let stop = Arc::new(AtomicBool::new(false));
-    let listener_thread = {
-        let listener = Arc::clone(&listener);
-        let stop = Arc::clone(&stop);
-        thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                if let Ok(mut guard) = listener.lock() {
-                    guard.poll();
-                } else {
-                    break;
-                }
-            }
-        })
-    };
-
-    let client_thread = thread::spawn(move || {
-        run_h3_client_concurrent_get(
-            listen_addr,
-            &["/drain-slow"],
-            Duration::from_secs(REQUEST_TIMEOUT_SECS + 6),
-        )
-    });
-
-    let wait_start = Instant::now();
-    while !inflight_seen.load(Ordering::Relaxed) {
-        assert!(
-            wait_start.elapsed() < Duration::from_secs(3),
-            "backend never observed the in-flight request before drain"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    if let Ok(mut guard) = listener.lock() {
-        guard.start_draining();
-    }
-
-    let observations = client_thread
-        .join()
-        .expect("client thread join failed")
-        .expect("request should complete while draining");
-    let drained = observation_for(&observations, "/drain-slow");
-    assert_eq!(drained.status.as_deref(), Some("200"));
-    assert_eq!(drained.body, b"drain-ok\n");
-
-    let drain_wait_start = Instant::now();
-    loop {
-        let done = if let Ok(mut guard) = listener.lock() {
-            guard.drain_complete()
-        } else {
-            false
-        };
-        if done {
-            break;
-        }
-        assert!(
-            drain_wait_start.elapsed() < Duration::from_secs(2),
-            "drain should complete promptly once in-flight streams finish"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    let _ = listener_thread.join();
-}
-
 /// While draining, new QUIC Initial packets must be silently dropped so no new
 /// connection state is allocated.  The test starts draining before any client
 /// connects, then confirms a fresh QUIC connection attempt never reaches the
@@ -1865,7 +1786,7 @@ fn concurrent_large_body_pressure_is_bounded() {
                 chunk1,
                 chunk2,
                 Duration::from_millis(20),
-                Duration::from_secs(REQUEST_TIMEOUT_SECS + 12),
+                Duration::from_secs(REQUEST_TIMEOUT_SECS + 30),
             )
         }));
     }

@@ -17,6 +17,7 @@ pub struct WatchdogRuntimeConfig {
     pub unhealthy_consecutive_windows: u32,
     pub drain_grace_ms: u64,
     pub restart_cooldown_ms: u64,
+    pub restart_command: Vec<String>,
     pub restart_hook: Option<String>,
 }
 
@@ -32,6 +33,7 @@ impl From<&WatchdogConfig> for WatchdogRuntimeConfig {
             unhealthy_consecutive_windows: value.unhealthy_consecutive_windows.max(1),
             drain_grace_ms: value.drain_grace_ms.max(1),
             restart_cooldown_ms: value.restart_cooldown_ms.max(1),
+            restart_command: value.restart_command.clone(),
             restart_hook: value.restart_hook.clone(),
         }
     }
@@ -179,6 +181,7 @@ mod tests {
             unhealthy_consecutive_windows: 3,
             drain_grace_ms: 5_000,
             restart_cooldown_ms: 60_000,
+            restart_command: Vec::new(),
             restart_hook: None,
         };
         let watchdog = WatchdogCoordinator::new(&cfg);
@@ -198,6 +201,7 @@ mod tests {
             unhealthy_consecutive_windows: 3,
             drain_grace_ms: 5_000,
             restart_cooldown_ms: 60_000,
+            restart_command: Vec::new(),
             restart_hook: None,
         };
         let watchdog = WatchdogCoordinator::new(&cfg);

@@ -204,6 +204,21 @@ upstream:
 log:
   level: info  # Use 'warn' for production to reduce I/O
 
+security:
+  privileges:
+    enabled: true
+    user: "spooky"
+    group: "spooky"
+
+observability:
+  control_api:
+    enabled: true
+    address: "127.0.0.1"
+    port: 9902
+    auth_token: "replace-with-strong-token"
+    max_connections: 256
+    connection_timeout_ms: 30000
+
 # Connection tuning (if supported by configuration schema)
 # Adjust based on backend capacity and expected load
 # max_concurrent_connections: 10000
@@ -216,6 +231,8 @@ log:
 - Adjust `failure_threshold` and `success_threshold` based on backend stability
 - Weight distribution should reflect backend capacity
 - Consistent hashing is appropriate for stateful backends requiring session affinity
+- For privileged ports (for example `443`), bind as root/capability and drop privileges immediately with `security.privileges`
+- Keep control API on loopback unless protected by strong network ACLs and authentication
 
 ## TLS Certificate Management
 

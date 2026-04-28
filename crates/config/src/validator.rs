@@ -3,6 +3,7 @@ use crate::config::{CURRENT_CONFIG_VERSION, Config, SUPPORTED_CONFIG_VERSIONS};
 use log::{error, info, warn};
 use std::fs::File;
 use std::io::BufReader;
+use std::net::IpAddr;
 use std::path::Path;
 
 pub const VALID_LOG_LEVELS: &[&str] = &[
@@ -89,6 +90,17 @@ fn validate_pem_private_key(path: &str, field_name: &str) -> bool {
             false
         }
     }
+}
+
+fn is_loopback_bind_address(raw: &str) -> bool {
+    let normalized = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    if normalized.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    normalized
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 pub fn validate(config: &Config) -> bool {
@@ -588,6 +600,28 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if !config.resilience.watchdog.restart_command.is_empty()
+        && config.resilience.watchdog.restart_command[0]
+            .trim()
+            .is_empty()
+    {
+        error!("resilience.watchdog.restart_command[0] must be a non-empty executable path");
+        return false;
+    }
+
+    if config
+        .resilience
+        .watchdog
+        .restart_hook
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        error!(
+            "resilience.watchdog.restart_hook is deprecated and unsupported; use restart_command instead"
+        );
+        return false;
+    }
+
     // --- Validate observability ---
     if config.observability.metrics.enabled {
         if config.observability.metrics.address.is_empty() {
@@ -603,6 +637,23 @@ pub fn validate(config: &Config) -> bool {
         if !config.observability.metrics.path.starts_with('/') {
             error!("observability.metrics.path must start with '/'");
             return false;
+        }
+
+        if config.observability.metrics.max_connections == 0 {
+            error!("observability.metrics.max_connections must be greater than 0");
+            return false;
+        }
+
+        if config.observability.metrics.connection_timeout_ms == 0 {
+            error!("observability.metrics.connection_timeout_ms must be greater than 0");
+            return false;
+        }
+
+        if !is_loopback_bind_address(&config.observability.metrics.address) {
+            warn!(
+                "observability.metrics is bound to non-loopback address {}; ensure network ACLs protect plaintext metrics endpoint",
+                config.observability.metrics.address
+            );
         }
     }
 
@@ -640,6 +691,45 @@ pub fn validate(config: &Config) -> bool {
                 error!("{} must start with '/'", name);
                 return false;
             }
+        }
+
+        if config.observability.control_api.max_connections == 0 {
+            error!("observability.control_api.max_connections must be greater than 0");
+            return false;
+        }
+
+        if config.observability.control_api.connection_timeout_ms == 0 {
+            error!("observability.control_api.connection_timeout_ms must be greater than 0");
+            return false;
+        }
+
+        if let Some(token) = config.observability.control_api.auth_token.as_ref()
+            && token.trim().is_empty()
+        {
+            error!("observability.control_api.auth_token cannot be empty when provided");
+            return false;
+        }
+
+        if !is_loopback_bind_address(&config.observability.control_api.address)
+            && config.observability.control_api.auth_token.is_none()
+        {
+            error!(
+                "observability.control_api.auth_token is required when control_api.address is non-loopback ({})",
+                config.observability.control_api.address
+            );
+            return false;
+        }
+    }
+
+    // --- Validate privilege-drop security controls ---
+    if config.security.privileges.enabled {
+        if config.security.privileges.user.trim().is_empty() {
+            error!("security.privileges.user must be non-empty when privilege drop is enabled");
+            return false;
+        }
+        if config.security.privileges.group.trim().is_empty() {
+            error!("security.privileges.group must be non-empty when privilege drop is enabled");
+            return false;
         }
     }
 
@@ -919,8 +1009,8 @@ mod tests {
     use super::validate;
     use crate::config::{
         Backend, ClientAuth, Config, ControlApi, HealthCheck, Listen, LoadBalancing, Log,
-        LogFormat, MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Tls,
-        Tracing, Upstream, UpstreamTls,
+        LogFormat, MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Security,
+        Tls, Tracing, Upstream, UpstreamTls,
     };
     use rcgen::{Certificate, CertificateParams, SanType};
     use std::collections::HashMap;
@@ -999,6 +1089,7 @@ mod tests {
             performance: Performance::default(),
             observability: Observability::default(),
             resilience: Resilience::default(),
+            security: Security::default(),
         }
     }
 
@@ -1070,6 +1161,8 @@ upstream:
         assert_eq!(cfg.performance.client_body_idle_timeout_ms, 10_000);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
+        assert_eq!(cfg.observability.metrics.max_connections, 512);
+        assert_eq!(cfg.observability.metrics.connection_timeout_ms, 30_000);
         assert!(cfg.upstream_tls.verify_certificates);
         assert!(cfg.upstream_tls.strict_sni);
         assert!(!cfg.listen.tls.client_auth.enabled);
@@ -1086,6 +1179,8 @@ upstream:
         assert!(cfg.resilience.protocol.enforce_authority_host_match);
         assert!(!cfg.resilience.watchdog.enabled);
         assert_eq!(cfg.resilience.watchdog.check_interval_ms, 1_000);
+        assert_eq!(cfg.observability.control_api.max_connections, 256);
+        assert_eq!(cfg.observability.control_api.connection_timeout_ms, 30_000);
     }
 
     #[test]
@@ -1318,10 +1413,34 @@ upstream:
                 address: "127.0.0.1".to_string(),
                 port: 9901,
                 path: "metrics".to_string(),
+                max_connections: 128,
+                connection_timeout_ms: 10_000,
             },
             control_api: ControlApi::default(),
             tracing: Tracing::default(),
         };
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.metrics.enabled = true;
+        cfg.observability.metrics.max_connections = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.metrics.enabled = true;
+        cfg.observability.metrics.connection_timeout_ms = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.control_api.enabled = true;
+        cfg.observability.control_api.max_connections = 0;
+        cfg.observability.control_api.auth_token = Some("token".to_string());
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.control_api.enabled = true;
+        cfg.observability.control_api.connection_timeout_ms = 0;
+        cfg.observability.control_api.auth_token = Some("token".to_string());
         assert!(!validate(&cfg));
     }
 
@@ -1392,6 +1511,8 @@ upstream:
                 address: "127.0.0.1".to_string(),
                 port: 9901,
                 path: "/metrics".to_string(),
+                max_connections: 128,
+                connection_timeout_ms: 10_000,
             },
             control_api: ControlApi::default(),
             tracing: Tracing::default(),
@@ -1456,6 +1577,41 @@ upstream:
         cfg.upstream
             .insert("test_upstream_2".to_string(), duplicate);
 
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn rejects_non_loopback_control_api_without_auth_token() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.control_api.enabled = true;
+        cfg.observability.control_api.address = "0.0.0.0".to_string();
+        cfg.observability.control_api.auth_token = None;
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn rejects_legacy_watchdog_restart_hook() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.watchdog.restart_hook = Some("echo legacy".to_string());
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn rejects_empty_privilege_drop_user_or_group() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.security.privileges.enabled = true;
+        cfg.security.privileges.user = " ".to_string();
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.security.privileges.enabled = true;
+        cfg.security.privileges.group = " ".to_string();
         assert!(!validate(&cfg));
     }
 }

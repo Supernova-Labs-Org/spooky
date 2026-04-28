@@ -107,6 +107,8 @@ observability:
         address: "127.0.0.1"
         port: 9901
         path: "/metrics"
+        max_connections: 512
+        connection_timeout_ms: 30000
     control_api:
         enabled: true
         address: "127.0.0.1"
@@ -115,6 +117,9 @@ observability:
         ready_path: "/ready"
         runtime_path: "/admin/runtime"
         restart_path: "/admin/runtime/restart"
+        auth_token: "replace-with-strong-token"
+        max_connections: 256
+        connection_timeout_ms: 30000
     tracing:
         enabled: false
         service_name: "spooky"
@@ -171,4 +176,10 @@ resilience:
         unhealthy_consecutive_windows: 3
         drain_grace_ms: 8000
         restart_cooldown_ms: 120000
-        restart_hook: null
+        restart_command: []
+
+security:
+    privileges:
+        enabled: true
+        user: "nobody"
+        group: "nogroup"

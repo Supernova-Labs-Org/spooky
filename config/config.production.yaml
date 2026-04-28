@@ -34,3 +34,8 @@ log:
   level: info
   format: json
 
+security:
+  privileges:
+    enabled: true
+    user: "spooky"
+    group: "spooky"

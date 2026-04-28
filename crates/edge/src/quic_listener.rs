@@ -4301,11 +4301,22 @@ impl QUICListener {
                 let mut interval =
                     tokio::time::interval(Duration::from_millis(watchdog_config.check_interval_ms));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                let has_restart_hook = watchdog_config
+                let restart_program = watchdog_config
+                    .restart_command
+                    .first()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+                let has_restart_command = restart_program.is_some();
+                if watchdog_config
                     .restart_hook
                     .as_deref()
                     .map(str::trim)
-                    .is_some_and(|value| !value.is_empty());
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    warn!(
+                        "Watchdog restart_hook is deprecated and ignored; configure resilience.watchdog.restart_command instead"
+                    );
+                }
 
                 let mut previous_requests = metrics.requests_total.load(Ordering::Relaxed);
                 let mut previous_timeouts = metrics.backend_timeouts.load(Ordering::Relaxed);
@@ -4345,9 +4356,9 @@ impl QUICListener {
                     }
 
                     if degraded_windows >= watchdog_config.unhealthy_consecutive_windows {
-                        if !has_restart_hook {
+                        if !has_restart_command {
                             warn!(
-                                "Watchdog detected unhealthy runtime state, but restart_hook is not configured"
+                                "Watchdog detected unhealthy runtime state, but restart_command is not configured"
                             );
                             degraded_windows = 0;
                             continue;
@@ -4394,14 +4405,15 @@ impl QUICListener {
                         );
                     }
 
-                    let cmd = watchdog_config
-                        .restart_hook
-                        .as_deref()
-                        .map(str::trim)
-                        .unwrap_or_default();
-                    let status = tokio::process::Command::new("/bin/sh")
-                        .arg("-c")
-                        .arg(cmd)
+                    let program = restart_program.as_deref().unwrap_or_default();
+                    let args: Vec<&str> = watchdog_config
+                        .restart_command
+                        .iter()
+                        .skip(1)
+                        .map(String::as_str)
+                        .collect();
+                    let status = tokio::process::Command::new(program)
+                        .args(args)
                         .env("SPOOKY_WATCHDOG_REASON", &restart_reason)
                         .status()
                         .await;

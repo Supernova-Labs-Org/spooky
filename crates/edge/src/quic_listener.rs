@@ -4568,7 +4568,9 @@ impl QUICListener {
                             tokio::time::timeout(timeout, health_client.send(request)).await;
 
                         let outcome = match result {
-                            Ok(Ok(response)) => outcome_from_status(response.status()),
+                            Ok(Ok(response)) => {
+                                classify_active_health_check_response(response.status())
+                            }
                             _ => HealthClassification::Failure,
                         };
 
@@ -4606,6 +4608,10 @@ fn classify_retry_reason(err: &ProxyError) -> RetryReason {
         ProxyError::Pool(_) => RetryReason::BackendPool,
         _ => RetryReason::BackendTransport,
     }
+}
+
+fn classify_active_health_check_response(status: StatusCode) -> HealthClassification {
+    outcome_from_status(status)
 }
 
 pub fn configure_async_runtime(worker_threads: usize) {
@@ -4696,8 +4702,8 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use super::{
-        ConnectionRoutes, TokenBucket, abort_stream, purge_connection_routes,
-        resolve_primary_from_radix_prefix, sweep_closed_connections,
+        ConnectionRoutes, TokenBucket, abort_stream, classify_active_health_check_response,
+        purge_connection_routes, resolve_primary_from_radix_prefix, sweep_closed_connections,
     };
     type RoutingMaps = (
         HashMap<Arc<[u8]>, Arc<[u8]>>,
@@ -4707,6 +4713,22 @@ mod tests {
 
     fn cid(bytes: &[u8]) -> Arc<[u8]> {
         Arc::from(bytes)
+    }
+
+    #[test]
+    fn active_health_check_classification_matches_shared_policy() {
+        assert!(matches!(
+            classify_active_health_check_response(StatusCode::MOVED_PERMANENTLY),
+            crate::HealthClassification::Success
+        ));
+        assert!(matches!(
+            classify_active_health_check_response(StatusCode::BAD_REQUEST),
+            crate::HealthClassification::Neutral
+        ));
+        assert!(matches!(
+            classify_active_health_check_response(StatusCode::BAD_GATEWAY),
+            crate::HealthClassification::Failure
+        ));
     }
 
     #[test]

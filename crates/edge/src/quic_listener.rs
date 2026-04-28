@@ -3204,26 +3204,24 @@ impl QUICListener {
                         // Update health/metrics for successful upstream response.
                         if let Some(req) = streams.get(&stream_id) {
                             if let (Some(addr), Some(idx)) = (&req.backend_addr, req.backend_index)
+                                && let Some(pool) = req.upstream_pool.as_ref()
                             {
-                                if let Some(pool) = req.upstream_pool.as_ref() {
-                                    let transition =
-                                        pool.lock().ok().and_then(
-                                            |mut p| match outcome_from_status(status) {
-                                                crate::HealthClassification::Success => {
-                                                    p.pool.mark_success(idx)
-                                                }
-                                                crate::HealthClassification::Failure => {
-                                                    p.pool.mark_request_failure(
-                                                        idx,
-                                                        HealthFailureReason::HttpStatus5xx,
-                                                    )
-                                                }
-                                                crate::HealthClassification::Neutral => None,
-                                            },
-                                        );
-                                    if let Some(t) = transition {
-                                        Self::log_health_transition(addr, t);
+                                let transition = pool.lock().ok().and_then(|mut p| {
+                                    match outcome_from_status(status) {
+                                        crate::HealthClassification::Success => {
+                                            p.pool.mark_success(idx)
+                                        }
+                                        crate::HealthClassification::Failure => {
+                                            p.pool.mark_request_failure(
+                                                idx,
+                                                HealthFailureReason::HttpStatus5xx,
+                                            )
+                                        }
+                                        crate::HealthClassification::Neutral => None,
                                     }
+                                });
+                                if let Some(t) = transition {
+                                    Self::log_health_transition(addr, t);
                                 }
                             }
                             metrics.inc_success();

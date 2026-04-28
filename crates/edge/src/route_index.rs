@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
+#[inline(always)]
 fn parsed_host_for_routing(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -25,6 +26,7 @@ fn parsed_host_for_routing(raw: &str) -> Option<&str> {
     if host.is_empty() { None } else { Some(host) }
 }
 
+#[inline(always)]
 fn host_has_uppercase_ascii(host: &str) -> bool {
     host.bytes().any(|byte| byte.is_ascii_uppercase())
 }
@@ -133,6 +135,7 @@ impl RouteTrie {
     }
 }
 
+#[inline(always)]
 fn prefix_boundary_matches(path: &str, prefix_len: usize) -> bool {
     if prefix_len <= 1 {
         return true;
@@ -210,8 +213,25 @@ impl RouteIndex {
     }
 
     pub(crate) fn lookup<'a>(&'a self, path: &str, host: Option<&str>) -> Option<&'a str> {
-        self.lookup_with_decision(path, host)
-            .map(|decision| decision.upstream)
+        let host_best = host.and_then(|raw_host| {
+            let parsed_host = parsed_host_for_routing(raw_host)?;
+            let host_trie = if host_has_uppercase_ascii(parsed_host) {
+                let normalized = parsed_host.to_ascii_lowercase();
+                self.host_tries.get(normalized.as_str())
+            } else {
+                self.host_tries.get(parsed_host)
+            }?;
+            host_trie.longest_prefix(path)
+        });
+
+        if let Some(best) = host_best
+            && best.path_len >= self.default_max_path_len
+        {
+            return Some(self.upstream_names[best.upstream_idx].as_str());
+        }
+
+        let best = prefer_route(self.default_trie.longest_prefix(path), host_best);
+        best.map(|route| self.upstream_names[route.upstream_idx].as_str())
     }
 
     pub(crate) fn lookup_with_decision<'a>(
@@ -296,6 +316,7 @@ impl RouteIndex {
     }
 }
 
+#[inline(always)]
 fn prefer_route(
     current: Option<IndexedRoute>,
     candidate: Option<IndexedRoute>,
@@ -312,6 +333,7 @@ fn prefer_route(
     }
 }
 
+#[inline(always)]
 fn compare_route(current: IndexedRoute, candidate: IndexedRoute) -> RoutePreference {
     if candidate.path_len > current.path_len {
         RoutePreference::TakeCandidatePathLen

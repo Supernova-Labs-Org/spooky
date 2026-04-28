@@ -738,6 +738,9 @@ pub struct ControlApi {
 
     #[serde(default = "observe_default_control_api_restart_path")]
     pub restart_path: String,
+
+    #[serde(default)]
+    pub auth_token: Option<String>,
 }
 
 impl Default for ControlApi {
@@ -750,6 +753,7 @@ impl Default for ControlApi {
             ready_path: observe_default_control_api_ready_path(),
             runtime_path: observe_default_control_api_runtime_path(),
             restart_path: observe_default_control_api_restart_path(),
+            auth_token: None,
         }
     }
 }

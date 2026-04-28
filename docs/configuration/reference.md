@@ -289,7 +289,7 @@ Each backend represents an upstream server that can handle requests.
 
 **Address format notes:**
 - `host:port` — shorthand, treated as `https://host:port`
-- `https://host:port` — TLS connection; certificate verification is currently skipped (self-signed certs are accepted)
+- `https://host:port` — TLS connection with certificate verification enabled by default (`upstream_tls.verify_certificates=true`)
 - `http://host:port` — plain HTTP/1.1 only; HTTP/2 over cleartext (h2c) is not supported
 
 #### Health Check Configuration

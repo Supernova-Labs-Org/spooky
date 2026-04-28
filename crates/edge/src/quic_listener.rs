@@ -303,14 +303,14 @@ fn validate_request_headers(
     {
         let normalized_authority = normalize_host_for_routing(authority_value)
             .unwrap_or_else(|| authority_value.to_ascii_lowercase());
-        let normalized_host =
-            normalize_host_for_routing(host_value).unwrap_or_else(|| host_value.to_ascii_lowercase());
+        let normalized_host = normalize_host_for_routing(host_value)
+            .unwrap_or_else(|| host_value.to_ascii_lowercase());
         if normalized_authority != normalized_host {
-        return Err((
-            http::StatusCode::BAD_REQUEST,
-            b":authority and host headers must match\n",
-            false,
-        ));
+            return Err((
+                http::StatusCode::BAD_REQUEST,
+                b":authority and host headers must match\n",
+                false,
+            ));
         }
     }
 
@@ -1111,14 +1111,15 @@ impl QUICListener {
 
         let scid = quiche::ConnectionId::from_ref(&scid_bytes);
 
-        let quic_connection = match quiche::accept(&scid, None, local_addr, peer, &mut self.quic_config) {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!("quiche::accept failed: {:?}", e);
-                self.metrics.inc_ingress_connection_create_failed();
-                return None;
-            }
-        };
+        let quic_connection =
+            match quiche::accept(&scid, None, local_addr, peer, &mut self.quic_config) {
+                Ok(conn) => conn,
+                Err(e) => {
+                    error!("quiche::accept failed: {:?}", e);
+                    self.metrics.inc_ingress_connection_create_failed();
+                    return None;
+                }
+            };
 
         let connection = QuicConnection {
             quic: quic_connection,
@@ -4575,19 +4576,17 @@ impl QUICListener {
                         };
 
                         let transition = match upstream_pool.lock() {
-                            Ok(mut pool) => {
-                                match outcome {
-                                    HealthClassification::Success => {
-                                        task_metrics.inc_health_check_success();
-                                        pool.pool.mark_success(index)
-                                    }
-                                    HealthClassification::Failure => {
-                                        task_metrics.inc_health_check_failure();
-                                        pool.pool.mark_failure(index)
-                                    }
-                                    HealthClassification::Neutral => None,
+                            Ok(mut pool) => match outcome {
+                                HealthClassification::Success => {
+                                    task_metrics.inc_health_check_success();
+                                    pool.pool.mark_success(index)
                                 }
-                            }
+                                HealthClassification::Failure => {
+                                    task_metrics.inc_health_check_failure();
+                                    pool.pool.mark_failure(index)
+                                }
+                                HealthClassification::Neutral => None,
+                            },
                             Err(_) => None,
                         };
 

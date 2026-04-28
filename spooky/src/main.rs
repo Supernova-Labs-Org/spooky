@@ -2,8 +2,8 @@
 
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
-mod runtime_guard;
 mod privilege_drop;
+mod runtime_guard;
 
 use std::sync::{
     Arc,
@@ -161,8 +161,7 @@ Use a port >= 1024 for unprivileged startup.",
                 Ok(()) => {
                     info!(
                         "Dropped root privileges to user='{}' group='{}'",
-                        config_yaml.security.privileges.user,
-                        config_yaml.security.privileges.group
+                        config_yaml.security.privileges.user, config_yaml.security.privileges.group
                     );
                 }
                 Err(err) => {

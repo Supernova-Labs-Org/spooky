@@ -601,7 +601,9 @@ pub fn validate(config: &Config) -> bool {
     }
 
     if !config.resilience.watchdog.restart_command.is_empty()
-        && config.resilience.watchdog.restart_command[0].trim().is_empty()
+        && config.resilience.watchdog.restart_command[0]
+            .trim()
+            .is_empty()
     {
         error!("resilience.watchdog.restart_command[0] must be a non-empty executable path");
         return false;
@@ -1007,8 +1009,8 @@ mod tests {
     use super::validate;
     use crate::config::{
         Backend, ClientAuth, Config, ControlApi, HealthCheck, Listen, LoadBalancing, Log,
-        LogFormat, MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Tls,
-        Security, Tracing, Upstream, UpstreamTls,
+        LogFormat, MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Security,
+        Tls, Tracing, Upstream, UpstreamTls,
     };
     use rcgen::{Certificate, CertificateParams, SanType};
     use std::collections::HashMap;

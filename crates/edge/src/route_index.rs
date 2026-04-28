@@ -146,8 +146,8 @@ impl RouteIndex {
 
             match upstream.route.host.as_deref() {
                 Some(host) => {
-                    let normalized_host =
-                        normalize_host_for_routing(host).unwrap_or_else(|| host.to_ascii_lowercase());
+                    let normalized_host = normalize_host_for_routing(host)
+                        .unwrap_or_else(|| host.to_ascii_lowercase());
                     host_tries
                         .entry(normalized_host)
                         .or_insert_with(RouteTrie::default)
@@ -393,7 +393,10 @@ mod tests {
         );
         upstreams.insert("default".to_string(), test_upstream(None, Some("/")));
         let index = RouteIndex::from_upstreams(&upstreams);
-        assert_eq!(index.lookup("/api/v1", Some("api.example.com")), Some("api"));
+        assert_eq!(
+            index.lookup("/api/v1", Some("api.example.com")),
+            Some("api")
+        );
     }
 
     #[test]

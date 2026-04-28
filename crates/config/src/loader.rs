@@ -264,8 +264,7 @@ observability:
     unknown_control_field: true
 "#;
 
-        let err =
-            parse_config_text(yaml).expect_err("unknown_control_field should be rejected");
+        let err = parse_config_text(yaml).expect_err("unknown_control_field should be rejected");
         assert!(err.contains("unknown field"));
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
-pub(crate) fn normalize_host_for_routing(raw: &str) -> Option<String> {
+fn parsed_host_for_routing(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
@@ -21,11 +21,24 @@ pub(crate) fn normalize_host_for_routing(raw: &str) -> Option<String> {
         trimmed
     };
 
-    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
-    if normalized.is_empty() {
+    let host = host.trim_end_matches('.');
+    if host.is_empty() {
         None
     } else {
-        Some(normalized)
+        Some(host)
+    }
+}
+
+fn host_has_uppercase_ascii(host: &str) -> bool {
+    host.bytes().any(|byte| byte.is_ascii_uppercase())
+}
+
+pub(crate) fn normalize_host_for_routing(raw: &str) -> Option<String> {
+    let host = parsed_host_for_routing(raw)?;
+    if host_has_uppercase_ascii(host) {
+        Some(host.to_ascii_lowercase())
+    } else {
+        Some(host.to_string())
     }
 }
 
@@ -146,7 +159,14 @@ impl RouteIndex {
 
             match upstream.route.host.as_deref() {
                 Some(host) => {
-                    let normalized_host = normalize_host_for_routing(host)
+                    let normalized_host = parsed_host_for_routing(host)
+                        .map(|value| {
+                            if host_has_uppercase_ascii(value) {
+                                value.to_ascii_lowercase()
+                            } else {
+                                value.to_string()
+                            }
+                        })
                         .unwrap_or_else(|| host.to_ascii_lowercase());
                     host_tries
                         .entry(normalized_host)
@@ -169,10 +189,16 @@ impl RouteIndex {
     }
 
     pub(crate) fn lookup<'a>(&'a self, path: &str, host: Option<&str>) -> Option<&'a str> {
-        let host_best = host
-            .and_then(normalize_host_for_routing)
-            .and_then(|host_name| self.host_tries.get(&host_name))
-            .and_then(|host_trie| host_trie.longest_prefix(path));
+        let host_best = host.and_then(|raw_host| {
+            let parsed_host = parsed_host_for_routing(raw_host)?;
+            let host_trie = if host_has_uppercase_ascii(parsed_host) {
+                let normalized = parsed_host.to_ascii_lowercase();
+                self.host_tries.get(normalized.as_str())
+            } else {
+                self.host_tries.get(parsed_host)
+            }?;
+            host_trie.longest_prefix(path)
+        });
 
         if let Some(best) = host_best
             && best.path_len >= self.default_max_path_len
@@ -215,13 +241,18 @@ pub(crate) fn scan_lookup<'a>(
     host: Option<&str>,
 ) -> Option<&'a str> {
     let path_bytes = path.as_bytes();
-    let normalized_request_host = host.and_then(normalize_host_for_routing);
+    let normalized_request_host = host.and_then(parsed_host_for_routing);
     let mut best_match: Option<(&str, usize, bool)> = None;
 
     for (upstream_name, upstream) in upstreams {
-        let has_host_match = match (&upstream.route.host, normalized_request_host.as_deref()) {
+        let has_host_match = match (&upstream.route.host, normalized_request_host) {
             (Some(route_host), Some(request_host)) => {
-                normalize_host_for_routing(route_host).as_deref() == Some(request_host)
+                if route_host == request_host {
+                    true
+                } else {
+                    parsed_host_for_routing(route_host)
+                        .is_some_and(|route_host| route_host.eq_ignore_ascii_case(request_host))
+                }
             }
             (None, _) => true,
             (Some(_), None) => false,

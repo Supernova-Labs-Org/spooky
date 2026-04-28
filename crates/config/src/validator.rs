@@ -3,6 +3,7 @@ use crate::config::{CURRENT_CONFIG_VERSION, Config, SUPPORTED_CONFIG_VERSIONS};
 use log::{error, info, warn};
 use std::fs::File;
 use std::io::BufReader;
+use std::net::IpAddr;
 use std::path::Path;
 
 pub const VALID_LOG_LEVELS: &[&str] = &[
@@ -89,6 +90,17 @@ fn validate_pem_private_key(path: &str, field_name: &str) -> bool {
             false
         }
     }
+}
+
+fn is_loopback_bind_address(raw: &str) -> bool {
+    let normalized = raw.trim().trim_start_matches('[').trim_end_matches(']');
+    if normalized.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    normalized
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 pub fn validate(config: &Config) -> bool {
@@ -646,6 +658,16 @@ pub fn validate(config: &Config) -> bool {
             && token.trim().is_empty()
         {
             error!("observability.control_api.auth_token cannot be empty when provided");
+            return false;
+        }
+
+        if !is_loopback_bind_address(&config.observability.control_api.address)
+            && config.observability.control_api.auth_token.is_none()
+        {
+            error!(
+                "observability.control_api.auth_token is required when control_api.address is non-loopback ({})",
+                config.observability.control_api.address
+            );
             return false;
         }
     }

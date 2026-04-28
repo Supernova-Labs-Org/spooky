@@ -1142,7 +1142,7 @@ return backends[position]
 <h3 id="health-checking">Health Checking</h3>
 <p>Each backend has an independent health checker that:</p>
 <ol>
-<li>Issues periodic HTTP/2 GET to configured path over TLS (cert verification skipped; self-signed certs accepted)</li>
+<li>Issues periodic HTTP/2 GET to configured path over TLS (certificate verification follows <code>upstream_tls.verify_certificates</code>)</li>
 <li>Classifies response status: 2xx/3xx = Success, 4xx = Neutral (no effect), 5xx = Failure</li>
 <li>Transport errors and timeouts also count as Failure</li>
 <li>Updates backend state on Success/Failure; Neutral outcomes are ignored</li>

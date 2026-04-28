@@ -1017,10 +1017,10 @@
 <ol>
 <li><strong>Blocking backend calls</strong>: Main thread blocks during HTTP/2 requests</li>
 <li><strong>Full body buffering</strong>: High memory usage for large requests/responses</li>
-<li><strong>Consistent hash rebuilds</strong>: Ring rebuilt on every request</li>
-<li><strong>Health check contention</strong>: Shares connection pool with production traffic</li>
-<li><strong>Single-threaded</strong>: QUIC processing limited to one thread</li>
-<li><strong>No TLS verification</strong>: Development-only security posture</li>
+<li><strong>Configuration hot reload missing</strong>: Runtime config updates still require restart</li>
+<li><strong>HTTP/3-only ingress</strong>: No native HTTP/1.1 or HTTP/2 client ingress support</li>
+<li><strong>Method-based route matching unimplemented</strong>: <code>route.method</code> remains reserved for future use</li>
+<li><strong>Control/metrics endpoint hardening is operator-dependent</strong>: endpoints should remain network-isolated unless explicitly protected</li>
 </ol>
 <h3 id="refactoring-needs">Refactoring Needs</h3>
 <ol>

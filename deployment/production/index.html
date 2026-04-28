@@ -1057,6 +1057,21 @@ upstream:
 log:
   level: info  # Use 'warn' for production to reduce I/O
 
+security:
+  privileges:
+    enabled: true
+    user: &quot;spooky&quot;
+    group: &quot;spooky&quot;
+
+observability:
+  control_api:
+    enabled: true
+    address: &quot;127.0.0.1&quot;
+    port: 9902
+    auth_token: &quot;replace-with-strong-token&quot;
+    max_connections: 256
+    connection_timeout_ms: 30000
+
 # Connection tuning (if supported by configuration schema)
 # Adjust based on backend capacity and expected load
 # max_concurrent_connections: 10000
@@ -1067,7 +1082,9 @@ log:
 - Health check intervals balance detection speed vs. backend load
 - Adjust <code>failure_threshold</code> and <code>success_threshold</code> based on backend stability
 - Weight distribution should reflect backend capacity
-- Consistent hashing is appropriate for stateful backends requiring session affinity</p>
+- Consistent hashing is appropriate for stateful backends requiring session affinity
+- For privileged ports (for example <code>443</code>), bind as root/capability and drop privileges immediately with <code>security.privileges</code>
+- Keep control API on loopback unless protected by strong network ACLs and authentication</p>
 <h2 id="tls-certificate-management">TLS Certificate Management</h2>
 <h3 id="certificate-acquisition">Certificate Acquisition</h3>
 <h4 id="lets-encrypt-acme">Let's Encrypt (ACME)</h4>

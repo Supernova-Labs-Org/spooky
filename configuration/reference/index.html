@@ -1399,7 +1399,7 @@ upstream:
 </table></div>
 <p><strong>Address format notes:</strong>
 - <code>host:port</code> — shorthand, treated as <code>https://host:port</code>
-- <code>https://host:port</code> — TLS connection; certificate verification is currently skipped (self-signed certs are accepted)
+- <code>https://host:port</code> — TLS connection with certificate verification enabled by default (<code>upstream_tls.verify_certificates=true</code>)
 - <code>http://host:port</code> — plain HTTP/1.1 only; HTTP/2 over cleartext (h2c) is not supported</p>
 <h4 id="health-check-configuration">Health Check Configuration</h4>
 <p>Health checks monitor backend availability and automatically remove unhealthy backends from the pool.</p>
@@ -2427,6 +2427,28 @@ performance:
       - &quot;auth_pool&quot;
       - &quot;payments_pool&quot;
 </code></pre>
+<h2 id="observability-endpoint-hardening">Observability Endpoint Hardening</h2>
+<p>When enabling <code>observability.metrics</code> or <code>observability.control_api</code>, keep endpoints on loopback unless you intentionally expose them behind network controls.</p>
+<h3 id="metrics-endpoint">Metrics Endpoint</h3>
+<p>Key fields:</p>
+<ul>
+<li><code>observability.metrics.max_connections</code> (default: <code>512</code>): concurrent connection cap.</li>
+<li><code>observability.metrics.connection_timeout_ms</code> (default: <code>30000</code>): per-connection lifetime timeout.</li>
+</ul>
+<h3 id="control-api-endpoint">Control API Endpoint</h3>
+<p>Key fields:</p>
+<ul>
+<li><code>observability.control_api.auth_token</code>: bearer token required for runtime and restart endpoints (<code>Authorization: Bearer &lt;token&gt;</code>).</li>
+<li><code>observability.control_api.max_connections</code> (default: <code>256</code>): concurrent connection cap.</li>
+<li><code>observability.control_api.connection_timeout_ms</code> (default: <code>30000</code>): per-connection lifetime timeout.</li>
+</ul>
+<p>If <code>observability.control_api.address</code> is non-loopback, <code>observability.control_api.auth_token</code> is required.</p>
+<h3 id="watchdog-restart-hook">Watchdog Restart Hook</h3>
+<p>Use structured command execution:</p>
+<ul>
+<li><code>resilience.watchdog.restart_command</code>: array, where index <code>0</code> is executable and remaining entries are arguments.</li>
+</ul>
+<p>Legacy <code>resilience.watchdog.restart_hook</code> is deprecated and rejected by validation.</p>
 <h2 id="configuration-validation">Configuration Validation</h2>
 <p>Spooky validates configuration at startup and reports errors before attempting to start the server.</p>
 <h3 id="common-validation-errors">Common Validation Errors</h3>
@@ -3081,6 +3103,34 @@ log:
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
             data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#example');">
             Example
+        </a>
+        
+        
+
+        
+        <a href="#observability-endpoint-hardening"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="2" onClick="deferSetActiveTocLink('#observability-endpoint-hardening');">
+            Observability Endpoint Hardening
+        </a>
+        
+        
+        <a href="#metrics-endpoint"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#metrics-endpoint');">
+            Metrics Endpoint
+        </a>
+        
+        <a href="#control-api-endpoint"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#control-api-endpoint');">
+            Control API Endpoint
+        </a>
+        
+        <a href="#watchdog-restart-hook"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#watchdog-restart-hook');">
+            Watchdog Restart Hook
         </a>
         
         

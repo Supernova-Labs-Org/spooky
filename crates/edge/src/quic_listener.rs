@@ -4696,6 +4696,7 @@ mod tests {
 
     use crate::REQUEST_ID_COUNTER;
     use crate::cid_radix::CidRadix;
+    use http::StatusCode;
 
     use std::collections::HashSet;
     use std::net::SocketAddr;

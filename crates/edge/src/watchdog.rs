@@ -181,6 +181,7 @@ mod tests {
             unhealthy_consecutive_windows: 3,
             drain_grace_ms: 5_000,
             restart_cooldown_ms: 60_000,
+            restart_command: Vec::new(),
             restart_hook: None,
         };
         let watchdog = WatchdogCoordinator::new(&cfg);
@@ -200,6 +201,7 @@ mod tests {
             unhealthy_consecutive_windows: 3,
             drain_grace_ms: 5_000,
             restart_cooldown_ms: 60_000,
+            restart_command: Vec::new(),
             restart_hook: None,
         };
         let watchdog = WatchdogCoordinator::new(&cfg);

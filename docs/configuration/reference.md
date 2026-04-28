@@ -764,6 +764,35 @@ resilience:
       - "payments_pool"
 ```
 
+## Observability Endpoint Hardening
+
+When enabling `observability.metrics` or `observability.control_api`, keep endpoints on loopback unless you intentionally expose them behind network controls.
+
+### Metrics Endpoint
+
+Key fields:
+
+- `observability.metrics.max_connections` (default: `512`): concurrent connection cap.
+- `observability.metrics.connection_timeout_ms` (default: `30000`): per-connection lifetime timeout.
+
+### Control API Endpoint
+
+Key fields:
+
+- `observability.control_api.auth_token`: bearer token required for runtime and restart endpoints (`Authorization: Bearer <token>`).
+- `observability.control_api.max_connections` (default: `256`): concurrent connection cap.
+- `observability.control_api.connection_timeout_ms` (default: `30000`): per-connection lifetime timeout.
+
+If `observability.control_api.address` is non-loopback, `observability.control_api.auth_token` is required.
+
+### Watchdog Restart Hook
+
+Use structured command execution:
+
+- `resilience.watchdog.restart_command`: array, where index `0` is executable and remaining entries are arguments.
+
+Legacy `resilience.watchdog.restart_hook` is deprecated and rejected by validation.
+
 ## Configuration Validation
 
 Spooky validates configuration at startup and reports errors before attempting to start the server.

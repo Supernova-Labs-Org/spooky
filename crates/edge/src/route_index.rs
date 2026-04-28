@@ -200,11 +200,14 @@ pub(crate) fn scan_lookup<'a>(
     host: Option<&str>,
 ) -> Option<&'a str> {
     let path_bytes = path.as_bytes();
+    let normalized_request_host = host.and_then(normalize_host_for_routing);
     let mut best_match: Option<(&str, usize, bool)> = None;
 
     for (upstream_name, upstream) in upstreams {
-        let has_host_match = match (&upstream.route.host, host) {
-            (Some(route_host), Some(request_host)) => route_host == request_host,
+        let has_host_match = match (&upstream.route.host, normalized_request_host.as_deref()) {
+            (Some(route_host), Some(request_host)) => {
+                normalize_host_for_routing(route_host).as_deref() == Some(request_host)
+            }
             (None, _) => true,
             (Some(_), None) => false,
         };
@@ -341,6 +344,38 @@ mod tests {
             scan_lookup(&upstreams, "/api/users", Some("api.example.com")),
             Some("z-host")
         );
+    }
+
+    #[test]
+    fn lookup_normalizes_request_host_case_and_port() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "api".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+        upstreams.insert("default".to_string(), test_upstream(None, Some("/")));
+        let index = RouteIndex::from_upstreams(&upstreams);
+
+        assert_eq!(
+            index.lookup("/api/v1", Some("API.EXAMPLE.COM:443")),
+            Some("api")
+        );
+        assert_eq!(
+            scan_lookup(&upstreams, "/api/v1", Some("API.EXAMPLE.COM:443")),
+            Some("api")
+        );
+    }
+
+    #[test]
+    fn lookup_normalizes_configured_host_case() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "api".to_string(),
+            test_upstream(Some("API.Example.COM"), Some("/api")),
+        );
+        upstreams.insert("default".to_string(), test_upstream(None, Some("/")));
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(index.lookup("/api/v1", Some("api.example.com")), Some("api"));
     }
 
     #[test]

@@ -79,7 +79,7 @@ Latency (ms):
 ## Implications
 
 - **Not production-ready** for concurrent workloads
-- Blocking I/O must be addressed before beta
+- Blocking I/O must be addressed before GA
 - Async backend forwarding is critical for improving throughput
 - Current design suitable only for low-concurrency scenarios (<20 workers)
 

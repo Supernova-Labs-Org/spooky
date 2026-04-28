@@ -416,7 +416,7 @@ spooky --config dev-config.yaml
 
 ### Example Multi-Backend Setup
 
-> **Note:** Spooky is experimental. The configuration below shows how a multi-backend setup would look, but is not a production deployment recommendation.
+> **Note:** Spooky is beta. The configuration below demonstrates structure and routing patterns; use the deployment guide hardening checklist before production rollout.
 
 ```bash
 # Obtain certificates (Let's Encrypt)

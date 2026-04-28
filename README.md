@@ -219,9 +219,9 @@ make load-scenarios
 
 ## Project Status
 
-**Experimental.** Spooky is not production-ready yet. Core features are implemented and continuously hardened, but it should still be treated as pre-GA software.
+**Beta.** Spooky is feature-complete for core HTTP/3 edge proxying and can be used in controlled production rollouts. It remains pre-GA, so operators should follow the deployment hardening guidance and roll out progressively.
 
-See [roadmap](docs/roadmap.md) for known issues and planned improvements.
+See [release maturity](docs/release-maturity.md) for scope and GA exit criteria, and [roadmap](docs/roadmap.md) for planned improvements.
 
 ## Documentation
 

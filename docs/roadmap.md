@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Experimental. Core features functional and tested.** Spooky can terminate HTTP/3 connections, forward to HTTP/2 backends, and perform load balancing with health checks. It is not production-ready — significant known limitations exist (see Technical Debt below).
+**Beta. Core features are functional and tested.** Spooky can terminate HTTP/3 connections, forward to HTTP/2 backends, and perform load balancing with health checks. It is pre-GA and should be deployed with production guardrails (see [Release Maturity](release-maturity.md) and Technical Debt below).
 
 ### Completed
 

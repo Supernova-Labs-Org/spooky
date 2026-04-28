@@ -3899,6 +3899,8 @@ impl QUICListener {
 
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
         let metrics_path = endpoint.path.clone();
+        let max_connections = endpoint.max_connections.max(1);
+        let connection_timeout = Duration::from_millis(endpoint.connection_timeout_ms.max(1));
 
         let handle = match runtime_handle() {
             Some(handle) => handle,
@@ -3940,9 +3942,13 @@ impl QUICListener {
             Some(Arc::clone(&metrics)),
             async move {
                 info!(
-                    "Metrics endpoint listening on http://{}{}",
-                    bind, metrics_path
+                    "Metrics endpoint listening on http://{}{} (max_connections={}, connection_timeout_ms={})",
+                    bind,
+                    metrics_path,
+                    max_connections,
+                    connection_timeout.as_millis()
                 );
+                let connection_limiter = Arc::new(Semaphore::new(max_connections));
 
                 loop {
                     let (stream, _peer) = match listener.accept().await {
@@ -3952,12 +3958,21 @@ impl QUICListener {
                             continue;
                         }
                     };
+                    let permit = match Arc::clone(&connection_limiter).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            // Drop excess connections immediately under load.
+                            continue;
+                        }
+                    };
 
                     let io = TokioIo::new(stream);
                     let metrics = Arc::clone(&metrics);
                     let metrics_path = metrics_path.clone();
+                    let timeout = connection_timeout;
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let service = service_fn(move |req: Request<Incoming>| {
                             let metrics = Arc::clone(&metrics);
                             let metrics_path = metrics_path.clone();
@@ -3970,9 +3985,15 @@ impl QUICListener {
                             }
                         });
 
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
-                        {
-                            error!("Metrics endpoint connection failed: {}", err);
+                        let serve = http1::Builder::new().serve_connection(io, service);
+                        match tokio::time::timeout(timeout, serve).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                error!("Metrics endpoint connection failed: {}", err);
+                            }
+                            Err(_) => {
+                                debug!("Metrics endpoint connection timed out");
+                            }
                         }
                     });
                 }

@@ -29,6 +29,16 @@ pub const VALID_LB_TYPES: &[&str] = &[
     "consistent-hash",
     "consistent_hash",
     "ch",
+    "least-connections",
+    "least_connections",
+    "lc",
+    "latency-aware",
+    "latency_aware",
+    "la",
+    "sticky-cid",
+    "sticky_cid",
+    "cid-sticky",
+    "cid_sticky",
 ];
 
 fn validate_pem_certificates(path: &str, field_name: &str) -> bool {
@@ -719,6 +729,13 @@ pub fn validate(config: &Config) -> bool {
             );
             return false;
         }
+    }
+
+    if config.observability.routing.expose_header
+        && config.observability.routing.header_name.trim().is_empty()
+    {
+        error!("observability.routing.header_name must be non-empty when expose_header=true");
+        return false;
     }
 
     // --- Validate privilege-drop security controls ---
@@ -1418,6 +1435,7 @@ upstream:
             },
             control_api: ControlApi::default(),
             tracing: Tracing::default(),
+            routing: crate::config::RoutingTransparency::default(),
         };
         assert!(!validate(&cfg));
 
@@ -1441,6 +1459,11 @@ upstream:
         cfg.observability.control_api.enabled = true;
         cfg.observability.control_api.connection_timeout_ms = 0;
         cfg.observability.control_api.auth_token = Some("token".to_string());
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.routing.expose_header = true;
+        cfg.observability.routing.header_name = "   ".to_string();
         assert!(!validate(&cfg));
     }
 
@@ -1516,6 +1539,7 @@ upstream:
             },
             control_api: ControlApi::default(),
             tracing: Tracing::default(),
+            routing: crate::config::RoutingTransparency::default(),
         };
 
         assert!(validate(&cfg));

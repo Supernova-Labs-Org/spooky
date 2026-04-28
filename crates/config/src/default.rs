@@ -403,6 +403,22 @@ pub fn observe_default_tracing_sample_ratio() -> f64 {
     1.0
 }
 
+pub fn observe_default_routing_transparency_enabled() -> bool {
+    false
+}
+
+pub fn observe_default_routing_transparency_include_reason() -> bool {
+    true
+}
+
+pub fn observe_default_routing_transparency_expose_header() -> bool {
+    false
+}
+
+pub fn observe_default_routing_transparency_header_name() -> String {
+    String::from("x-spooky-route-decision")
+}
+
 pub fn upstream_tls_default_verify_certificates() -> bool {
     true
 }

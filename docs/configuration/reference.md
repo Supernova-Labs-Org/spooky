@@ -369,7 +369,7 @@ Load balancing determines how requests are distributed across healthy backends w
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `type` | string | Yes | - | Load balancing algorithm |
-| `key` | string | No | - | Hash key source for consistent hashing (planned feature) |
+| `key` | string | No | - | Reserved for future pluggable key extraction (currently ignored) |
 
 ### Supported Algorithms
 
@@ -399,14 +399,44 @@ upstream:
 
 Routes requests using consistent hashing based on a fixed key derived from the request. Currently uses request authority (if present), otherwise request path, otherwise HTTP method.
 
-**Note**: Configurable key sources (headers, cookies, query parameters) are planned for future implementation.
-
 ```yaml
 upstream:
   my_pool:
     load_balancing:
       type: "consistent-hash"
-      # key: "header:x-user-id"  # Planned feature, not currently supported
+```
+
+#### least-connections
+
+Selects the healthy backend with the fewest active requests. Ties are deterministic by backend index order.
+
+```yaml
+upstream:
+  my_pool:
+    load_balancing:
+      type: "least-connections"
+```
+
+#### latency-aware
+
+Selects healthy backends using a latency score built from EWMA backend latency and active request pressure. Unsampled backends are probed first to avoid cold-start bias.
+
+```yaml
+upstream:
+  my_pool:
+    load_balancing:
+      type: "latency-aware"
+```
+
+#### sticky-cid
+
+Uses consistent hashing keyed by QUIC connection ID for connection-level stickiness. The same CID is routed to the same backend while healthy membership is stable.
+
+```yaml
+upstream:
+  my_pool:
+    load_balancing:
+      type: "sticky-cid"
 ```
 
 ### Algorithm Selection
@@ -414,6 +444,9 @@ upstream:
 - Use `random` for simple stateless load distribution
 - Use `round-robin` for even distribution across backends
 - Use `consistent-hash` when session affinity or request consistency is required
+- Use `least-connections` when backend load varies significantly across requests
+- Use `latency-aware` when you want faster backends to absorb more traffic
+- Use `sticky-cid` for QUIC-connection affinity without application-level stickiness keys
 
 ### Examples
 
@@ -784,6 +817,17 @@ Key fields:
 - `observability.control_api.connection_timeout_ms` (default: `30000`): per-connection lifetime timeout.
 
 If `observability.control_api.address` is non-loopback, `observability.control_api.auth_token` is required.
+
+### Routing Transparency
+
+`observability.routing` enables explicit route-decision logging.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Emit route-decision transparency logs |
+| `include_reason` | boolean | No | `true` | Include deterministic tie-break reason in route-decision logs |
+| `expose_header` | boolean | No | `false` | Reserved toggle for downstream route-decision response headers |
+| `header_name` | string | No | `"x-spooky-route-decision"` | Reserved header name; must be non-empty when `expose_header=true` |
 
 ### Watchdog Restart Hook
 

@@ -117,7 +117,7 @@ log:
 
 **Routing**: Route requests based on path prefix and hostname. The most specific match (longest prefix) wins.
 
-**Load Balancing**: Per-upstream pool strategies: random, round-robin, and consistent hashing.
+**Load Balancing**: Per-upstream pool strategies: random, round-robin, consistent-hash, least-connections, latency-aware, and sticky-cid.
 
 **Health Checks**: Automatic backend health monitoring with configurable intervals, timeouts, and thresholds.
 
@@ -175,6 +175,9 @@ flowchart LR
 - Random distribution
 - Round-robin rotation
 - Consistent hashing (with configurable replicas)
+- Least-connections routing
+- Latency-aware routing (EWMA + in-flight pressure)
+- Sticky sessions via QUIC CID hashing
 - Per-upstream strategy configuration
 
 **Routing**
@@ -192,6 +195,7 @@ flowchart LR
 - File-based log output via `log.file.enabled` and `log.file.path`
 - Backend latency tracking
 - Health transition logging
+- Optional routing decision transparency logs (`observability.routing`)
 
 ## Testing
 

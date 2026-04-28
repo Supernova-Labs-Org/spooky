@@ -1507,4 +1507,24 @@ upstream:
 
         assert!(!validate(&cfg));
     }
+
+    #[test]
+    fn rejects_non_loopback_control_api_without_auth_token() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.control_api.enabled = true;
+        cfg.observability.control_api.address = "0.0.0.0".to_string();
+        cfg.observability.control_api.auth_token = None;
+        assert!(!validate(&cfg));
+    }
+
+    #[test]
+    fn rejects_legacy_watchdog_restart_hook() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.resilience.watchdog.restart_hook = Some("echo legacy".to_string());
+        assert!(!validate(&cfg));
+    }
 }

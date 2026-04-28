@@ -80,18 +80,33 @@ impl RouteTrie {
 
     fn longest_prefix(&self, path: &str) -> Option<IndexedRoute> {
         let mut node = &self.root;
-        let mut best = node.route;
+        let mut best = node
+            .route
+            .filter(|route| prefix_boundary_matches(path, route.path_len));
 
         for byte in path.as_bytes() {
             let Some(next) = node.children.get(byte) else {
                 break;
             };
             node = next;
-            best = prefer_route(best, node.route);
+            let candidate = node
+                .route
+                .filter(|route| prefix_boundary_matches(path, route.path_len));
+            best = prefer_route(best, candidate);
         }
 
         best
     }
+}
+
+fn prefix_boundary_matches(path: &str, prefix_len: usize) -> bool {
+    if prefix_len <= 1 {
+        return true;
+    }
+    if path.len() == prefix_len {
+        return true;
+    }
+    path.as_bytes().get(prefix_len) == Some(&b'/')
 }
 
 pub(crate) struct RouteIndex {

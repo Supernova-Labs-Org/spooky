@@ -1846,6 +1846,7 @@ impl QUICListener {
                             resilience.brownout.observe_admission_pressure(
                                 resilience.adaptive_admission.inflight_percent(),
                             );
+                            metrics.set_brownout_active(resilience.brownout.is_active());
                             if !resilience.brownout.route_allowed(&upstream_name) {
                                 metrics.inc_failure();
                                 metrics.inc_overload_shed_reason(OverloadShedReason::Brownout);
@@ -2172,6 +2173,8 @@ impl QUICListener {
                             let fut = async move {
                                 let mut hedge_telemetry = crate::HedgeTelemetry::default();
                                 let mut retry_count: u8 = 0;
+                                let mut retry_attempt_reason: Option<RetryReason> = None;
+                                let mut retry_denial_reason: Option<RetryReason> = None;
                                 let result: ForwardResult = async {
                                     retry_budget.mark_primary(&route_name);
 
@@ -2291,11 +2294,20 @@ impl QUICListener {
                                             Ok(response) => response,
                                             Err(primary_err) => {
                                                 let retry_reason = classify_retry_reason(&primary_err);
+                                                let is_retryable_err = is_retryable(&primary_err);
+                                                let budget_ok = retry_budget.allow_retry(&route_name).is_ok();
                                                 let can_retry = bodyless_mode
-                                                    && is_retryable(&primary_err)
-                                                    && retry_budget.allow_retry(&route_name).is_ok()
+                                                    && is_retryable_err
+                                                    && budget_ok
                                                     && alternate_backend.is_some();
                                                 if !can_retry {
+                                                    if !bodyless_mode {
+                                                        retry_denial_reason = Some(RetryReason::NotBodylessMode);
+                                                    } else if !is_retryable_err || !budget_ok {
+                                                        retry_denial_reason = Some(RetryReason::BudgetDenied);
+                                                    } else {
+                                                        retry_denial_reason = Some(RetryReason::NoAlternateBackend);
+                                                    }
                                                     return Err(primary_err);
                                                 } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
@@ -2317,6 +2329,7 @@ impl QUICListener {
                                                     )
                                                 {
                                                     retry_count = retry_count.saturating_add(1);
+                                                    retry_attempt_reason = Some(retry_reason);
                                                     info!(
                                                         "request_id={} retrying request on alternate backend: route={} reason={:?}",
                                                         request_id, route_name, retry_reason
@@ -2344,6 +2357,8 @@ impl QUICListener {
                                     forward: result,
                                     hedge: hedge_telemetry,
                                     retry_count,
+                                    retry_attempt_reason,
+                                    retry_denial_reason,
                                 });
                             };
                             let spawned = match trace_span_for_upstream {
@@ -2814,6 +2829,8 @@ impl QUICListener {
                             )),
                             hedge: crate::HedgeTelemetry::default(),
                             retry_count: 0,
+                            retry_attempt_reason: None,
+                            retry_denial_reason: None,
                         }),
                     })
             } else {
@@ -2835,6 +2852,12 @@ impl QUICListener {
                 }
                 if forward_result.hedge.primary_late_ms > 0 {
                     metrics.observe_hedge_primary_late_ms(forward_result.hedge.primary_late_ms);
+                }
+                if let Some(reason) = forward_result.retry_attempt_reason {
+                    metrics.inc_retry(reason);
+                }
+                if let Some(reason) = forward_result.retry_denial_reason {
+                    metrics.inc_retry(reason);
                 }
 
                 if let Some(req) = streams.get_mut(&stream_id) {
@@ -3671,6 +3694,7 @@ impl QUICListener {
             }
             Err(ProxyError::Pool(PoolError::CircuitOpen(_))) => {
                 metrics.inc_failure();
+                metrics.inc_circuit_breaker_rejected();
                 metrics.inc_overload_shed_reason(OverloadShedReason::BackendInflight);
                 metrics.record_route(route_label, start.elapsed(), RouteOutcome::OverloadShed);
                 Self::log_access(req, 503);
@@ -5264,6 +5288,8 @@ mod tests {
             forward: Err(spooky_errors::ProxyError::Transport("test".into())),
             hedge: crate::HedgeTelemetry::default(),
             retry_count: 0,
+            retry_attempt_reason: None,
+            retry_denial_reason: None,
         });
         assert!(
             send_result.is_err(),

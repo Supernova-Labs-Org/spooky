@@ -53,7 +53,7 @@ use crate::{
     },
     outcome_from_status,
     resilience::{RouteQueueRejection, RuntimeResilience},
-    route_index::RouteIndex,
+    route_index::{RouteIndex, normalize_host_for_routing},
     watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
 
@@ -300,13 +300,18 @@ fn validate_request_headers(
 
     if resilience.enforce_authority_host_match
         && let (Some(authority_value), Some(host_value)) = (authority.as_deref(), host.as_deref())
-        && !authority_value.eq_ignore_ascii_case(host_value)
     {
+        let normalized_authority = normalize_host_for_routing(authority_value)
+            .unwrap_or_else(|| authority_value.to_ascii_lowercase());
+        let normalized_host =
+            normalize_host_for_routing(host_value).unwrap_or_else(|| host_value.to_ascii_lowercase());
+        if normalized_authority != normalized_host {
         return Err((
             http::StatusCode::BAD_REQUEST,
             b":authority and host headers must match\n",
             false,
         ));
+        }
     }
 
     if !resilience.method_allowed(&method) {

@@ -8,9 +8,11 @@ use crate::default::{
     get_default_log_file_path, get_default_log_level, get_default_path, get_default_port,
     get_default_protocol, get_default_success_threshold, get_default_version, get_default_weight,
     observe_default_address, observe_default_control_api_address,
-    observe_default_control_api_health_path, observe_default_control_api_port,
+    observe_default_control_api_connection_timeout_ms, observe_default_control_api_health_path,
+    observe_default_control_api_max_connections, observe_default_control_api_port,
     observe_default_control_api_ready_path, observe_default_control_api_restart_path,
-    observe_default_control_api_runtime_path, observe_default_metrics_path, observe_default_port,
+    observe_default_control_api_runtime_path, observe_default_metrics_connection_timeout_ms,
+    observe_default_metrics_max_connections, observe_default_metrics_path, observe_default_port,
     observe_default_tracing_sample_ratio, observe_default_tracing_service_name,
     perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
     perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
@@ -768,6 +770,12 @@ pub struct MetricsEndpoint {
 
     #[serde(default = "observe_default_metrics_path")]
     pub path: String,
+
+    #[serde(default = "observe_default_metrics_max_connections")]
+    pub max_connections: usize,
+
+    #[serde(default = "observe_default_metrics_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
 }
 
 impl Default for MetricsEndpoint {
@@ -777,6 +785,8 @@ impl Default for MetricsEndpoint {
             address: observe_default_address(),
             port: observe_default_port(),
             path: observe_default_metrics_path(),
+            max_connections: observe_default_metrics_max_connections(),
+            connection_timeout_ms: observe_default_metrics_connection_timeout_ms(),
         }
     }
 }
@@ -807,6 +817,12 @@ pub struct ControlApi {
 
     #[serde(default)]
     pub auth_token: Option<String>,
+
+    #[serde(default = "observe_default_control_api_max_connections")]
+    pub max_connections: usize,
+
+    #[serde(default = "observe_default_control_api_connection_timeout_ms")]
+    pub connection_timeout_ms: u64,
 }
 
 impl Default for ControlApi {
@@ -820,6 +836,8 @@ impl Default for ControlApi {
             runtime_path: observe_default_control_api_runtime_path(),
             restart_path: observe_default_control_api_restart_path(),
             auth_token: None,
+            max_connections: observe_default_control_api_max_connections(),
+            connection_timeout_ms: observe_default_control_api_connection_timeout_ms(),
         }
     }
 }

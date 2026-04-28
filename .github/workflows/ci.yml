@@ -22,6 +22,9 @@ jobs:
       - name: Run clippy panic-safety gates
         run: |
           cargo clippy --workspace --lib --bins -- -D clippy::unwrap_used -D clippy::expect_used
+      - name: Run full workspace clippy warnings gate
+        run: |
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     runs-on: ubuntu-latest

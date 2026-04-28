@@ -71,6 +71,18 @@ pub fn get_default_log() -> Log {
     }
 }
 
+pub fn security_default_drop_privileges() -> bool {
+    true
+}
+
+pub fn security_default_user() -> String {
+    String::from("nobody")
+}
+
+pub fn security_default_group() -> String {
+    String::from("nogroup")
+}
+
 pub fn perf_default_worker_threads() -> usize {
     1
 }

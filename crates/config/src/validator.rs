@@ -600,6 +600,26 @@ pub fn validate(config: &Config) -> bool {
         return false;
     }
 
+    if !config.resilience.watchdog.restart_command.is_empty()
+        && config.resilience.watchdog.restart_command[0].trim().is_empty()
+    {
+        error!("resilience.watchdog.restart_command[0] must be a non-empty executable path");
+        return false;
+    }
+
+    if config
+        .resilience
+        .watchdog
+        .restart_hook
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        error!(
+            "resilience.watchdog.restart_hook is deprecated and unsupported; use restart_command instead"
+        );
+        return false;
+    }
+
     // --- Validate observability ---
     if config.observability.metrics.enabled {
         if config.observability.metrics.address.is_empty() {

@@ -22,11 +22,7 @@ fn parsed_host_for_routing(raw: &str) -> Option<&str> {
     };
 
     let host = host.trim_end_matches('.');
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
+    if host.is_empty() { None } else { Some(host) }
 }
 
 fn host_has_uppercase_ascii(host: &str) -> bool {

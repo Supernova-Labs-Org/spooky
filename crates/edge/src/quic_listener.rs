@@ -4038,6 +4038,8 @@ impl QUICListener {
         }
 
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
+        let max_connections = endpoint.max_connections.max(1);
+        let connection_timeout = Duration::from_millis(endpoint.connection_timeout_ms.max(1));
         let paths = ControlApiPaths {
             health_path: endpoint.health_path.clone(),
             ready_path: endpoint.ready_path.clone(),
@@ -4093,9 +4095,15 @@ impl QUICListener {
             Some(Arc::clone(&shared_state.metrics)),
             async move {
                 info!(
-                    "Control API endpoint listening on http://{}{} (ready={}, runtime={})",
-                    bind, paths.health_path, paths.ready_path, paths.runtime_path
+                    "Control API endpoint listening on http://{}{} (ready={}, runtime={}, max_connections={}, connection_timeout_ms={})",
+                    bind,
+                    paths.health_path,
+                    paths.ready_path,
+                    paths.runtime_path,
+                    max_connections,
+                    connection_timeout.as_millis()
                 );
+                let connection_limiter = Arc::new(Semaphore::new(max_connections));
 
                 loop {
                     let (stream, _peer) = match listener.accept().await {
@@ -4105,12 +4113,20 @@ impl QUICListener {
                             continue;
                         }
                     };
+                    let permit = match Arc::clone(&connection_limiter).try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            continue;
+                        }
+                    };
 
                     let io = TokioIo::new(stream);
                     let paths = paths.clone();
                     let state = state.clone();
+                    let timeout = connection_timeout;
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         let service = service_fn(move |req: Request<Incoming>| {
                             let paths = paths.clone();
                             let state = state.clone();
@@ -4121,9 +4137,15 @@ impl QUICListener {
                             }
                         });
 
-                        if let Err(err) = http1::Builder::new().serve_connection(io, service).await
-                        {
-                            error!("Control API endpoint connection failed: {}", err);
+                        let serve = http1::Builder::new().serve_connection(io, service);
+                        match tokio::time::timeout(timeout, serve).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(err)) => {
+                                error!("Control API endpoint connection failed: {}", err);
+                            }
+                            Err(_) => {
+                                debug!("Control API endpoint connection timed out");
+                            }
                         }
                     });
                 }

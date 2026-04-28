@@ -246,6 +246,7 @@ pub struct LoadBalancing {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Log {
     // whisper -> trace
     // haunt -> debug
@@ -272,6 +273,7 @@ pub enum LogFormat {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LogFile {
     pub enabled: bool,
 
@@ -280,6 +282,7 @@ pub struct LogFile {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Performance {
     #[serde(default = "perf_default_worker_threads")]
     pub worker_threads: usize,
@@ -449,6 +452,7 @@ impl Default for Performance {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Resilience {
     #[serde(default)]
     pub adaptive_admission: AdaptiveAdmission,
@@ -469,6 +473,7 @@ pub struct Resilience {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct AdaptiveAdmission {
     #[serde(default = "resilience_default_adaptive_enabled")]
     pub enabled: bool,
@@ -536,6 +541,7 @@ impl Default for AdaptiveAdmission {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RouteQueue {
     #[serde(default = "resilience_default_route_queue_default_cap")]
     pub default_cap: usize,
@@ -559,6 +565,7 @@ impl Default for RouteQueue {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ProtocolPolicy {
     #[serde(default = "resilience_default_protocol_allow_0rtt")]
     pub allow_0rtt: bool,
@@ -592,6 +599,7 @@ impl Default for ProtocolPolicy {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct CircuitBreaker {
     #[serde(default = "resilience_default_cb_enabled")]
     pub enabled: bool,
@@ -615,6 +623,7 @@ impl Default for CircuitBreaker {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Hedging {
     #[serde(default = "resilience_default_hedging_enabled")]
     pub enabled: bool,
@@ -638,6 +647,7 @@ impl Default for Hedging {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct RetryBudget {
     #[serde(default = "resilience_default_retry_budget_enabled")]
     pub enabled: bool,
@@ -658,6 +668,7 @@ impl Default for RetryBudget {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Brownout {
     #[serde(default = "resilience_default_brownout_enabled")]
     pub enabled: bool,
@@ -681,6 +692,7 @@ impl Default for Brownout {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Watchdog {
     #[serde(default = "resilience_default_watchdog_enabled")]
     pub enabled: bool,

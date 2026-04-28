@@ -270,7 +270,7 @@ return backends[position]
 
 Each backend has an independent health checker that:
 
-1. Issues periodic HTTP/2 GET to configured path over TLS (cert verification skipped; self-signed certs accepted)
+1. Issues periodic HTTP/2 GET to configured path over TLS (certificate verification follows `upstream_tls.verify_certificates`)
 2. Classifies response status: 2xx/3xx = Success, 4xx = Neutral (no effect), 5xx = Failure
 3. Transport errors and timeouts also count as Failure
 4. Updates backend state on Success/Failure; Neutral outcomes are ignored

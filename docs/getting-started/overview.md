@@ -136,7 +136,7 @@ curl --http3-only -k \
 
 ## Project Status
 
-**Spooky is experimental.** Core features are implemented and functional, but the project is not production-ready. Expect rough edges, missing features, and breaking changes.
+**Spooky is in beta.** Core features are implemented and functional, and the project is suitable for controlled production rollout. The project is still pre-GA, so expect continued hardening and targeted breaking changes where needed.
 
 Currently working:
 
@@ -145,6 +145,8 @@ Currently working:
 - Multiple load balancing algorithms
 - Active health checking with automatic recovery
 - Path and host-based routing with upstream pools
+
+See [Release Maturity](../release-maturity.md) for beta scope and GA promotion criteria.
 
 ## Next Steps
 

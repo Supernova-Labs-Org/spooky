@@ -40,8 +40,8 @@ use tracing::{Instrument, info_span};
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
 
 use crate::{
-    ChannelBody, ForwardResult, Metrics, OverloadShedReason, QUICListener, QuicConnection,
-    REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
+    ChannelBody, ForwardResult, HealthClassification, Metrics, OverloadShedReason, QUICListener,
+    QuicConnection, REQUEST_ID_COUNTER, RequestEnvelope, ResponseChunk, RetryReason, RouteOutcome,
     SharedRuntimeState, StreamPhase, UpstreamResult,
     cid_radix::CidRadix,
     constants::{
@@ -4567,22 +4567,23 @@ impl QUICListener {
                         let result =
                             tokio::time::timeout(timeout, health_client.send(request)).await;
 
-                        let healthy = match result {
-                            Ok(Ok(response)) => response.status().is_success(),
-                            _ => false,
+                        let outcome = match result {
+                            Ok(Ok(response)) => outcome_from_status(response.status()),
+                            _ => HealthClassification::Failure,
                         };
-                        if healthy {
-                            task_metrics.inc_health_check_success();
-                        } else {
-                            task_metrics.inc_health_check_failure();
-                        }
 
                         let transition = match upstream_pool.lock() {
                             Ok(mut pool) => {
-                                if healthy {
-                                    pool.pool.mark_success(index)
-                                } else {
-                                    pool.pool.mark_failure(index)
+                                match outcome {
+                                    HealthClassification::Success => {
+                                        task_metrics.inc_health_check_success();
+                                        pool.pool.mark_success(index)
+                                    }
+                                    HealthClassification::Failure => {
+                                        task_metrics.inc_health_check_failure();
+                                        pool.pool.mark_failure(index)
+                                    }
+                                    HealthClassification::Neutral => None,
                                 }
                             }
                             Err(_) => None,

@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, RecvTimeoutError, SyncSender, TrySendError};
 mod runtime_guard;
+mod privilege_drop;
 
 use std::sync::{
     Arc,
@@ -149,6 +150,32 @@ Use a port >= 1024 for unprivileged startup.",
             }
         }
     };
+
+    let privileged_bind = config_yaml.listen.port < 1024;
+    if privileged_bind && uid == 0 {
+        if config_yaml.security.privileges.enabled {
+            match privilege_drop::drop_privileges(
+                &config_yaml.security.privileges.user,
+                &config_yaml.security.privileges.group,
+            ) {
+                Ok(()) => {
+                    info!(
+                        "Dropped root privileges to user='{}' group='{}'",
+                        config_yaml.security.privileges.user,
+                        config_yaml.security.privileges.group
+                    );
+                }
+                Err(err) => {
+                    error!("Failed to drop privileges after privileged bind: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            warn!(
+                "Running as root on privileged port without privilege drop (security.privileges.enabled=false)"
+            );
+        }
+    }
 
     info!("Spooky is starting");
     warn!(

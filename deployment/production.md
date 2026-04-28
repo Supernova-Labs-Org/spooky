@@ -1,6 +1,6 @@
 # Production Deployment
 
-> **Warning:** Spooky is experimental software. It is not production-ready. This guide documents deployment procedures for evaluation and staging environments. Do not use Spooky in production without thoroughly understanding its current limitations (see [Roadmap](../roadmap.md) for known issues).
+> **Warning:** Spooky is beta software. It can be deployed to production only with controlled rollout, strict monitoring, and rollback readiness. Review current limitations and GA exit criteria before broad adoption (see [Release Maturity](../release-maturity.md) and [Roadmap](../roadmap.md)).
 
 This guide covers deployment procedures, system configuration, and operational considerations for Spooky HTTP/3 load balancer deployments.
 

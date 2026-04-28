@@ -38,6 +38,7 @@ Technical documentation for the Spooky HTTP/3 to HTTP/2 reverse proxy and load b
 
 ### Planning
 - [Roadmap](roadmap.md) - Feature roadmap and priorities
+- [Release Maturity](release-maturity.md) - Beta scope and GA exit criteria
 
 ## Documentation Structure
 

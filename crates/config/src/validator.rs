@@ -641,6 +641,13 @@ pub fn validate(config: &Config) -> bool {
                 return false;
             }
         }
+
+        if let Some(token) = config.observability.control_api.auth_token.as_ref()
+            && token.trim().is_empty()
+        {
+            error!("observability.control_api.auth_token cannot be empty when provided");
+            return false;
+        }
     }
 
     if config.observability.tracing.enabled {

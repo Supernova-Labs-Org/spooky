@@ -230,4 +230,42 @@ performance:
         let err = parse_config_text(yaml).expect_err("typo_field should be rejected");
         assert!(err.contains("unknown field"));
     }
+
+    #[test]
+    fn rejects_unknown_control_api_nested_field() {
+        let yaml = r#"
+version: 1
+listen:
+  protocol: http3
+  address: "127.0.0.1"
+  port: 9889
+  tls:
+    cert: "certs/cert.pem"
+    key: "certs/key.pem"
+upstream:
+  default:
+    route:
+      path_prefix: "/"
+    backends:
+      - id: b1
+        address: "http://127.0.0.1:7001"
+        weight: 1
+        health_check: {}
+observability:
+  control_api:
+    enabled: true
+    address: "127.0.0.1"
+    port: 9902
+    health_path: "/health"
+    ready_path: "/ready"
+    runtime_path: "/admin/runtime"
+    restart_path: "/admin/runtime/restart"
+    auth_token: "token"
+    unknown_control_field: true
+"#;
+
+        let err =
+            parse_config_text(yaml).expect_err("unknown_control_field should be rejected");
+        assert!(err.contains("unknown field"));
+    }
 }

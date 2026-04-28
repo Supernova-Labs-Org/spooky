@@ -242,6 +242,9 @@ pub(crate) fn scan_lookup<'a>(
                 if !path_bytes.starts_with(prefix) {
                     continue;
                 }
+                if !prefix_boundary_matches(path, prefix.len()) {
+                    continue;
+                }
                 prefix.len()
             }
             None => 0,
@@ -391,6 +394,18 @@ mod tests {
         upstreams.insert("default".to_string(), test_upstream(None, Some("/")));
         let index = RouteIndex::from_upstreams(&upstreams);
         assert_eq!(index.lookup("/api/v1", Some("api.example.com")), Some("api"));
+    }
+
+    #[test]
+    fn path_prefix_requires_segment_boundary() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert("api".to_string(), test_upstream(None, Some("/api")));
+        upstreams.insert("root".to_string(), test_upstream(None, Some("/")));
+        let index = RouteIndex::from_upstreams(&upstreams);
+        assert_eq!(index.lookup("/api", None), Some("api"));
+        assert_eq!(index.lookup("/api/v1", None), Some("api"));
+        assert_eq!(index.lookup("/api2", None), Some("root"));
+        assert_eq!(scan_lookup(&upstreams, "/api2", None), Some("root"));
     }
 
     #[test]

@@ -2089,7 +2089,41 @@ performance:
 </tbody>
 </table></div>
 <h3 id="brownout">brownout</h3>
-<p>Sheds non-core traffic when the global in-flight percent exceeds a threshold, protecting core routes.</p>
+<p>Brownout is a load-shedding mode that activates when the proxy is near capacity. When active, every incoming request whose upstream pool is <strong>not</strong> in <code>core_routes</code> is immediately rejected with <code>503 Service Unavailable</code> and a <code>Retry-After</code> header. Requests on core routes continue to be processed normally.</p>
+<p><strong>How it works</strong></p>
+<ol>
+<li>After each request is routed, Spooky samples the current global in-flight percent (active requests ÷ global limit × 100).</li>
+<li>If the sample reaches <code>trigger_inflight_percent</code>, brownout activates.</li>
+<li>Brownout stays active until the sample falls to or below <code>recover_inflight_percent</code>. The gap between the two thresholds is <strong>hysteresis</strong> — it prevents rapid oscillation when load is right at the boundary.</li>
+<li>While active, <code>spooky_brownout_active</code> gauge is <code>1</code> and <code>spooky_overload_shed_by_reason_total{reason="brownout"}</code> increments for every shed request.</li>
+</ol>
+<p><strong>Choosing <code>core_routes</code></strong></p>
+<p><code>core_routes</code> is a list of upstream pool names (the <code>id</code> field under <code>upstreams[].pool</code>). Routes not in this list are shed during brownout.</p>
+<ul>
+<li>If <code>core_routes</code> is empty (the default), <strong>all routes</strong> are shed during brownout. This is safe but means brownout effectively becomes a full-stop — no requests get through.</li>
+<li>List only the routes that must keep working during a partial outage: authentication, payments, health checks. Avoid listing high-volume non-critical routes or you defeat the purpose of shedding.</li>
+<li>A route shed during brownout receives a <code>503</code> with the body <code>brownout active, non-core route shed</code> and a <code>Retry-After</code> hint. Clients that respect <code>Retry-After</code> will back off automatically.</li>
+</ul>
+<p><strong>Interaction with other overload mechanisms</strong></p>
+<p>Brownout runs after routing but before adaptive admission and circuit breakers. The order is:</p>
+<ol>
+<li><strong>Brownout</strong> — shed non-core routes immediately (no backend resource consumed)</li>
+<li><strong>Adaptive admission</strong> — dynamically cap total in-flight based on observed latency</li>
+<li><strong>Per-upstream / per-backend inflight limits</strong> — static caps per pool and backend</li>
+<li><strong>Circuit breaker</strong> — stop sending to a specific failing backend</li>
+</ol>
+<p>If brownout is active and shedding load, adaptive admission will also begin to recover (inflight drops → limit rises). Once the in-flight percent falls to <code>recover_inflight_percent</code>, brownout deactivates and full traffic resumes. Set <code>recover_inflight_percent</code> at least 20–30 points below <code>trigger_inflight_percent</code> to give the system time to recover before re-admitting full traffic.</p>
+<p><strong>Alerting</strong></p>
+<p>Alert on <code>spooky_brownout_active == 1</code> for more than a brief window — sustained brownout means backends are under-provisioned or a downstream dependency is slow:</p>
+<pre><code class="language-yaml">- alert: SpookyBrownoutActive
+  expr: spooky_brownout_active == 1
+  for: 30s
+  labels:
+    severity: warning
+  annotations:
+    summary: &quot;Spooky brownout active on {{ $labels.instance }}&quot;
+    description: &quot;Non-core routes are being shed. Check backend latency and inflight metrics.&quot;
+</code></pre>
 <div class="table-wrapper"><table>
 <thead>
 <tr>
@@ -2127,7 +2161,7 @@ performance:
 <td>list</td>
 <td>No</td>
 <td><code>[]</code></td>
-<td>Upstream pool names exempt from shedding during brownout</td>
+<td>Upstream pool names exempt from shedding; empty means all routes are shed</td>
 </tr>
 </tbody>
 </table></div>

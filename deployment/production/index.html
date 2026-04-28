@@ -1329,6 +1329,17 @@ scrape_configs:
 <p><strong>Overload Shed Counters</strong>
 - <code>spooky_overload_shed_by_reason_total{reason="..."}</code> — requests shed by the overload system, broken down by reason (<code>brownout</code>, <code>adaptive_admission</code>, <code>route_cap</code>, <code>route_global_cap</code>, <code>global_inflight</code>, <code>upstream_inflight</code>, <code>backend_inflight</code>, <code>request_buffer_cap</code>, <code>response_prebuffer_cap</code>, <code>connection_cap</code>)
 - <code>spooky_route_overload_shed_total{route="..."}</code> — overload shed per route</p>
+<p><strong>Resilience Metrics</strong>
+- <code>spooky_retries_total</code> — total retry attempts fired across all routes
+- <code>spooky_retry_attempts_total{reason="timeout|transport|pool"}</code> — retries broken down by the error that triggered them
+- <code>spooky_retry_denied_total{reason="budget|no_bodyless|no_alternate"}</code> — retry denials broken down by reason: <code>budget</code> (retry budget exhausted), <code>no_bodyless</code> (request has a body so retry is unsafe), <code>no_alternate</code> (no alternate backend available)
+- <code>spooky_hedge_triggered_total</code> — hedge requests launched
+- <code>spooky_hedge_won_total</code> — times the hedge response was used (primary was slower)
+- <code>spooky_hedge_wasted_total</code> — times the hedge response arrived after the primary (wasted work)
+- <code>spooky_hedge_primary_won_after_trigger_total</code> — times the primary response arrived after the hedge launched but before it responded
+- <code>spooky_hedge_primary_late_ms_total</code> / <code>spooky_hedge_primary_late_samples_total</code> — aggregate and sample count for primary latency past the hedge trigger point
+- <code>spooky_circuit_breaker_rejected_total</code> — requests rejected because a backend circuit breaker was open
+- <code>spooky_brownout_active</code> — gauge; <code>1</code> while brownout mode is active (non-core routes are being shed), <code>0</code> otherwise</p>
 <p><strong>Backend Health Metrics</strong>
 - <code>spooky_health_checks_total</code> / <code>spooky_health_checks_success</code> / <code>spooky_health_checks_failure</code>
 - <code>spooky_backend_timeouts</code> / <code>spooky_backend_errors</code>

@@ -32,6 +32,7 @@
 ### Observability
 
 - **Metrics export**: Prometheus endpoint live — per-route counters, latency percentiles, active-connection and queue-size gauges, full drop counter coverage across all ingress paths
+- **Resilience metrics**: Per-feature counters for retries (attempt + denial by reason), hedges (triggered/won/wasted/latency), circuit breaker rejections, and brownout state gauge
 - **Distributed tracing**: OpenTelemetry integration
 - **Request logging**: Per-request structured logs with correlation IDs
 - **Connection metrics**: Track QUIC RTT, packet loss, stream count

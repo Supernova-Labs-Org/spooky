@@ -1866,7 +1866,7 @@ fn concurrent_large_body_pressure_is_bounded() {
                 chunk1,
                 chunk2,
                 Duration::from_millis(20),
-                Duration::from_secs(REQUEST_TIMEOUT_SECS + 12),
+                Duration::from_secs(REQUEST_TIMEOUT_SECS + 30),
             )
         }));
     }

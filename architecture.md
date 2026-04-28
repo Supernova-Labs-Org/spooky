@@ -258,6 +258,25 @@ next_counter += 1
 return candidates[index]
 ```
 
+**Least Connections**:
+```
+candidates = healthy_backends()
+return min_by(candidates, active_requests, deterministic_tie_break)
+```
+
+**Latency Aware**:
+```
+candidates = healthy_backends()
+score = ewma_latency_ms + (active_requests * penalty_ms)
+return min_by(candidates, score, deterministic_tie_break)
+```
+
+**Sticky CID**:
+```
+key = quic_connection_id
+return consistent_hash_ring_pick(key, healthy_backends)
+```
+
 **Consistent Hash**:
 ```
 ring = build_ring(backends, replicas=64)
@@ -455,7 +474,7 @@ YAML file → Parse → Validate → Build runtime structures
 
 - Packet processing: Minimal (quiche handles crypto)
 - Route matching: O(N) where N = upstream count
-- Load balancing: O(1) for random/round-robin, O(log M) for consistent hash where M = backend count
+- Load balancing: O(1) for random/round-robin, O(H) for least-connections/latency-aware over healthy set H, O(log M) for consistent hash/sticky-cid where M = ring entries
 - Health checking: Periodic, minimal impact
 
 ### Bottlenecks

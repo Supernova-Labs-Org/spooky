@@ -1133,6 +1133,19 @@ index = (next_counter % candidates.len())
 next_counter += 1
 return candidates[index]
 </code></pre>
+<p><strong>Least Connections</strong>:</p>
+<pre><code>candidates = healthy_backends()
+return min_by(candidates, active_requests, deterministic_tie_break)
+</code></pre>
+<p><strong>Latency Aware</strong>:</p>
+<pre><code>candidates = healthy_backends()
+score = ewma_latency_ms + (active_requests * penalty_ms)
+return min_by(candidates, score, deterministic_tie_break)
+</code></pre>
+<p><strong>Sticky CID</strong>:</p>
+<pre><code>key = quic_connection_id
+return consistent_hash_ring_pick(key, healthy_backends)
+</code></pre>
 <p><strong>Consistent Hash</strong>:</p>
 <pre><code>ring = build_ring(backends, replicas=64)
 key_hash = hash(request_key)
@@ -1362,7 +1375,7 @@ connections sharing the thread. Instead:</p>
 <ul>
 <li>Packet processing: Minimal (quiche handles crypto)</li>
 <li>Route matching: O(N) where N = upstream count</li>
-<li>Load balancing: O(1) for random/round-robin, O(log M) for consistent hash where M = backend count</li>
+<li>Load balancing: O(1) for random/round-robin, O(H) for least-connections/latency-aware over healthy set H, O(log M) for consistent hash/sticky-cid where M = ring entries</li>
 <li>Health checking: Periodic, minimal impact</li>
 </ul>
 <h3 id="bottlenecks">Bottlenecks</h3>

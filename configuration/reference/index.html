@@ -1536,7 +1536,7 @@ backends:
 <td>string</td>
 <td>No</td>
 <td>-</td>
-<td>Hash key source for consistent hashing (planned feature)</td>
+<td>Reserved for future pluggable key extraction (currently ignored)</td>
 </tr>
 </tbody>
 </table></div>
@@ -1557,18 +1557,40 @@ backends:
 </code></pre>
 <h4 id="consistent-hash">consistent-hash</h4>
 <p>Routes requests using consistent hashing based on a fixed key derived from the request. Currently uses request authority (if present), otherwise request path, otherwise HTTP method.</p>
-<p><strong>Note</strong>: Configurable key sources (headers, cookies, query parameters) are planned for future implementation.</p>
 <pre><code class="language-yaml">upstream:
   my_pool:
     load_balancing:
       type: &quot;consistent-hash&quot;
-      # key: &quot;header:x-user-id&quot;  # Planned feature, not currently supported
+</code></pre>
+<h4 id="least-connections">least-connections</h4>
+<p>Selects the healthy backend with the fewest active requests. Ties are deterministic by backend index order.</p>
+<pre><code class="language-yaml">upstream:
+  my_pool:
+    load_balancing:
+      type: &quot;least-connections&quot;
+</code></pre>
+<h4 id="latency-aware">latency-aware</h4>
+<p>Selects healthy backends using a latency score built from EWMA backend latency and active request pressure. Unsampled backends are probed first to avoid cold-start bias.</p>
+<pre><code class="language-yaml">upstream:
+  my_pool:
+    load_balancing:
+      type: &quot;latency-aware&quot;
+</code></pre>
+<h4 id="sticky-cid">sticky-cid</h4>
+<p>Uses consistent hashing keyed by QUIC connection ID for connection-level stickiness. The same CID is routed to the same backend while healthy membership is stable.</p>
+<pre><code class="language-yaml">upstream:
+  my_pool:
+    load_balancing:
+      type: &quot;sticky-cid&quot;
 </code></pre>
 <h3 id="algorithm-selection">Algorithm Selection</h3>
 <ul>
 <li>Use <code>random</code> for simple stateless load distribution</li>
 <li>Use <code>round-robin</code> for even distribution across backends</li>
 <li>Use <code>consistent-hash</code> when session affinity or request consistency is required</li>
+<li>Use <code>least-connections</code> when backend load varies significantly across requests</li>
+<li>Use <code>latency-aware</code> when you want faster backends to absorb more traffic</li>
+<li>Use <code>sticky-cid</code> for QUIC-connection affinity without application-level stickiness keys</li>
 </ul>
 <h3 id="examples_1">Examples</h3>
 <pre><code class="language-yaml">upstream:
@@ -2443,6 +2465,49 @@ performance:
 <li><code>observability.control_api.connection_timeout_ms</code> (default: <code>30000</code>): per-connection lifetime timeout.</li>
 </ul>
 <p>If <code>observability.control_api.address</code> is non-loopback, <code>observability.control_api.auth_token</code> is required.</p>
+<h3 id="routing-transparency">Routing Transparency</h3>
+<p><code>observability.routing</code> enables explicit route-decision logging.</p>
+<div class="table-wrapper"><table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Type</th>
+<th>Required</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>enabled</code></td>
+<td>boolean</td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Emit route-decision transparency logs</td>
+</tr>
+<tr>
+<td><code>include_reason</code></td>
+<td>boolean</td>
+<td>No</td>
+<td><code>true</code></td>
+<td>Include deterministic tie-break reason in route-decision logs</td>
+</tr>
+<tr>
+<td><code>expose_header</code></td>
+<td>boolean</td>
+<td>No</td>
+<td><code>false</code></td>
+<td>Reserved toggle for downstream route-decision response headers</td>
+</tr>
+<tr>
+<td><code>header_name</code></td>
+<td>string</td>
+<td>No</td>
+<td><code>"x-spooky-route-decision"</code></td>
+<td>Reserved header name; must be non-empty when <code>expose_header=true</code></td>
+</tr>
+</tbody>
+</table></div>
 <h3 id="watchdog-restart-hook">Watchdog Restart Hook</h3>
 <p>Use structured command execution:</p>
 <ul>
@@ -3125,6 +3190,12 @@ log:
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
             data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#control-api-endpoint');">
             Control API Endpoint
+        </a>
+        
+        <a href="#routing-transparency"
+            class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#routing-transparency');">
+            Routing Transparency
         </a>
         
         <a href="#watchdog-restart-hook"

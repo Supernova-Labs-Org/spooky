@@ -868,7 +868,7 @@
 <li>HTTP/3 termination via quiche</li>
 <li>HTTP/2 backend connectivity</li>
 <li>Path and host-based routing</li>
-<li>Multiple load balancing algorithms (random, round-robin, consistent hash)</li>
+<li>Multiple load balancing algorithms (random, round-robin, consistent hash, least-connections, latency-aware, sticky-cid)</li>
 <li>Active health checking with automatic backend management</li>
 <li>Per-upstream configuration and routing</li>
 <li>Connection ID management and QUIC packet routing</li>
@@ -919,8 +919,6 @@
 </ul>
 <h3 id="load-balancing">Load Balancing</h3>
 <ul>
-<li><strong>Least connections</strong>: Track active connections per backend</li>
-<li><strong>Response time</strong>: Route based on backend latency</li>
 <li><strong>Weighted least connection</strong>: Combine weights with connection count</li>
 <li><strong>Cached consistent hash</strong>: Cache hash ring to avoid rebuilds</li>
 </ul>

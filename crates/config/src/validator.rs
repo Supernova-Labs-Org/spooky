@@ -646,6 +646,13 @@ pub fn validate(config: &Config) -> bool {
             error!("observability.metrics.connection_timeout_ms must be greater than 0");
             return false;
         }
+
+        if !is_loopback_bind_address(&config.observability.metrics.address) {
+            warn!(
+                "observability.metrics is bound to non-loopback address {}; ensure network ACLs protect plaintext metrics endpoint",
+                config.observability.metrics.address
+            );
+        }
     }
 
     if config.observability.control_api.enabled {

@@ -53,7 +53,7 @@ use crate::{
     },
     outcome_from_status,
     resilience::{RouteQueueRejection, RuntimeResilience},
-    route_index::{RouteIndex, normalize_host_for_routing},
+    route_index::{RouteDecisionReason, RouteIndex, normalize_host_for_routing},
     watchdog::{WatchdogCoordinator, WatchdogRuntimeConfig, now_millis},
 };
 
@@ -108,7 +108,16 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
-type ResolvedBackend = (String, String, usize, Arc<Mutex<UpstreamPool>>);
+type ResolvedBackend = (
+    String,
+    String,
+    usize,
+    Arc<Mutex<UpstreamPool>>,
+    String,
+    usize,
+    bool,
+    RouteDecisionReason,
+);
 
 struct RequestValidationResult {
     method: String,
@@ -505,6 +514,18 @@ pub(crate) fn sweep_closed_connections<C, F>(
 /// logging and metrics at the call site).
 pub(crate) fn abort_stream(req: &mut RequestEnvelope, metrics: &Metrics) -> StreamPhase {
     let phase = req.phase.clone();
+    if !req.backend_request_finished {
+        if let (Some(pool), Some(index)) = (&req.upstream_pool, req.backend_index)
+            && let Ok(mut guard) = pool.lock()
+        {
+            guard.finish_request(
+                index,
+                req.start.elapsed(),
+                req.response_status.or(Some(503)),
+            );
+        }
+        req.backend_request_finished = true;
+    }
     if req.body_buf_bytes > 0 {
         metrics.release_request_buffer(req.body_buf_bytes);
         req.body_buf_bytes = 0;
@@ -1511,6 +1532,8 @@ impl QUICListener {
                 self.unknown_length_response_prebuffer_bytes,
                 self.client_body_idle_timeout,
                 self.config.observability.tracing.enabled,
+                self.config.observability.routing.enabled,
+                self.config.observability.routing.include_reason,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -1751,6 +1774,8 @@ impl QUICListener {
         unknown_length_response_prebuffer_bytes: usize,
         client_body_idle_timeout: Duration,
         tracing_enabled: bool,
+        routing_transparency_enabled: bool,
+        routing_transparency_include_reason: bool,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -1823,10 +1848,12 @@ impl QUICListener {
                     }
 
                     // Route lookup — needed to start the H2 request immediately.
+                    let sticky_cid_key = hex::encode(connection.primary_scid.as_ref());
                     let resolved = Self::resolve_backend(
                         &method,
                         &path,
                         authority.as_deref(),
+                        Some(sticky_cid_key.as_str()),
                         upstream_pools,
                         routing_index,
                     );
@@ -1837,6 +1864,11 @@ impl QUICListener {
                         backend_addr,
                         backend_index,
                         upstream_name,
+                        backend_lb,
+                        route_path_len,
+                        route_host_specific,
+                        route_reason,
+                        upstream_pool,
                         global_inflight_permit,
                         upstream_inflight_permit,
                         adaptive_admission_permit,
@@ -1849,7 +1881,16 @@ impl QUICListener {
                         trace_span,
                         request_id,
                     ) = match resolved {
-                        Ok((upstream_name, addr, idx, upstream_pool)) => {
+                        Ok((
+                            upstream_name,
+                            addr,
+                            idx,
+                            upstream_pool,
+                            backend_lb,
+                            route_path_len,
+                            route_host_specific,
+                            route_reason,
+                        )) => {
                             resilience.brownout.observe_admission_pressure(
                                 resilience.adaptive_admission.inflight_percent(),
                             );
@@ -2381,6 +2422,11 @@ impl QUICListener {
                                 Some(addr),
                                 Some(idx),
                                 Some(upstream_name),
+                                Some(backend_lb),
+                                Some(route_path_len),
+                                Some(route_host_specific),
+                                Some(format!("{route_reason:?}")),
+                                Some(upstream_pool),
                                 Some(global_permit),
                                 Some(upstream_permit),
                                 Some(adaptive_permit),
@@ -2475,6 +2521,15 @@ impl QUICListener {
                             backend_addr,
                             backend_index,
                             upstream_name,
+                            route_reason,
+                            route_path_len,
+                            route_host_specific,
+                            backend_lb,
+                            upstream_pool,
+                            routing_transparency_enabled,
+                            routing_transparency_include_reason,
+                            response_status: None,
+                            backend_request_finished: false,
                             global_inflight_permit,
                             upstream_inflight_permit,
                             adaptive_admission_permit,
@@ -3143,35 +3198,30 @@ impl QUICListener {
                             req.response_chunk_rx = Some(chunk_rx);
                             req.response_headers_sent = !defer_headers_until_body_validated;
                             req.phase = StreamPhase::SendingResponse;
+                            req.response_status = Some(status.as_u16());
                         }
 
                         // Update health/metrics for successful upstream response.
                         if let Some(req) = streams.get(&stream_id) {
                             if let (Some(addr), Some(idx)) = (&req.backend_addr, req.backend_index)
+                                && let Some(pool) = req.upstream_pool.as_ref()
                             {
-                                let upstream_name =
-                                    routing_index.lookup(&req.path, req.authority.as_deref());
-                                if let Some(pool) =
-                                    upstream_name.and_then(|n| upstream_pools.get(n))
-                                {
-                                    let transition =
-                                        pool.lock().ok().and_then(
-                                            |mut p| match outcome_from_status(status) {
-                                                crate::HealthClassification::Success => {
-                                                    p.pool.mark_success(idx)
-                                                }
-                                                crate::HealthClassification::Failure => {
-                                                    p.pool.mark_request_failure(
-                                                        idx,
-                                                        HealthFailureReason::HttpStatus5xx,
-                                                    )
-                                                }
-                                                crate::HealthClassification::Neutral => None,
-                                            },
-                                        );
-                                    if let Some(t) = transition {
-                                        Self::log_health_transition(addr, t);
+                                let transition = pool.lock().ok().and_then(|mut p| {
+                                    match outcome_from_status(status) {
+                                        crate::HealthClassification::Success => {
+                                            p.pool.mark_success(idx)
+                                        }
+                                        crate::HealthClassification::Failure => {
+                                            p.pool.mark_request_failure(
+                                                idx,
+                                                HealthFailureReason::HttpStatus5xx,
+                                            )
+                                        }
+                                        crate::HealthClassification::Neutral => None,
                                     }
+                                });
+                                if let Some(t) = transition {
+                                    Self::log_health_transition(addr, t);
                                 }
                             }
                             metrics.inc_success();
@@ -3475,6 +3525,7 @@ impl QUICListener {
         method: &str,
         path: &str,
         authority: Option<&str>,
+        cid_key: Option<&str>,
         upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
         routing_index: &RouteIndex,
     ) -> Result<ResolvedBackend, ProxyError> {
@@ -3482,16 +3533,15 @@ impl QUICListener {
             return Err(ProxyError::Transport("empty method or path".into()));
         }
 
-        let upstream_name = routing_index
-            .lookup(path, authority)
+        let route_decision = routing_index
+            .lookup_with_decision(path, authority)
             .ok_or_else(|| ProxyError::Transport(format!("no route for {path}")))?;
+        let upstream_name = route_decision.upstream;
 
         let upstream_pool = upstream_pools
             .get(upstream_name)
             .ok_or_else(|| ProxyError::Transport(format!("pool not found: {upstream_name}")))?
             .clone();
-
-        let key: &str = authority.unwrap_or(if !path.is_empty() { path } else { method });
 
         let (backend_index, lb_type, backend_addr) = {
             let mut pool = upstream_pool
@@ -3501,6 +3551,13 @@ impl QUICListener {
                 return Err(ProxyError::Transport("no servers in upstream".into()));
             }
             let lb_type = pool.lb_name();
+            let key: &str = if lb_type == "sticky-cid" {
+                cid_key.unwrap_or_else(|| {
+                    authority.unwrap_or(if !path.is_empty() { path } else { method })
+                })
+            } else {
+                authority.unwrap_or(if !path.is_empty() { path } else { method })
+            };
             let idx = pool.pick(key);
             let idx = idx.ok_or_else(|| {
                 let total = pool.pool.len();
@@ -3519,12 +3576,24 @@ impl QUICListener {
             (idx, lb_type, backend_addr)
         };
 
-        debug!("Selected backend {} via {}", backend_addr, lb_type);
+        debug!(
+            "Selected backend {} via {} route={} path_len={} host_specific={} reason={:?}",
+            backend_addr,
+            lb_type,
+            upstream_name,
+            route_decision.matched_path_len,
+            route_decision.host_specific,
+            route_decision.reason
+        );
         Ok((
             upstream_name.to_string(),
             backend_addr,
             backend_index,
             upstream_pool,
+            lb_type.to_string(),
+            route_decision.matched_path_len,
+            route_decision.host_specific,
+            route_decision.reason,
         ))
     }
 
@@ -3549,6 +3618,22 @@ impl QUICListener {
         let trace_id = req.trace_id.as_deref().unwrap_or("-");
         let span_id = req.span_id.as_deref().unwrap_or("-");
         let latency_ms = req.start.elapsed().as_millis() as u64;
+        if req.routing_transparency_enabled {
+            let reason = if req.routing_transparency_include_reason {
+                req.route_reason.as_deref().unwrap_or("-")
+            } else {
+                "-"
+            };
+            info!(
+                "request_id={} route_upstream={} route_path_len={} route_host_specific={} route_reason={} lb={}",
+                req.request_id,
+                req.upstream_name.as_deref().unwrap_or("-"),
+                req.route_path_len.unwrap_or_default(),
+                req.route_host_specific.unwrap_or(false),
+                reason,
+                req.backend_lb.as_deref().unwrap_or("-")
+            );
+        }
 
         if let Some(span) = req.trace_span.as_ref() {
             span.in_scope(|| match req.error_kind.as_ref() {
@@ -3652,7 +3737,11 @@ impl QUICListener {
 
         // Re-acquire the upstream pool for health marking.
         let upstream_name = routing_index.lookup(&req.path, req.authority.as_deref());
-        let upstream_pool = upstream_name.and_then(|n| upstream_pools.get(n)).cloned();
+        let upstream_pool = req
+            .upstream_pool
+            .as_ref()
+            .cloned()
+            .or_else(|| upstream_name.and_then(|n| upstream_pools.get(n)).cloned());
 
         match result {
             Ok(_) => {
@@ -5313,6 +5402,15 @@ mod tests {
             backend_addr: None,
             backend_index: None,
             upstream_name: None,
+            route_reason: None,
+            route_path_len: None,
+            route_host_specific: None,
+            backend_lb: None,
+            upstream_pool: None,
+            routing_transparency_enabled: false,
+            routing_transparency_include_reason: false,
+            response_status: None,
+            backend_request_finished: false,
             global_inflight_permit: None,
             upstream_inflight_permit: None,
             adaptive_admission_permit: None,

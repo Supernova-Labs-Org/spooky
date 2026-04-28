@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
+#[inline(always)]
 fn parsed_host_for_routing(raw: &str) -> Option<&str> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -25,6 +26,7 @@ fn parsed_host_for_routing(raw: &str) -> Option<&str> {
     if host.is_empty() { None } else { Some(host) }
 }
 
+#[inline(always)]
 fn host_has_uppercase_ascii(host: &str) -> bool {
     host.bytes().any(|byte| byte.is_ascii_uppercase())
 }
@@ -51,6 +53,31 @@ pub struct IndexedRoute {
     path_len: usize,
     host_specific: bool,
     order: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RoutePreference {
+    KeepCurrent,
+    TakeCandidatePathLen,
+    TakeCandidateHostSpecific,
+    TakeCandidateLexicalOrder,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RouteDecisionReason {
+    HostTrieNoDefault,
+    HostPathLongerOrEqual,
+    DefaultPathLonger,
+    HostSpecificTieBreak,
+    LexicalTieBreak,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RouteDecision<'a> {
+    pub upstream: &'a str,
+    pub matched_path_len: usize,
+    pub host_specific: bool,
+    pub reason: RouteDecisionReason,
 }
 
 #[derive(Default)]
@@ -108,6 +135,7 @@ impl RouteTrie {
     }
 }
 
+#[inline(always)]
 fn prefix_boundary_matches(path: &str, prefix_len: usize) -> bool {
     if prefix_len <= 1 {
         return true;
@@ -205,8 +233,90 @@ impl RouteIndex {
         let best = prefer_route(self.default_trie.longest_prefix(path), host_best);
         best.map(|route| self.upstream_names[route.upstream_idx].as_str())
     }
+
+    pub(crate) fn lookup_with_decision<'a>(
+        &'a self,
+        path: &str,
+        host: Option<&str>,
+    ) -> Option<RouteDecision<'a>> {
+        let host_best = host.and_then(|raw_host| {
+            let parsed_host = parsed_host_for_routing(raw_host)?;
+            let host_trie = if host_has_uppercase_ascii(parsed_host) {
+                let normalized = parsed_host.to_ascii_lowercase();
+                self.host_tries.get(normalized.as_str())
+            } else {
+                self.host_tries.get(parsed_host)
+            }?;
+            host_trie.longest_prefix(path)
+        });
+
+        let default_best = self.default_trie.longest_prefix(path);
+        if let Some(best) = host_best
+            && best.path_len >= self.default_max_path_len
+        {
+            let reason = match default_best {
+                None => RouteDecisionReason::HostTrieNoDefault,
+                Some(default_route) => match compare_route(default_route, best) {
+                    RoutePreference::TakeCandidateHostSpecific => {
+                        RouteDecisionReason::HostSpecificTieBreak
+                    }
+                    RoutePreference::TakeCandidateLexicalOrder => {
+                        RouteDecisionReason::LexicalTieBreak
+                    }
+                    _ => RouteDecisionReason::HostPathLongerOrEqual,
+                },
+            };
+            return Some(RouteDecision {
+                upstream: self.upstream_names[best.upstream_idx].as_str(),
+                matched_path_len: best.path_len,
+                host_specific: best.host_specific,
+                reason,
+            });
+        }
+
+        match (default_best, host_best) {
+            (Some(default_route), None) => Some(RouteDecision {
+                upstream: self.upstream_names[default_route.upstream_idx].as_str(),
+                matched_path_len: default_route.path_len,
+                host_specific: default_route.host_specific,
+                reason: RouteDecisionReason::DefaultPathLonger,
+            }),
+            (None, Some(host_route)) => Some(RouteDecision {
+                upstream: self.upstream_names[host_route.upstream_idx].as_str(),
+                matched_path_len: host_route.path_len,
+                host_specific: host_route.host_specific,
+                reason: RouteDecisionReason::HostTrieNoDefault,
+            }),
+            (Some(current), Some(candidate)) => {
+                let reason = match compare_route(current, candidate) {
+                    RoutePreference::TakeCandidatePathLen => {
+                        RouteDecisionReason::HostPathLongerOrEqual
+                    }
+                    RoutePreference::TakeCandidateHostSpecific => {
+                        RouteDecisionReason::HostSpecificTieBreak
+                    }
+                    RoutePreference::TakeCandidateLexicalOrder => {
+                        RouteDecisionReason::LexicalTieBreak
+                    }
+                    RoutePreference::KeepCurrent => RouteDecisionReason::DefaultPathLonger,
+                };
+                let selected = match compare_route(current, candidate) {
+                    RoutePreference::KeepCurrent => current,
+                    _ => candidate,
+                };
+                Some(RouteDecision {
+                    upstream: self.upstream_names[selected.upstream_idx].as_str(),
+                    matched_path_len: selected.path_len,
+                    host_specific: selected.host_specific,
+                    reason,
+                })
+            }
+            (None, None) => None,
+        }
+    }
 }
 
+#[inline(always)]
 fn prefer_route(
     current: Option<IndexedRoute>,
     candidate: Option<IndexedRoute>,
@@ -214,20 +324,31 @@ fn prefer_route(
     match (current, candidate) {
         (None, None) => None,
         (Some(route), None) | (None, Some(route)) => Some(route),
-        (Some(current), Some(candidate)) => {
-            if candidate.path_len > current.path_len
-                || (candidate.path_len == current.path_len
-                    && candidate.host_specific
-                    && !current.host_specific)
-                || (candidate.path_len == current.path_len
-                    && candidate.host_specific == current.host_specific
-                    && candidate.order < current.order)
-            {
-                Some(candidate)
-            } else {
-                Some(current)
-            }
-        }
+        (Some(current), Some(candidate)) => match compare_route(current, candidate) {
+            RoutePreference::KeepCurrent => Some(current),
+            RoutePreference::TakeCandidatePathLen
+            | RoutePreference::TakeCandidateHostSpecific
+            | RoutePreference::TakeCandidateLexicalOrder => Some(candidate),
+        },
+    }
+}
+
+#[inline(always)]
+fn compare_route(current: IndexedRoute, candidate: IndexedRoute) -> RoutePreference {
+    if candidate.path_len > current.path_len {
+        RoutePreference::TakeCandidatePathLen
+    } else if candidate.path_len == current.path_len
+        && candidate.host_specific
+        && !current.host_specific
+    {
+        RoutePreference::TakeCandidateHostSpecific
+    } else if candidate.path_len == current.path_len
+        && candidate.host_specific == current.host_specific
+        && candidate.order < current.order
+    {
+        RoutePreference::TakeCandidateLexicalOrder
+    } else {
+        RoutePreference::KeepCurrent
     }
 }
 
@@ -436,6 +557,43 @@ mod tests {
         assert_eq!(index.lookup("/api/v1", None), Some("api"));
         assert_eq!(index.lookup("/api2", None), Some("root"));
         assert_eq!(scan_lookup(&upstreams, "/api2", None), Some("root"));
+    }
+
+    #[test]
+    fn lookup_with_decision_reports_host_specific_tie_break() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert("default-api".to_string(), test_upstream(None, Some("/api")));
+        upstreams.insert(
+            "host-api".to_string(),
+            test_upstream(Some("api.example.com"), Some("/api")),
+        );
+        let index = RouteIndex::from_upstreams(&upstreams);
+
+        let decision = index
+            .lookup_with_decision("/api/v1", Some("api.example.com"))
+            .expect("decision");
+        assert_eq!(decision.upstream, "host-api");
+        assert_eq!(decision.reason, RouteDecisionReason::HostSpecificTieBreak);
+    }
+
+    #[test]
+    fn lookup_with_decision_reports_default_longer_path() {
+        let mut upstreams = HashMap::new();
+        upstreams.insert(
+            "host-root".to_string(),
+            test_upstream(Some("api.example.com"), Some("/")),
+        );
+        upstreams.insert(
+            "default-api-v2".to_string(),
+            test_upstream(None, Some("/api/v2")),
+        );
+        let index = RouteIndex::from_upstreams(&upstreams);
+
+        let decision = index
+            .lookup_with_decision("/api/v2/users", Some("api.example.com"))
+            .expect("decision");
+        assert_eq!(decision.upstream, "default-api-v2");
+        assert_eq!(decision.reason, RouteDecisionReason::DefaultPathLonger);
     }
 
     #[test]

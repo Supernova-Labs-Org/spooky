@@ -13,27 +13,31 @@ use crate::default::{
     observe_default_control_api_ready_path, observe_default_control_api_restart_path,
     observe_default_control_api_runtime_path, observe_default_metrics_connection_timeout_ms,
     observe_default_metrics_max_connections, observe_default_metrics_path, observe_default_port,
-    observe_default_tracing_sample_ratio, observe_default_tracing_service_name,
-    perf_default_backend_body_idle_timeout_ms, perf_default_backend_body_total_timeout_ms,
-    perf_default_backend_connect_timeout_ms, perf_default_backend_timeout_ms,
-    perf_default_backend_total_request_timeout_ms, perf_default_client_body_idle_timeout_ms,
-    perf_default_control_plane_threads, perf_default_global_inflight_limit,
-    perf_default_h2_pool_idle_timeout_ms, perf_default_h2_pool_max_idle_per_backend,
-    perf_default_max_active_connections, perf_default_max_request_body_bytes,
-    perf_default_max_response_body_bytes, perf_default_new_connections_burst,
-    perf_default_new_connections_per_sec, perf_default_packet_shard_queue_capacity,
-    perf_default_packet_shard_queue_max_bytes, perf_default_packet_shards_per_worker,
-    perf_default_per_backend_inflight_limit, perf_default_per_upstream_inflight_limit,
-    perf_default_pin_workers, perf_default_quic_initial_max_data,
-    perf_default_quic_initial_max_stream_data, perf_default_quic_initial_max_streams_bidi,
-    perf_default_quic_initial_max_streams_uni, perf_default_quic_max_idle_timeout_ms,
-    perf_default_request_buffer_global_cap_bytes, perf_default_reuseport,
-    perf_default_shutdown_drain_timeout_ms, perf_default_udp_recv_buffer_bytes,
-    perf_default_udp_send_buffer_bytes, perf_default_unknown_length_response_prebuffer_bytes,
-    perf_default_worker_threads, resilience_default_adaptive_decrease_step,
-    resilience_default_adaptive_enabled, resilience_default_adaptive_high_latency_ms,
-    resilience_default_adaptive_increase_step, resilience_default_adaptive_min_limit,
-    resilience_default_brownout_enabled, resilience_default_brownout_recover_inflight_percent,
+    observe_default_routing_transparency_enabled,
+    observe_default_routing_transparency_expose_header,
+    observe_default_routing_transparency_header_name,
+    observe_default_routing_transparency_include_reason, observe_default_tracing_sample_ratio,
+    observe_default_tracing_service_name, perf_default_backend_body_idle_timeout_ms,
+    perf_default_backend_body_total_timeout_ms, perf_default_backend_connect_timeout_ms,
+    perf_default_backend_timeout_ms, perf_default_backend_total_request_timeout_ms,
+    perf_default_client_body_idle_timeout_ms, perf_default_control_plane_threads,
+    perf_default_global_inflight_limit, perf_default_h2_pool_idle_timeout_ms,
+    perf_default_h2_pool_max_idle_per_backend, perf_default_max_active_connections,
+    perf_default_max_request_body_bytes, perf_default_max_response_body_bytes,
+    perf_default_new_connections_burst, perf_default_new_connections_per_sec,
+    perf_default_packet_shard_queue_capacity, perf_default_packet_shard_queue_max_bytes,
+    perf_default_packet_shards_per_worker, perf_default_per_backend_inflight_limit,
+    perf_default_per_upstream_inflight_limit, perf_default_pin_workers,
+    perf_default_quic_initial_max_data, perf_default_quic_initial_max_stream_data,
+    perf_default_quic_initial_max_streams_bidi, perf_default_quic_initial_max_streams_uni,
+    perf_default_quic_max_idle_timeout_ms, perf_default_request_buffer_global_cap_bytes,
+    perf_default_reuseport, perf_default_shutdown_drain_timeout_ms,
+    perf_default_udp_recv_buffer_bytes, perf_default_udp_send_buffer_bytes,
+    perf_default_unknown_length_response_prebuffer_bytes, perf_default_worker_threads,
+    resilience_default_adaptive_decrease_step, resilience_default_adaptive_enabled,
+    resilience_default_adaptive_high_latency_ms, resilience_default_adaptive_increase_step,
+    resilience_default_adaptive_min_limit, resilience_default_brownout_enabled,
+    resilience_default_brownout_recover_inflight_percent,
     resilience_default_brownout_trigger_inflight_percent, resilience_default_cb_enabled,
     resilience_default_cb_failure_threshold, resilience_default_cb_half_open_max_probes,
     resilience_default_cb_open_ms, resilience_default_hedging_delay_ms,
@@ -240,7 +244,7 @@ pub struct HealthCheck {
 #[serde(deny_unknown_fields)]
 pub struct LoadBalancing {
     #[serde(rename = "type")]
-    pub lb_type: String, // "random","round_robin","consistent_hash"
+    pub lb_type: String, // "random","round_robin","consistent_hash","least_connections","latency_aware","sticky_cid"
 
     // Add support for consistent hash configuration
     #[serde(default)]
@@ -754,6 +758,8 @@ pub struct Observability {
     pub control_api: ControlApi,
     #[serde(default)]
     pub tracing: Tracing,
+    #[serde(default)]
+    pub routing: RoutingTransparency,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -865,6 +871,30 @@ impl Default for Tracing {
             service_name: observe_default_tracing_service_name(),
             otlp_endpoint: None,
             sample_ratio: observe_default_tracing_sample_ratio(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct RoutingTransparency {
+    #[serde(default = "observe_default_routing_transparency_enabled")]
+    pub enabled: bool,
+    #[serde(default = "observe_default_routing_transparency_include_reason")]
+    pub include_reason: bool,
+    #[serde(default = "observe_default_routing_transparency_expose_header")]
+    pub expose_header: bool,
+    #[serde(default = "observe_default_routing_transparency_header_name")]
+    pub header_name: String,
+}
+
+impl Default for RoutingTransparency {
+    fn default() -> Self {
+        Self {
+            enabled: observe_default_routing_transparency_enabled(),
+            include_reason: observe_default_routing_transparency_include_reason(),
+            expose_header: observe_default_routing_transparency_expose_header(),
+            header_name: observe_default_routing_transparency_header_name(),
         }
     }
 }

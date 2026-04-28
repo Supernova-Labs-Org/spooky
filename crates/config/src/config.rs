@@ -658,6 +658,14 @@ pub struct Watchdog {
     pub drain_grace_ms: u64,
     #[serde(default = "resilience_default_watchdog_restart_cooldown_ms")]
     pub restart_cooldown_ms: u64,
+
+    /// Structured restart hook command: first element is executable, rest are args.
+    /// Preferred over `restart_hook` because it avoids shell evaluation.
+    #[serde(default)]
+    pub restart_command: Vec<String>,
+
+    /// Legacy shell command restart hook.
+    /// Deprecated: use `restart_command` instead.
     #[serde(default)]
     pub restart_hook: Option<String>,
 }
@@ -675,6 +683,7 @@ impl Default for Watchdog {
                 resilience_default_watchdog_unhealthy_consecutive_windows(),
             drain_grace_ms: resilience_default_watchdog_drain_grace_ms(),
             restart_cooldown_ms: resilience_default_watchdog_restart_cooldown_ms(),
+            restart_command: Vec::new(),
             restart_hook: None,
         }
     }

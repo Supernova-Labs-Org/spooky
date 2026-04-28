@@ -23,6 +23,8 @@ pub struct BackendState {
     health_check: HealthCheck,
     consecutive_failures: u32,
     health_state: HealthState,
+    active_requests: usize,
+    ewma_latency_ms: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -50,6 +52,8 @@ impl BackendState {
             health_check: backend.health_check.clone(),
             consecutive_failures: 0,
             health_state: HealthState::Healthy,
+            active_requests: 0,
+            ewma_latency_ms: None,
         }
     }
 
@@ -74,6 +78,14 @@ impl BackendState {
 
     pub fn weight(&self) -> u32 {
         self.weight
+    }
+
+    pub fn active_requests(&self) -> usize {
+        self.active_requests
+    }
+
+    pub fn ewma_latency_ms(&self) -> Option<f64> {
+        self.ewma_latency_ms
     }
 
     pub fn record_success(&mut self) -> Option<HealthTransition> {
@@ -143,7 +155,13 @@ impl UpstreamPool {
     }
 
     pub fn pick(&mut self, key: &str) -> Option<usize> {
-        self.load_balancer.pick(key, &self.pool)
+        let selected = self.load_balancer.pick(key, &self.pool)?;
+        self.pool.begin_request(selected);
+        Some(selected)
+    }
+
+    pub fn finish_request(&mut self, index: usize, latency: Duration, status: Option<u16>) {
+        self.pool.finish_request(index, latency, status);
     }
 
     pub fn lb_name(&self) -> &'static str {
@@ -276,6 +294,33 @@ impl BackendPool {
         self.membership_epoch
     }
 
+    pub fn begin_request(&mut self, index: usize) {
+        if let Some(backend) = self.backends.get_mut(index) {
+            backend.active_requests = backend.active_requests.saturating_add(1);
+        }
+    }
+
+    pub fn finish_request(&mut self, index: usize, latency: Duration, status: Option<u16>) {
+        let Some(backend) = self.backends.get_mut(index) else {
+            return;
+        };
+
+        if backend.active_requests > 0 {
+            backend.active_requests -= 1;
+        }
+
+        if status.is_some_and(|code| (500..=599).contains(&code)) {
+            return;
+        }
+
+        let observed_ms = latency.as_secs_f64() * 1_000.0;
+        let alpha = 0.2_f64;
+        backend.ewma_latency_ms = Some(match backend.ewma_latency_ms {
+            Some(previous) => alpha * observed_ms + (1.0 - alpha) * previous,
+            None => observed_ms,
+        });
+    }
+
     fn mark_healthy(&mut self, index: usize) -> bool {
         if index >= self.backends.len() {
             return false;
@@ -317,6 +362,9 @@ pub enum LoadBalancing {
     RoundRobin(RoundRobin),
     ConsistentHash(ConsistentHash),
     Random(Random),
+    LeastConnections(LeastConnections),
+    LatencyAware(LatencyAware),
+    StickyCid(StickyCid),
 }
 
 impl LoadBalancing {
@@ -328,6 +376,13 @@ impl LoadBalancing {
                 Ok(Self::ConsistentHash(ConsistentHash::new(DEFAULT_REPLICAS)))
             }
             "random" => Ok(Self::Random(Random::new())),
+            "least-connections" | "least_connections" | "lc" => {
+                Ok(Self::LeastConnections(LeastConnections::new()))
+            }
+            "latency-aware" | "latency_aware" | "la" => Ok(Self::LatencyAware(LatencyAware::new())),
+            "sticky-cid" | "sticky_cid" | "cid-sticky" | "cid_sticky" => {
+                Ok(Self::StickyCid(StickyCid::new(DEFAULT_REPLICAS)))
+            }
             _ => Err(format!("unsupported load balancing type: {value}")),
         }
     }
@@ -337,6 +392,9 @@ impl LoadBalancing {
             LoadBalancing::RoundRobin(rr) => rr.pick(pool),
             LoadBalancing::ConsistentHash(ch) => ch.pick(key, pool),
             LoadBalancing::Random(rand) => rand.pick(pool),
+            LoadBalancing::LeastConnections(lc) => lc.pick(pool),
+            LoadBalancing::LatencyAware(la) => la.pick(pool),
+            LoadBalancing::StickyCid(sticky) => sticky.pick(key, pool),
         }
     }
 
@@ -345,6 +403,9 @@ impl LoadBalancing {
             LoadBalancing::RoundRobin(_) => "round-robin",
             LoadBalancing::ConsistentHash(_) => "consistent-hash",
             LoadBalancing::Random(_) => "random",
+            LoadBalancing::LeastConnections(_) => "least-connections",
+            LoadBalancing::LatencyAware(_) => "latency-aware",
+            LoadBalancing::StickyCid(_) => "sticky-cid",
         }
     }
 }
@@ -460,6 +521,108 @@ impl Random {
 impl Default for Random {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub struct LeastConnections;
+
+impl LeastConnections {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
+        let mut best: Option<(usize, usize)> = None;
+        for &idx in &pool.healthy {
+            let active = pool.backends[idx].active_requests();
+            match best {
+                Some((best_active, best_idx)) => {
+                    if active < best_active || (active == best_active && idx < best_idx) {
+                        best = Some((active, idx));
+                    }
+                }
+                None => best = Some((active, idx)),
+            }
+        }
+        best.map(|(_, idx)| idx)
+    }
+}
+
+impl Default for LeastConnections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct LatencyAware;
+
+impl LatencyAware {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
+        let mut unsampled_best: Option<(usize, usize)> = None;
+        let mut sampled_best: Option<(f64, usize, usize)> = None;
+
+        for &idx in &pool.healthy {
+            let backend = &pool.backends[idx];
+            let active = backend.active_requests();
+            if let Some(ewma) = backend.ewma_latency_ms() {
+                let score = ewma + (active as f64 * 10.0);
+                match sampled_best {
+                    Some((best_score, best_active, best_idx)) => {
+                        if score < best_score
+                            || (score == best_score
+                                && (active < best_active
+                                    || (active == best_active && idx < best_idx)))
+                        {
+                            sampled_best = Some((score, active, idx));
+                        }
+                    }
+                    None => sampled_best = Some((score, active, idx)),
+                }
+            } else {
+                match unsampled_best {
+                    Some((best_active, best_idx)) => {
+                        if active < best_active || (active == best_active && idx < best_idx) {
+                            unsampled_best = Some((active, idx));
+                        }
+                    }
+                    None => unsampled_best = Some((active, idx)),
+                }
+            }
+        }
+
+        if let Some((_, idx)) = unsampled_best {
+            return Some(idx);
+        }
+        sampled_best.map(|(_, _, idx)| idx)
+    }
+}
+
+impl Default for LatencyAware {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct StickyCid {
+    inner: ConsistentHash,
+}
+
+impl StickyCid {
+    pub fn new(replicas: u32) -> Self {
+        Self {
+            inner: ConsistentHash::new(replicas),
+        }
+    }
+
+    pub fn pick(&mut self, key: &str, pool: &BackendPool) -> Option<usize> {
+        if key.is_empty() {
+            return pool.healthy.first().copied();
+        }
+        self.inner.pick(key, pool)
     }
 }
 
@@ -678,7 +841,53 @@ mod tests {
         assert!(LoadBalancing::from_config("round-robin").is_ok());
         assert!(LoadBalancing::from_config("consistent-hash").is_ok());
         assert!(LoadBalancing::from_config("random").is_ok());
+        assert!(LoadBalancing::from_config("least-connections").is_ok());
+        assert!(LoadBalancing::from_config("latency-aware").is_ok());
+        assert!(LoadBalancing::from_config("sticky-cid").is_ok());
         assert!(LoadBalancing::from_config("unknown").is_err());
+    }
+
+    #[test]
+    fn least_connections_picks_lowest_active() {
+        let mut pool = BackendPool::new_from_states(vec![
+            create_backend_state("10.0.0.1:1", 1),
+            create_backend_state("10.0.0.2:1", 1),
+            create_backend_state("10.0.0.3:1", 1),
+        ]);
+        pool.begin_request(0);
+        pool.begin_request(0);
+        pool.begin_request(1);
+
+        let mut lb = LeastConnections::new();
+        assert_eq!(lb.pick(&pool), Some(2));
+    }
+
+    #[test]
+    fn latency_aware_prefers_lower_ewma() {
+        let mut pool = BackendPool::new_from_states(vec![
+            create_backend_state("10.0.0.1:1", 1),
+            create_backend_state("10.0.0.2:1", 1),
+        ]);
+
+        pool.finish_request(0, Duration::from_millis(150), Some(200));
+        pool.finish_request(1, Duration::from_millis(20), Some(200));
+
+        let mut lb = LatencyAware::new();
+        assert_eq!(lb.pick(&pool), Some(1));
+    }
+
+    #[test]
+    fn sticky_cid_is_deterministic_for_same_key() {
+        let pool = BackendPool::new_from_states(vec![
+            create_backend_state("10.0.0.1:1", 1),
+            create_backend_state("10.0.0.2:1", 1),
+            create_backend_state("10.0.0.3:1", 1),
+        ]);
+
+        let mut lb = StickyCid::new(16);
+        let first = lb.pick("cid:abc123", &pool);
+        let second = lb.pick("cid:abc123", &pool);
+        assert_eq!(first, second);
     }
 
     #[test]

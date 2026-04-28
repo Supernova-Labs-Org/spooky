@@ -56,6 +56,7 @@ pub const CURRENT_CONFIG_VERSION: u32 = 1;
 pub const SUPPORTED_CONFIG_VERSIONS: &[u32] = &[CURRENT_CONFIG_VERSION];
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "get_default_version")] // Make version optional with default
     pub version: u32,
@@ -87,12 +88,14 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Security {
     #[serde(default)]
     pub privileges: PrivilegeDrop,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct PrivilegeDrop {
     #[serde(default = "security_default_drop_privileges")]
     pub enabled: bool,
@@ -113,6 +116,7 @@ impl Default for PrivilegeDrop {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Listen {
     #[serde(default = "get_default_protocol")]
     pub protocol: String, // "http3"
@@ -126,6 +130,7 @@ pub struct Listen {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Tls {
     pub cert: String, // "/path/to/cert"
     pub key: String,  // "/path/to/key"
@@ -134,6 +139,7 @@ pub struct Tls {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct ClientAuth {
     #[serde(default)]
     pub enabled: bool,
@@ -144,6 +150,7 @@ pub struct ClientAuth {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamTls {
     #[serde(default = "upstream_tls_default_verify_certificates")]
     pub verify_certificates: bool,
@@ -167,6 +174,7 @@ impl Default for UpstreamTls {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Upstream {
     #[serde(default = "get_default_load_balancing")]
     pub load_balancing: LoadBalancing,
@@ -177,6 +185,7 @@ pub struct Upstream {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Backend {
     pub id: String, // "backend1"
     /// Backend endpoint.
@@ -191,6 +200,7 @@ pub struct Backend {
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct RouteMatch {
     #[serde(default)]
     pub host: Option<String>, // host-based routing (e.g., "api.example.com")
@@ -203,6 +213,7 @@ pub struct RouteMatch {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheck {
     #[serde(default = "get_default_path")]
     pub path: String, // "/health"
@@ -224,6 +235,7 @@ pub struct HealthCheck {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct LoadBalancing {
     #[serde(rename = "type")]
     pub lb_type: String, // "random","round_robin","consistent_hash"

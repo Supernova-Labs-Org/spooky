@@ -744,6 +744,7 @@ impl Default for Watchdog {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Observability {
     #[serde(default)]
     pub metrics: MetricsEndpoint,
@@ -754,6 +755,7 @@ pub struct Observability {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct MetricsEndpoint {
     #[serde(default)]
     pub enabled: bool,
@@ -780,6 +782,7 @@ impl Default for MetricsEndpoint {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct ControlApi {
     #[serde(default)]
     pub enabled: bool,
@@ -822,6 +825,7 @@ impl Default for ControlApi {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct Tracing {
     #[serde(default)]
     pub enabled: bool,

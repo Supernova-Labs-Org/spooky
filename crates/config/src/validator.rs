@@ -692,6 +692,18 @@ pub fn validate(config: &Config) -> bool {
         }
     }
 
+    // --- Validate privilege-drop security controls ---
+    if config.security.privileges.enabled {
+        if config.security.privileges.user.trim().is_empty() {
+            error!("security.privileges.user must be non-empty when privilege drop is enabled");
+            return false;
+        }
+        if config.security.privileges.group.trim().is_empty() {
+            error!("security.privileges.group must be non-empty when privilege drop is enabled");
+            return false;
+        }
+    }
+
     if config.observability.tracing.enabled {
         if config.observability.tracing.service_name.trim().is_empty() {
             error!("observability.tracing.service_name cannot be empty when tracing is enabled");

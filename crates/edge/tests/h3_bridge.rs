@@ -31,8 +31,8 @@ use tempfile::{TempDir, tempdir};
 use tokio::net::TcpListener;
 
 use spooky_config::config::{
-    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, LogFormat, Tls,
-    UpstreamTls,
+    Backend, ClientAuth, Config, HealthCheck, Listen, LoadBalancing, Log, LogFormat, Security,
+    Tls, UpstreamTls,
 };
 use spooky_edge::QUICListener;
 use spooky_edge::constants::{
@@ -119,6 +119,7 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
         performance: spooky_config::config::Performance::default(),
         observability: spooky_config::config::Observability::default(),
         resilience: spooky_config::config::Resilience::default(),
+        security: Security::default(),
     }
 }
 

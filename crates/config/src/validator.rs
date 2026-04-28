@@ -969,7 +969,7 @@ mod tests {
     use crate::config::{
         Backend, ClientAuth, Config, ControlApi, HealthCheck, Listen, LoadBalancing, Log,
         LogFormat, MetricsEndpoint, Observability, Performance, Resilience, RouteMatch, Tls,
-        Tracing, Upstream, UpstreamTls,
+        Security, Tracing, Upstream, UpstreamTls,
     };
     use rcgen::{Certificate, CertificateParams, SanType};
     use std::collections::HashMap;
@@ -1048,6 +1048,7 @@ mod tests {
             performance: Performance::default(),
             observability: Observability::default(),
             resilience: Resilience::default(),
+            security: Security::default(),
         }
     }
 

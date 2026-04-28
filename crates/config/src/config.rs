@@ -47,7 +47,8 @@ use crate::default::{
     resilience_default_watchdog_poll_stall_timeout_ms,
     resilience_default_watchdog_restart_cooldown_ms,
     resilience_default_watchdog_timeout_error_rate_percent,
-    resilience_default_watchdog_unhealthy_consecutive_windows, upstream_tls_default_strict_sni,
+    resilience_default_watchdog_unhealthy_consecutive_windows, security_default_drop_privileges,
+    security_default_group, security_default_user, upstream_tls_default_strict_sni,
     upstream_tls_default_verify_certificates,
 };
 
@@ -80,6 +81,35 @@ pub struct Config {
 
     #[serde(default)]
     pub resilience: Resilience,
+
+    #[serde(default)]
+    pub security: Security,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct Security {
+    #[serde(default)]
+    pub privileges: PrivilegeDrop,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PrivilegeDrop {
+    #[serde(default = "security_default_drop_privileges")]
+    pub enabled: bool,
+    #[serde(default = "security_default_user")]
+    pub user: String,
+    #[serde(default = "security_default_group")]
+    pub group: String,
+}
+
+impl Default for PrivilegeDrop {
+    fn default() -> Self {
+        Self {
+            enabled: security_default_drop_privileges(),
+            user: security_default_user(),
+            group: security_default_group(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]

@@ -2,6 +2,33 @@ use std::collections::HashMap;
 
 use spooky_config::config::Upstream;
 
+pub(crate) fn normalize_host_for_routing(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let host = if let Some(rest) = trimmed.strip_prefix('[') {
+        let end = rest.find(']')?;
+        &rest[..end]
+    } else if let Some((candidate_host, candidate_port)) = trimmed.rsplit_once(':') {
+        if !candidate_host.contains(':') && candidate_port.chars().all(|c| c.is_ascii_digit()) {
+            candidate_host
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
 /// Route precedence (deterministic):
 /// 1) Longest matching path_prefix wins.
 /// 2) On equal path length, host-specific routes win over host-agnostic routes.
@@ -103,10 +130,14 @@ impl RouteIndex {
             };
 
             match upstream.route.host.as_deref() {
-                Some(host) => host_tries
-                    .entry(host.to_string())
-                    .or_insert_with(RouteTrie::default)
-                    .insert(upstream.route.path_prefix.as_deref(), route),
+                Some(host) => {
+                    let normalized_host =
+                        normalize_host_for_routing(host).unwrap_or_else(|| host.to_ascii_lowercase());
+                    host_tries
+                        .entry(normalized_host)
+                        .or_insert_with(RouteTrie::default)
+                        .insert(upstream.route.path_prefix.as_deref(), route)
+                }
                 None => {
                     default_max_path_len = default_max_path_len.max(path_len);
                     default_trie.insert(upstream.route.path_prefix.as_deref(), route);
@@ -124,7 +155,8 @@ impl RouteIndex {
 
     pub(crate) fn lookup<'a>(&'a self, path: &str, host: Option<&str>) -> Option<&'a str> {
         let host_best = host
-            .and_then(|host_name| self.host_tries.get(host_name))
+            .and_then(normalize_host_for_routing)
+            .and_then(|host_name| self.host_tries.get(&host_name))
             .and_then(|host_trie| host_trie.longest_prefix(path));
 
         if let Some(best) = host_best

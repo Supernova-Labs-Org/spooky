@@ -1540,4 +1540,19 @@ upstream:
         cfg.resilience.watchdog.restart_hook = Some("echo legacy".to_string());
         assert!(!validate(&cfg));
     }
+
+    #[test]
+    fn rejects_empty_privilege_drop_user_or_group() {
+        let dir = tempdir().expect("tempdir");
+        let (cert, key) = write_test_certs(dir.path());
+        let mut cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.security.privileges.enabled = true;
+        cfg.security.privileges.user = " ".to_string();
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.security.privileges.enabled = true;
+        cfg.security.privileges.group = " ".to_string();
+        assert!(!validate(&cfg));
+    }
 }

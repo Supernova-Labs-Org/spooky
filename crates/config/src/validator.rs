@@ -636,6 +636,16 @@ pub fn validate(config: &Config) -> bool {
             error!("observability.metrics.path must start with '/'");
             return false;
         }
+
+        if config.observability.metrics.max_connections == 0 {
+            error!("observability.metrics.max_connections must be greater than 0");
+            return false;
+        }
+
+        if config.observability.metrics.connection_timeout_ms == 0 {
+            error!("observability.metrics.connection_timeout_ms must be greater than 0");
+            return false;
+        }
     }
 
     if config.observability.control_api.enabled {
@@ -672,6 +682,16 @@ pub fn validate(config: &Config) -> bool {
                 error!("{} must start with '/'", name);
                 return false;
             }
+        }
+
+        if config.observability.control_api.max_connections == 0 {
+            error!("observability.control_api.max_connections must be greater than 0");
+            return false;
+        }
+
+        if config.observability.control_api.connection_timeout_ms == 0 {
+            error!("observability.control_api.connection_timeout_ms must be greater than 0");
+            return false;
         }
 
         if let Some(token) = config.observability.control_api.auth_token.as_ref()
@@ -1132,6 +1152,8 @@ upstream:
         assert_eq!(cfg.performance.client_body_idle_timeout_ms, 10_000);
         assert!(!cfg.observability.metrics.enabled);
         assert_eq!(cfg.observability.metrics.path, "/metrics");
+        assert_eq!(cfg.observability.metrics.max_connections, 512);
+        assert_eq!(cfg.observability.metrics.connection_timeout_ms, 30_000);
         assert!(cfg.upstream_tls.verify_certificates);
         assert!(cfg.upstream_tls.strict_sni);
         assert!(!cfg.listen.tls.client_auth.enabled);
@@ -1148,6 +1170,8 @@ upstream:
         assert!(cfg.resilience.protocol.enforce_authority_host_match);
         assert!(!cfg.resilience.watchdog.enabled);
         assert_eq!(cfg.resilience.watchdog.check_interval_ms, 1_000);
+        assert_eq!(cfg.observability.control_api.max_connections, 256);
+        assert_eq!(cfg.observability.control_api.connection_timeout_ms, 30_000);
     }
 
     #[test]
@@ -1380,6 +1404,8 @@ upstream:
                 address: "127.0.0.1".to_string(),
                 port: 9901,
                 path: "metrics".to_string(),
+                max_connections: 128,
+                connection_timeout_ms: 10_000,
             },
             control_api: ControlApi::default(),
             tracing: Tracing::default(),
@@ -1454,6 +1480,8 @@ upstream:
                 address: "127.0.0.1".to_string(),
                 port: 9901,
                 path: "/metrics".to_string(),
+                max_connections: 128,
+                connection_timeout_ms: 10_000,
             },
             control_api: ControlApi::default(),
             tracing: Tracing::default(),

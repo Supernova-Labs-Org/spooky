@@ -1411,6 +1411,28 @@ upstream:
             tracing: Tracing::default(),
         };
         assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.metrics.enabled = true;
+        cfg.observability.metrics.max_connections = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.metrics.enabled = true;
+        cfg.observability.metrics.connection_timeout_ms = 0;
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.control_api.enabled = true;
+        cfg.observability.control_api.max_connections = 0;
+        cfg.observability.control_api.auth_token = Some("token".to_string());
+        assert!(!validate(&cfg));
+
+        cfg = base_config(&cert.to_string_lossy(), &key.to_string_lossy());
+        cfg.observability.control_api.enabled = true;
+        cfg.observability.control_api.connection_timeout_ms = 0;
+        cfg.observability.control_api.auth_token = Some("token".to_string());
+        assert!(!validate(&cfg));
     }
 
     #[test]

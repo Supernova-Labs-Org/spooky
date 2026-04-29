@@ -1,6 +1,6 @@
 # Spooky Documentation
 
-Technical documentation for the Spooky HTTP/3 to HTTP/2 reverse proxy and load balancer.
+Technical documentation for the Spooky HTTP/3 edge proxy and load balancer.
 
 ## Quick Navigation
 

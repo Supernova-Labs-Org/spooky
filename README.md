@@ -1,6 +1,6 @@
 # Spooky
 
-**HTTP/3 to HTTP/2 reverse proxy and load balancer**
+**HTTP/3 edge proxy and load balancer**
 
 Spooky terminates HTTP/3/QUIC connections at the edge and forwards requests to HTTP/2 backends. Built in Rust for production environments requiring HTTP/3 client support without modifying existing infrastructure.
 

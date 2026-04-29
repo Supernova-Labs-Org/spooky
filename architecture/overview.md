@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Spooky is an HTTP/3 to HTTP/2 reverse proxy and load balancer implemented in Rust. It terminates QUIC connections at the edge and forwards HTTP requests to HTTP/2 backend servers, enabling modern HTTP/3 clients to communicate with existing HTTP/2 infrastructure without requiring backend modifications.
+Spooky is an HTTP/3 edge proxy and load balancer implemented in Rust. It terminates QUIC connections at the edge and forwards HTTP requests to HTTP/2 backend servers, enabling modern HTTP/3 clients to communicate with existing HTTP/2 infrastructure without requiring backend modifications.
 
 ## Design Principles
 

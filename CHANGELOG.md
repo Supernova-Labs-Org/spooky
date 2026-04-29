@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-04-16
 
-Initial release of Spooky HTTP/3 to HTTP/2 reverse proxy and load balancer.
+Initial release of Spooky HTTP/3 edge proxy and load balancer.
 
 ### Core Features
 

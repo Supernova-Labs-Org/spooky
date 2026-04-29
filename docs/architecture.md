@@ -2,7 +2,7 @@
 
 ## Overview
 
-Spooky is a reverse proxy that terminates HTTP/3/QUIC connections and forwards requests to HTTP/2 backends. The architecture prioritizes correctness, observability, and operational simplicity.
+Spooky is an edge proxy that terminates HTTP/3/QUIC connections and forwards requests to HTTP/2 backends. The architecture prioritizes correctness, observability, and operational simplicity.
 
 ## Design Principles
 

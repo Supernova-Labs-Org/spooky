@@ -1,6 +1,6 @@
 ## Contributing to Spooky
 
-Spooky is an HTTP/3-to-HTTP/2 reverse proxy in Rust. It terminates QUIC at the
+Spooky is an HTTP/3 edge proxy in Rust. It terminates QUIC at the
 edge and forwards to HTTP/2 backends.
 
 ### Setup

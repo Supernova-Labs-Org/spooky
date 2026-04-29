@@ -1,6 +1,6 @@
 # Overview
 
-Spooky is an HTTP/3 to HTTP/2 reverse proxy and load balancer. It terminates QUIC connections at the edge and forwards requests to HTTP/2 backends, enabling HTTP/3 client support without modifying existing infrastructure.
+Spooky is an HTTP/3 edge proxy and load balancer. It terminates QUIC connections at the edge and forwards requests to HTTP/2 backends, enabling HTTP/3 client support without modifying existing infrastructure.
 
 ## What Spooky Does
 

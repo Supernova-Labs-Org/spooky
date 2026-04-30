@@ -684,8 +684,36 @@ impl QUICListener {
             .resilience
             .validate()
             .map_err(|e| ProxyError::Transport(format!("invalid resilience config: {e}")))?;
+        let mut effective_resilience = config.resilience.clone();
+        let default_route_cap_limit = per_upstream_limit.saturating_mul(2).max(1);
+        if effective_resilience.route_queue.default_cap > default_route_cap_limit {
+            warn!(
+                "resilience.route_queue.default_cap={} is above tuned limit {}; clamping for steadier timeout/admission behavior",
+                effective_resilience.route_queue.default_cap, default_route_cap_limit
+            );
+            effective_resilience.route_queue.default_cap = default_route_cap_limit;
+        }
+        let global_route_cap_limit = global_inflight_limit.saturating_mul(2).max(1);
+        if effective_resilience.route_queue.global_cap > global_route_cap_limit {
+            warn!(
+                "resilience.route_queue.global_cap={} is above tuned limit {}; clamping for steadier timeout/admission behavior",
+                effective_resilience.route_queue.global_cap, global_route_cap_limit
+            );
+            effective_resilience.route_queue.global_cap = global_route_cap_limit;
+        }
+        for cap in effective_resilience.route_queue.caps.values_mut() {
+            *cap = (*cap).min(default_route_cap_limit).max(1);
+        }
+        let tuned_high_latency = ((config.performance.backend_timeout_ms * 7) / 10).max(50);
+        if effective_resilience.adaptive_admission.high_latency_ms > tuned_high_latency {
+            warn!(
+                "resilience.adaptive_admission.high_latency_ms={} is above tuned limit {}; clamping for faster overload reaction",
+                effective_resilience.adaptive_admission.high_latency_ms, tuned_high_latency
+            );
+            effective_resilience.adaptive_admission.high_latency_ms = tuned_high_latency;
+        }
         let resilience = Arc::new(RuntimeResilience::from_config(
-            &config.resilience,
+            &effective_resilience,
             global_inflight_limit,
         ));
         let watchdog = Arc::new(WatchdogCoordinator::new(&config.resilience.watchdog));

@@ -83,12 +83,43 @@ pub(crate) struct RouteDecision<'a> {
 #[derive(Default)]
 pub struct TrieNode {
     pub route: Option<IndexedRoute>,
-    pub children: HashMap<u8, TrieNode>,
+    children: Vec<TrieEdge>,
+}
+
+#[derive(Default)]
+struct TrieEdge {
+    byte: u8,
+    node: Box<TrieNode>,
 }
 
 impl TrieNode {
     fn update_route(&mut self, candidate: IndexedRoute) {
         self.route = prefer_route(self.route, Some(candidate));
+    }
+
+    #[inline(always)]
+    fn child(&self, byte: u8) -> Option<&TrieNode> {
+        match self.children.binary_search_by_key(&byte, |edge| edge.byte) {
+            Ok(idx) => Some(self.children[idx].node.as_ref()),
+            Err(_) => None,
+        }
+    }
+
+    #[inline(always)]
+    fn child_or_insert(&mut self, byte: u8) -> &mut TrieNode {
+        match self.children.binary_search_by_key(&byte, |edge| edge.byte) {
+            Ok(idx) => self.children[idx].node.as_mut(),
+            Err(idx) => {
+                self.children.insert(
+                    idx,
+                    TrieEdge {
+                        byte,
+                        node: Box::<TrieNode>::default(),
+                    },
+                );
+                self.children[idx].node.as_mut()
+            }
+        }
     }
 }
 
@@ -108,7 +139,7 @@ impl RouteTrie {
         }
 
         for byte in prefix.as_bytes() {
-            node = node.children.entry(*byte).or_default();
+            node = node.child_or_insert(*byte);
         }
 
         node.update_route(route);
@@ -121,7 +152,7 @@ impl RouteTrie {
             .filter(|route| prefix_boundary_matches(path, route.path_len));
 
         for byte in path.as_bytes() {
-            let Some(next) = node.children.get(byte) else {
+            let Some(next) = node.child(*byte) else {
                 break;
             };
             node = next;

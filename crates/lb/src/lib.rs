@@ -1,10 +1,15 @@
 use std::{
+    cell::RefCell,
     sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
-use rand::Rng;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use spooky_config::config::{Backend, HealthCheck};
+
+thread_local! {
+    static LB_RANDOM_RNG: RefCell<StdRng> = RefCell::new(StdRng::from_entropy());
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HealthFailureReason {
@@ -561,8 +566,10 @@ impl Random {
             return None;
         }
 
-        let mut rng = rand::thread_rng();
-        let idx = rng.gen_range(0..pool.healthy.len());
+        let idx = LB_RANDOM_RNG.with(|state| {
+            let mut rng = state.borrow_mut();
+            rng.gen_range(0..pool.healthy.len())
+        });
         Some(pool.healthy[idx])
     }
 }

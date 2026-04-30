@@ -106,6 +106,7 @@ percentile_from_sorted_file() {
 wait_ready_url() {
   local name="$1"
   local url="$2"
+  local mode="${3:-http1}"
 
   if [[ -z "${url}" || "${url}" == "-" ]]; then
     return 0
@@ -119,7 +120,26 @@ wait_ready_url() {
   local deadline
   deadline=$(( $(date +%s) + READINESS_TIMEOUT_SEC ))
   while true; do
-    if curl -fsS --max-time 2 "${url}" >/dev/null 2>&1; then
+    if [[ "${mode}" == "h2c" ]]; then
+      if curl --help all 2>/dev/null | grep -q -- "--http2-prior-knowledge"; then
+        if curl -fsS --http2-prior-knowledge --max-time 2 "${url}" >/dev/null 2>&1; then
+          return 0
+        fi
+      else
+        # Fallback: plain TCP reachability when curl lacks explicit h2c support.
+        if perl -MIO::Socket::INET -e '
+          my $u = $ARGV[0];
+          if ($u =~ m{^[a-z]+://([^/:]+)(?::(\d+))?/?}i) {
+            my ($h,$p)=($1,$2||80);
+            my $s=IO::Socket::INET->new(PeerHost=>$h,PeerPort=>$p,Proto=>"tcp",Timeout=>2);
+            exit($s ? 0 : 1);
+          }
+          exit 1;
+        ' "${url}" >/dev/null 2>&1; then
+          return 0
+        fi
+      fi
+    elif curl -fsS --max-time 2 "${url}" >/dev/null 2>&1; then
       return 0
     fi
     if [[ "$(date +%s)" -ge "${deadline}" ]]; then
@@ -313,7 +333,7 @@ clear_netem_loss_if_configured() {
 
 trap clear_netem_loss_if_configured EXIT
 
-wait_ready_url "backend" "${BACKEND_READY_URL}"
+wait_ready_url "backend" "${BACKEND_READY_URL}" "h2c"
 wait_ready_url "control" "${CONTROL_READY_URL}"
 wait_ready_url "metrics" "${METRICS_READY_URL}"
 warmup_client_and_server

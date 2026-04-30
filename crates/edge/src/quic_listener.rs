@@ -4638,28 +4638,68 @@ impl QUICListener {
         health_client: Arc<H2Client>,
         metrics: Arc<Metrics>,
     ) {
-        let entries = {
-            let mut all_entries = Vec::new();
-            for (_upstream_name, upstream_pool) in upstream_pools.iter() {
-                let pool = match upstream_pool.read() {
-                    Ok(pool) => pool,
-                    Err(_) => continue,
+        struct HealthCheckJob {
+            upstream_pool: Arc<RwLock<UpstreamPool>>,
+            index: usize,
+            address: String,
+            health_uri: String,
+            timeout: Duration,
+            base_interval_ms: u64,
+            consecutive_failures: u32,
+            next_due_at: Instant,
+        }
+
+        let mut grouped_jobs: HashMap<u64, Vec<HealthCheckJob>> = HashMap::new();
+        for (_upstream_name, upstream_pool) in upstream_pools.iter() {
+            let pool = match upstream_pool.read() {
+                Ok(pool) => pool,
+                Err(_) => continue,
+            };
+            for index in pool.pool.all_indices() {
+                let (address, health) =
+                    match (pool.pool.address(index), pool.pool.health_check(index)) {
+                        (Some(address), Some(health)) => (address.to_string(), health),
+                        _ => continue,
+                    };
+                let path: &str = if health.path.is_empty() {
+                    "/"
+                } else {
+                    &health.path
                 };
-                for index in pool.pool.all_indices() {
-                    if let (Some(address), Some(health)) =
-                        (pool.pool.address(index), pool.pool.health_check(index))
-                    {
-                        all_entries.push((
-                            upstream_pool.clone(),
-                            index,
-                            address.to_string(),
-                            health,
-                        ));
+                let endpoint = match BackendEndpoint::parse(&address) {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        error!(
+                            "disabling health checks for backend '{}' due to invalid endpoint: {}",
+                            address, err
+                        );
+                        continue;
                     }
-                }
+                };
+                let base_interval_ms = health.interval.max(1);
+                let initial_jitter_ms = if base_interval_ms > 1 {
+                    crate::stable_hash64(address.as_bytes()) % base_interval_ms
+                } else {
+                    0
+                };
+                let next_due_at = Instant::now() + Duration::from_millis(initial_jitter_ms);
+                let job = HealthCheckJob {
+                    upstream_pool: Arc::clone(upstream_pool),
+                    index,
+                    address,
+                    health_uri: endpoint.uri_for_path(path),
+                    timeout: Duration::from_millis(health.timeout_ms.max(1)),
+                    base_interval_ms,
+                    consecutive_failures: 0,
+                    next_due_at,
+                };
+                grouped_jobs.entry(base_interval_ms).or_default().push(job);
             }
-            all_entries
-        };
+        }
+
+        if grouped_jobs.is_empty() {
+            return;
+        }
 
         let handle = match runtime_handle() {
             Some(handle) => handle,
@@ -4669,90 +4709,80 @@ impl QUICListener {
             }
         };
 
-        for (upstream_pool, index, address, health) in entries {
+        for (base_interval_ms, mut jobs) in grouped_jobs {
             let health_client = Arc::clone(&health_client);
             let task_metrics = Arc::clone(&metrics);
             let handle = handle.clone();
             let supervise_metrics = Arc::clone(&task_metrics);
             spawn_supervised_async_task(
                 &handle,
-                "health-check",
+                "health-check-group",
                 Some(supervise_metrics),
                 async move {
-                    let base_interval_ms = health.interval.max(1);
-                    let timeout = Duration::from_millis(health.timeout_ms.max(1));
-                    let path: &str = if health.path.is_empty() {
-                        "/"
-                    } else {
-                        &health.path
-                    };
-                    let endpoint = match BackendEndpoint::parse(&address) {
-                        Ok(endpoint) => endpoint,
-                        Err(err) => {
-                            error!(
-                                "disabling health checks for backend '{}' due to invalid endpoint: {}",
-                                address, err
-                            );
-                            return;
-                        }
-                    };
-                    let health_uri = endpoint.uri_for_path(path);
-                    let initial_jitter_ms = if base_interval_ms > 1 {
-                        crate::stable_hash64(address.as_bytes()) % base_interval_ms
-                    } else {
-                        0
-                    };
-                    if initial_jitter_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(initial_jitter_ms)).await;
-                    }
-                    let mut consecutive_failures = 0u32;
+                    let scheduler_tick_ms = (base_interval_ms / 4).clamp(20, base_interval_ms);
+                    let mut ticker = tokio::time::interval(Duration::from_millis(
+                        scheduler_tick_ms.max(1),
+                    ));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                     loop {
-                        let backoff_multiplier = 1u64 << consecutive_failures.min(2);
-                        let sleep_ms = base_interval_ms.saturating_mul(backoff_multiplier);
-                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-
-                        let request = match http::Request::builder()
-                            .method("GET")
-                            .uri(&health_uri)
-                            .body(BoxBody::new(Full::new(Bytes::new())))
-                        {
-                            Ok(req) => req,
-                            Err(_) => continue,
-                        };
-
-                        let result =
-                            tokio::time::timeout(timeout, health_client.send(request)).await;
-
-                        let outcome = match result {
-                            Ok(Ok(response)) => {
-                                classify_active_health_check_response(response.status())
+                        ticker.tick().await;
+                        let now = Instant::now();
+                        for job in jobs.iter_mut() {
+                            if now < job.next_due_at {
+                                continue;
                             }
-                            _ => HealthClassification::Failure,
-                        };
 
-                        let transition = match upstream_pool.write() {
-                            Ok(mut pool) => match outcome {
-                                HealthClassification::Success => {
-                                    task_metrics.inc_health_check_success();
-                                    consecutive_failures = 0;
-                                    pool.pool.mark_success(index)
-                                }
-                                HealthClassification::Failure => {
-                                    task_metrics.inc_health_check_failure();
-                                    consecutive_failures = consecutive_failures.saturating_add(1);
-                                    pool.pool.mark_failure(index)
-                                }
-                                HealthClassification::Neutral => {
-                                    consecutive_failures = 0;
-                                    None
-                                }
-                            },
-                            Err(_) => None,
-                        };
+                            let request = match http::Request::builder()
+                                .method("GET")
+                                .uri(&job.health_uri)
+                                .body(BoxBody::new(Full::new(Bytes::new())))
+                            {
+                                Ok(req) => req,
+                                Err(_) => continue,
+                            };
 
-                        if let Some(transition) = transition {
-                            Self::log_health_transition(&address, transition);
+                            let result = tokio::time::timeout(
+                                job.timeout,
+                                health_client.send(request),
+                            )
+                            .await;
+
+                            let outcome = match result {
+                                Ok(Ok(response)) => {
+                                    classify_active_health_check_response(response.status())
+                                }
+                                _ => HealthClassification::Failure,
+                            };
+
+                            let transition = match job.upstream_pool.write() {
+                                Ok(mut pool) => match outcome {
+                                    HealthClassification::Success => {
+                                        task_metrics.inc_health_check_success();
+                                        job.consecutive_failures = 0;
+                                        pool.pool.mark_success(job.index)
+                                    }
+                                    HealthClassification::Failure => {
+                                        task_metrics.inc_health_check_failure();
+                                        job.consecutive_failures =
+                                            job.consecutive_failures.saturating_add(1);
+                                        pool.pool.mark_failure(job.index)
+                                    }
+                                    HealthClassification::Neutral => {
+                                        job.consecutive_failures = 0;
+                                        None
+                                    }
+                                },
+                                Err(_) => None,
+                            };
+
+                            let backoff_multiplier = 1u64 << job.consecutive_failures.min(2);
+                            let delay_ms = job.base_interval_ms.saturating_mul(backoff_multiplier);
+                            job.next_due_at = Instant::now() + Duration::from_millis(delay_ms);
+
+                            if let Some(transition) = transition {
+                                Self::log_health_transition(&job.address, transition);
+                            }
                         }
                     }
                 },

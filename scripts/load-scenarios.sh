@@ -5,6 +5,7 @@ TARGET="${TARGET:-127.0.0.1:9889}"
 HOST="${HOST:-localhost}"
 H3_CLIENT_BIN="${H3_CLIENT_BIN:-./target/release/h3_client}"
 OUT_DIR="${OUT_DIR:-bench/load}"
+STREAMS_PER_WORKER="${STREAMS_PER_WORKER:-8}"
 
 BURST_PATH="${BURST_PATH:-/api}"
 BURST_REQUESTS="${BURST_REQUESTS:-3000}"
@@ -29,6 +30,7 @@ Environment overrides:
   HOST=localhost
   H3_CLIENT_BIN=./target/release/h3_client
   OUT_DIR=bench/load
+  STREAMS_PER_WORKER=8
 
   BURST_PATH=/api BURST_REQUESTS=3000 BURST_CONCURRENCY=200
   SLOW_PATH=/slow SLOW_REQUESTS=1000 SLOW_CONCURRENCY=80
@@ -47,6 +49,11 @@ fi
 if [[ ! -x "${H3_CLIENT_BIN}" ]]; then
   echo "error: h3 client binary not found at ${H3_CLIENT_BIN}" >&2
   echo "build it with: cargo build --release -p spooky --bin h3_client" >&2
+  exit 1
+fi
+
+if [[ "${STREAMS_PER_WORKER}" -lt 1 ]]; then
+  echo "error: STREAMS_PER_WORKER must be >= 1 (got ${STREAMS_PER_WORKER})" >&2
   exit 1
 fi
 
@@ -78,24 +85,6 @@ percentile_from_sorted_file() {
   sed -n "${idx}p" "${file}"
 }
 
-run_single_request() {
-  local path="$1"
-  local out_file="$2"
-  local start_ns
-  local end_ns
-  local ok
-
-  start_ns="$(now_ns)"
-  if "${H3_CLIENT_BIN}" --connect "${TARGET}" --host "${HOST}" --path "${path}" --insecure >/dev/null 2>&1; then
-    ok=1
-  else
-    ok=0
-  fi
-  end_ns="$(now_ns)"
-
-  printf "%s %s\n" "${ok}" "$((end_ns - start_ns))" >>"${out_file}"
-}
-
 run_scenario() {
   local name="$1"
   local path="$2"
@@ -111,36 +100,69 @@ run_scenario() {
   local end_ns
   start_ns="$(now_ns)"
 
-  local helper
-  helper="$(mktemp)"
-  cat >"${helper}" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
-path="$1"
-out_file="$2"
-client="$3"
-target="$4"
-host="$5"
-start_ns="$(perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000000000)')"
-if "${client}" --connect "${target}" --host "${host}" --path "${path}" --insecure >/dev/null 2>&1; then
-  ok=1
-else
-  ok=0
-fi
-end_ns="$(perl -MTime::HiRes=time -e 'printf("%.0f\n", time()*1000000000)')"
-printf "%s %s\n" "${ok}" "$((end_ns - start_ns))" >>"${out_file}"
-SH
-  chmod +x "${helper}"
+  local workers
+  workers="${concurrency}"
+  if [[ "${workers}" -gt "${requests}" ]]; then
+    workers="${requests}"
+  fi
+  if [[ "${workers}" -lt 1 ]]; then
+    workers=1
+  fi
 
-  seq "${requests}" | xargs -P "${concurrency}" -I{} "${helper}" "${path}" "${raw}" "${H3_CLIENT_BIN}" "${TARGET}" "${HOST}"
+  local batch_base batch_remainder worker_reqs
+  batch_base=$((requests / workers))
+  batch_remainder=$((requests % workers))
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  local -a pids=()
+  local i
+  for ((i=0; i<workers; i++)); do
+    worker_reqs="${batch_base}"
+    if [[ "${i}" -lt "${batch_remainder}" ]]; then
+      worker_reqs=$((worker_reqs + 1))
+    fi
+    if [[ "${worker_reqs}" -le 0 ]]; then
+      continue
+    fi
+
+    local worker_streams
+    worker_streams="${STREAMS_PER_WORKER}"
+    if [[ "${worker_streams}" -gt "${worker_reqs}" ]]; then
+      worker_streams="${worker_reqs}"
+    fi
+
+    "${H3_CLIENT_BIN}" \
+      --connect "${TARGET}" \
+      --host "${HOST}" \
+      --path "${path}" \
+      --insecure \
+      --requests "${worker_reqs}" \
+      --parallel-streams "${worker_streams}" \
+      --report-latency \
+      >"${tmpdir}/worker.${i}.out" \
+      2>"${tmpdir}/worker.${i}.err" &
+    pids+=("$!")
+  done
+
+  local pid
+  for pid in "${pids[@]}"; do
+    wait "${pid}" || true
+  done
+
+  # Aggregate only well-formed "<ok> <latency_ns>" output lines.
+  awk '/^[01] [0-9]+$/ {print $1, $2}' "${tmpdir}"/worker.*.out >"${raw}" || true
 
   end_ns="$(now_ns)"
-  rm -f "${helper}"
+  rm -rf "${tmpdir}"
 
   local success
   local errors
   success=$(awk '$1 == 1 {c++} END {print c+0}' "${raw}")
   errors=$((requests - success))
+  if [[ "${errors}" -lt 0 ]]; then
+    errors=0
+  fi
 
   awk '$1 == 1 {print $2}' "${raw}" | sort -n >"${lat_ok}"
 
@@ -226,8 +248,8 @@ fi
 {
   echo "# Spooky Load Scenarios"
   echo
-  echo "- Target: \\`${TARGET}\\`"
-  echo "- Host: \\`${HOST}\\`"
+  echo "- Target: \`${TARGET}\`"
+  echo "- Host: \`${HOST}\`"
   echo "- Generated: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
   echo
   echo "| scenario | path | requests | concurrency | success | errors | throughput req/s | min ms | avg ms | p50 ms | p95 ms | p99 ms |"

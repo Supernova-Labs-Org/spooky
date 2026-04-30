@@ -3508,7 +3508,31 @@ impl QUICListener {
             .ok_or_else(|| ProxyError::Transport(format!("pool not found: {upstream_name}")))?
             .clone();
 
+        let request_key = authority.unwrap_or(if !path.is_empty() { path } else { method });
+        let key_for_lb = |lb_type: &str| -> &str {
+            if lb_type == "sticky-cid" {
+                cid_key.unwrap_or(request_key)
+            } else {
+                request_key
+            }
+        };
+
         let (backend_index, lb_type, backend_addr) = {
+            let (read_lb_type, read_fast_pick) = {
+                let pool = upstream_pool
+                    .read()
+                    .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
+                if pool.pool.is_empty() {
+                    return Err(ProxyError::Transport("no servers in upstream".into()));
+                }
+                let lb_type = pool.lb_name();
+                let key = key_for_lb(lb_type);
+                let fast_pick = pool
+                    .pick_readonly(key)
+                    .and_then(|idx| pool.pool.address(idx).map(|addr| (idx, addr.to_string())));
+                (lb_type, fast_pick)
+            };
+
             let mut pool = upstream_pool
                 .write()
                 .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
@@ -3516,29 +3540,30 @@ impl QUICListener {
                 return Err(ProxyError::Transport("no servers in upstream".into()));
             }
             let lb_type = pool.lb_name();
-            let key: &str = if lb_type == "sticky-cid" {
-                cid_key.unwrap_or_else(|| {
-                    authority.unwrap_or(if !path.is_empty() { path } else { method })
-                })
+            let key = key_for_lb(lb_type);
+
+            if lb_type == read_lb_type
+                && let Some((idx, addr)) = read_fast_pick
+                && pool.begin_request_if_healthy(idx)
+            {
+                (idx, lb_type, addr)
             } else {
-                authority.unwrap_or(if !path.is_empty() { path } else { method })
-            };
-            let idx = pool.pick(key);
-            let idx = idx.ok_or_else(|| {
-                let total = pool.pool.len();
-                let healthy = pool.pool.healthy_len();
-                error!(
-                    "no healthy backends available: {}/{} backends healthy",
-                    healthy, total
-                );
-                ProxyError::Transport("no healthy servers".into())
-            })?;
-            let backend_addr = pool
-                .pool
-                .address(idx)
-                .map(str::to_string)
-                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?;
-            (idx, lb_type, backend_addr)
+                let idx = pool.pick(key).ok_or_else(|| {
+                    let total = pool.pool.len();
+                    let healthy = pool.pool.healthy_len();
+                    error!(
+                        "no healthy backends available: {}/{} backends healthy",
+                        healthy, total
+                    );
+                    ProxyError::Transport("no healthy servers".into())
+                })?;
+                let backend_addr = pool
+                    .pool
+                    .address(idx)
+                    .map(str::to_string)
+                    .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?;
+                (idx, lb_type, backend_addr)
+            }
         };
 
         debug!(

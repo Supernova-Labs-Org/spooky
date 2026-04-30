@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
 
 use rand::Rng;
 use spooky_config::config::{Backend, HealthCheck};
@@ -160,6 +163,19 @@ impl UpstreamPool {
         Some(selected)
     }
 
+    pub fn pick_readonly(&self, key: &str) -> Option<usize> {
+        self.load_balancer.pick_readonly(key, &self.pool)
+    }
+
+    pub fn begin_request_if_healthy(&mut self, index: usize) -> bool {
+        if self.pool.is_healthy_index(index) {
+            self.pool.begin_request(index);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn finish_request(&mut self, index: usize, latency: Duration, status: Option<u16>) {
         self.pool.finish_request(index, latency, status);
     }
@@ -302,6 +318,10 @@ impl BackendPool {
         self.membership_epoch
     }
 
+    pub fn is_healthy_index(&self, index: usize) -> bool {
+        self.healthy_pos.get(index).copied().flatten().is_some()
+    }
+
     pub fn begin_request(&mut self, index: usize) {
         if let Some(backend) = self.backends.get_mut(index) {
             backend.active_requests = backend.active_requests.saturating_add(1);
@@ -406,6 +426,17 @@ impl LoadBalancing {
         }
     }
 
+    pub fn pick_readonly(&self, _key: &str, pool: &BackendPool) -> Option<usize> {
+        match self {
+            LoadBalancing::RoundRobin(rr) => rr.pick_readonly(pool),
+            LoadBalancing::Random(rand) => rand.pick_readonly(pool),
+            LoadBalancing::LeastConnections(lc) => lc.pick_readonly(pool),
+            LoadBalancing::LatencyAware(la) => la.pick_readonly(pool),
+            // ConsistentHash and StickyCid keep mutable ring caches.
+            LoadBalancing::ConsistentHash(_) | LoadBalancing::StickyCid(_) => None,
+        }
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             LoadBalancing::RoundRobin(_) => "round-robin",
@@ -419,21 +450,27 @@ impl LoadBalancing {
 }
 
 pub struct RoundRobin {
-    next: usize,
+    next: AtomicUsize,
 }
 
 impl RoundRobin {
     pub fn new() -> Self {
-        Self { next: 0 }
+        Self {
+            next: AtomicUsize::new(0),
+        }
     }
 
     pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
+        self.pick_readonly(pool)
+    }
+
+    pub fn pick_readonly(&self, pool: &BackendPool) -> Option<usize> {
         if pool.healthy.is_empty() {
             return None;
         }
 
-        let idx = pool.healthy[self.next % pool.healthy.len()];
-        self.next = self.next.wrapping_add(1);
+        let next = self.next.fetch_add(1, Ordering::Relaxed);
+        let idx = pool.healthy[next % pool.healthy.len()];
         Some(idx)
     }
 }
@@ -516,6 +553,10 @@ impl Random {
     }
 
     pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
+        self.pick_readonly(pool)
+    }
+
+    pub fn pick_readonly(&self, pool: &BackendPool) -> Option<usize> {
         if pool.healthy.is_empty() {
             return None;
         }
@@ -540,6 +581,10 @@ impl LeastConnections {
     }
 
     pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
+        self.pick_readonly(pool)
+    }
+
+    pub fn pick_readonly(&self, pool: &BackendPool) -> Option<usize> {
         let mut best: Option<(usize, usize)> = None;
         for &idx in &pool.healthy {
             let active = pool.backends[idx].active_requests();
@@ -570,6 +615,10 @@ impl LatencyAware {
     }
 
     pub fn pick(&mut self, pool: &BackendPool) -> Option<usize> {
+        self.pick_readonly(pool)
+    }
+
+    pub fn pick_readonly(&self, pool: &BackendPool) -> Option<usize> {
         let mut unsampled_best: Option<(usize, usize)> = None;
         let mut sampled_best: Option<(f64, usize, usize)> = None;
 

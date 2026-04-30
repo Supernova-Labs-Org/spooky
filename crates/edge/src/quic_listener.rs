@@ -126,6 +126,40 @@ struct RequestValidationResult {
 }
 
 #[derive(Clone)]
+struct ForwardRequestMeta {
+    method: Arc<str>,
+    path: Arc<str>,
+    authority: Option<Arc<str>>,
+    headers: Arc<Vec<quiche::h3::Header>>,
+    client_addr: SocketAddr,
+    request_id: u64,
+    traceparent: Option<Arc<str>>,
+}
+
+impl ForwardRequestMeta {
+    fn build_bodyless_request(
+        &self,
+        backend: &str,
+    ) -> Result<Request<BoxBody<Bytes, std::convert::Infallible>>, ProxyError> {
+        build_h2_request(
+            backend,
+            &self.method,
+            &self.path,
+            self.headers.as_slice(),
+            BoxBody::new(Full::new(Bytes::new())),
+            Some(0),
+            ForwardedContext {
+                client_addr: self.client_addr,
+                request_authority: self.authority.as_deref(),
+                request_id: self.request_id,
+                traceparent: self.traceparent.as_deref(),
+            },
+        )
+        .map_err(ProxyError::from)
+    }
+}
+
+#[derive(Clone)]
 struct ControlApiPaths {
     health_path: String,
     ready_path: String,
@@ -2163,12 +2197,21 @@ impl QUICListener {
                             let hedge_delay = resilience.hedging_delay;
                             let alternate_backend =
                                 Self::pick_alternate_backend(&upstream_pool, idx);
-                            let method_owned = method.clone();
-                            let path_owned = path.clone();
-                            let authority_owned = authority.clone();
-                            let client_addr = connection.peer_address;
-                            let headers_owned = list.clone();
-                            let traceparent_for_upstream = traceparent.clone();
+                            let forward_meta = bodyless_mode.then(|| {
+                                Arc::new(ForwardRequestMeta {
+                                    method: Arc::<str>::from(method.as_str()),
+                                    path: Arc::<str>::from(path.as_str()),
+                                    authority: authority
+                                        .as_deref()
+                                        .map(Arc::<str>::from),
+                                    headers: Arc::new(list.clone()),
+                                    client_addr: connection.peer_address,
+                                    request_id,
+                                    traceparent: traceparent
+                                        .as_deref()
+                                        .map(Arc::<str>::from),
+                                })
+                            });
                             let trace_span_for_upstream = trace_span.clone();
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
@@ -2205,28 +2248,14 @@ impl QUICListener {
                                         };
 
                                     let response: Response<Incoming> = if allow_hedge {
-                                        let hedge_candidate = alternate_backend.clone().and_then(
-                                            |(backend, _idx)| {
-                                                build_h2_request(
-                                                    &backend,
-                                                    &method_owned,
-                                                    &path_owned,
-                                                    &headers_owned,
-                                                    BoxBody::new(Full::new(Bytes::new())),
-                                                    Some(0),
-                                                    ForwardedContext {
-                                                        client_addr,
-                                                        request_authority: authority_owned
-                                                            .as_deref(),
-                                                        request_id,
-                                                        traceparent: traceparent_for_upstream
-                                                            .as_deref(),
-                                                    },
-                                                )
-                                                .ok()
-                                                .map(|req| (backend, req))
-                                            },
-                                        );
+                                        let hedge_candidate = alternate_backend
+                                            .clone()
+                                            .and_then(|(backend, _idx)| {
+                                                let meta = forward_meta.as_ref()?;
+                                                meta.build_bodyless_request(&backend)
+                                                    .ok()
+                                                    .map(|req| (backend, req))
+                                            });
 
                                         if let Some((hedge_backend, hedge_request)) =
                                             hedge_candidate
@@ -2312,22 +2341,9 @@ impl QUICListener {
                                                     return Err(primary_err);
                                                 } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
-                                                    && let Ok(retry_request) = build_h2_request(
-                                                        &retry_backend,
-                                                        &method_owned,
-                                                        &path_owned,
-                                                        &headers_owned,
-                                                        BoxBody::new(Full::new(Bytes::new())),
-                                                        Some(0),
-                                                        ForwardedContext {
-                                                            client_addr,
-                                                            request_authority: authority_owned
-                                                                .as_deref(),
-                                                            request_id,
-                                                            traceparent: traceparent_for_upstream
-                                                                .as_deref(),
-                                                        },
-                                                    )
+                                                    && let Some(meta) = forward_meta.as_ref()
+                                                    && let Ok(retry_request) =
+                                                        meta.build_bodyless_request(&retry_backend)
                                                 {
                                                     retry_count = retry_count.saturating_add(1);
                                                     retry_attempt_reason = Some(retry_reason);

@@ -30,6 +30,7 @@ LOSS_PERCENT="${LOSS_PERCENT:-2}"
 NETEM_IFACE="${NETEM_IFACE:-}"
 SCENARIO_RETRY_ATTEMPTS="${SCENARIO_RETRY_ATTEMPTS:-1}"
 SCENARIO_RETRY_COOLDOWN_SEC="${SCENARIO_RETRY_COOLDOWN_SEC:-2}"
+SCENARIO_RETRY_ON_ERROR="${SCENARIO_RETRY_ON_ERROR:-1}"
 
 usage() {
   cat <<USAGE
@@ -51,6 +52,7 @@ Environment overrides:
   SLOW_PATH=/slow SLOW_REQUESTS=1000 SLOW_CONCURRENCY=80
   LOSS_PATH=/api LOSS_REQUESTS=1500 LOSS_CONCURRENCY=120
   SCENARIO_RETRY_ATTEMPTS=1 SCENARIO_RETRY_COOLDOWN_SEC=2
+  SCENARIO_RETRY_ON_ERROR=1
 
 Optional Linux netem injection for packet-loss scenario:
   NETEM_IFACE=eth0 LOSS_PERCENT=2 scripts/load-scenarios.sh
@@ -262,13 +264,15 @@ run_scenario() {
 
     local parsed
     parsed=$(wc -l <"${raw}")
-    local anomaly=0
+    local retry_required=0
     if [[ "${success}" -eq 0 || "${parsed}" -eq 0 || $((success + errors)) -lt "${requests}" ]]; then
-      anomaly=1
+      retry_required=1
+    elif [[ "${SCENARIO_RETRY_ON_ERROR}" -eq 1 && "${errors}" -gt 0 ]]; then
+      retry_required=1
     fi
 
-    if [[ "${anomaly}" -eq 1 && "${attempt}" -lt "${max_retries}" ]]; then
-      echo "warn: scenario '${name}' had startup anomaly (success=${success}, parsed=${parsed}); retrying once..." >&2
+    if [[ "${retry_required}" -eq 1 && "${attempt}" -lt "${max_retries}" ]]; then
+      echo "warn: scenario '${name}' retrying (success=${success}, errors=${errors}, parsed=${parsed})..." >&2
       attempt=$((attempt + 1))
       rm -f "${raw}" "${lat_ok}"
       sleep "${SCENARIO_RETRY_COOLDOWN_SEC}"

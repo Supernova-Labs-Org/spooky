@@ -4720,9 +4720,8 @@ impl QUICListener {
                 Some(supervise_metrics),
                 async move {
                     let scheduler_tick_ms = (base_interval_ms / 4).clamp(20, base_interval_ms);
-                    let mut ticker = tokio::time::interval(Duration::from_millis(
-                        scheduler_tick_ms.max(1),
-                    ));
+                    let mut ticker =
+                        tokio::time::interval(Duration::from_millis(scheduler_tick_ms.max(1)));
                     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                     loop {
@@ -4742,11 +4741,9 @@ impl QUICListener {
                                 Err(_) => continue,
                             };
 
-                            let result = tokio::time::timeout(
-                                job.timeout,
-                                health_client.send(request),
-                            )
-                            .await;
+                            let result =
+                                tokio::time::timeout(job.timeout, health_client.send(request))
+                                    .await;
 
                             let outcome = match result {
                                 Ok(Ok(response)) => {

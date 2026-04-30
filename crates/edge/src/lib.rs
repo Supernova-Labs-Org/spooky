@@ -967,7 +967,7 @@ impl Metrics {
             let seq = self
                 .route_latency_sample_counter
                 .fetch_add(1, Ordering::Relaxed);
-            if seq % self.route_latency_sample_every != 0 {
+            if !seq.is_multiple_of(self.route_latency_sample_every) {
                 return;
             }
         }

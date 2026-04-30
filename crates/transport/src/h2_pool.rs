@@ -54,14 +54,6 @@ impl H2Pool {
         self.backends.contains_key(backend)
     }
 
-    pub fn has_capacity(&self, backend: &str) -> Result<bool, PoolError> {
-        let handle = self
-            .backends
-            .get(backend)
-            .ok_or_else(|| PoolError::UnknownBackend(backend.to_string()))?;
-        Ok(handle.inflight.available_permits() > 0)
-    }
-
     pub async fn send(
         &self,
         backend: &str,

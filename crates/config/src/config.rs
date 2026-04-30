@@ -768,6 +768,10 @@ pub struct MetricsEndpoint {
     #[serde(default)]
     pub enabled: bool,
 
+    /// When true, startup fails if metrics endpoint cannot be bound/registered.
+    #[serde(default)]
+    pub required: bool,
+
     #[serde(default = "observe_default_address")]
     pub address: String,
 
@@ -788,6 +792,7 @@ impl Default for MetricsEndpoint {
     fn default() -> Self {
         Self {
             enabled: false,
+            required: false,
             address: observe_default_address(),
             port: observe_default_port(),
             path: observe_default_metrics_path(),
@@ -802,6 +807,10 @@ impl Default for MetricsEndpoint {
 pub struct ControlApi {
     #[serde(default)]
     pub enabled: bool,
+
+    /// When true, startup fails if control API endpoint cannot be bound/registered.
+    #[serde(default)]
+    pub required: bool,
 
     #[serde(default = "observe_default_control_api_address")]
     pub address: String,
@@ -835,6 +844,7 @@ impl Default for ControlApi {
     fn default() -> Self {
         Self {
             enabled: false,
+            required: false,
             address: observe_default_control_api_address(),
             port: observe_default_control_api_port(),
             health_path: observe_default_control_api_health_path(),

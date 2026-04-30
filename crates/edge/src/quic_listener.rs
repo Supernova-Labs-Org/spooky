@@ -155,7 +155,7 @@ impl ControlApiState {
             };
             let pool_total = guard.pool.len();
             total = total.saturating_add(pool_total);
-            healthy = healthy.saturating_add(guard.pool.healthy_indices().len().min(pool_total));
+            healthy = healthy.saturating_add(guard.pool.healthy_len().min(pool_total));
         }
         (healthy, total)
     }
@@ -545,7 +545,7 @@ pub(crate) fn abort_stream(req: &mut RequestEnvelope, metrics: &Metrics) -> Stre
 impl QUICListener {
     pub fn new(config: SpookyConfig) -> Result<Self, ProxyError> {
         let shared_state = Arc::new(Self::build_shared_state(&config)?);
-        Self::spawn_control_plane_tasks(&config, &shared_state, 1);
+        Self::spawn_control_plane_tasks(&config, &shared_state, 1)?;
         let socket = Self::bind_socket(&config, false)?;
         Self::new_with_socket_and_shared_state(config, socket, shared_state)
     }
@@ -671,7 +671,7 @@ impl QUICListener {
         config: &SpookyConfig,
         shared_state: &SharedRuntimeState,
         worker_count: usize,
-    ) {
+    ) -> Result<(), ProxyError> {
         shared_state
             .watchdog
             .set_expected_workers(worker_count.max(1));
@@ -683,8 +683,9 @@ impl QUICListener {
         ) {
             Ok(client) => Arc::new(client),
             Err(err) => {
-                error!("failed to initialize control-plane H2 client: {}", err);
-                return;
+                return Err(ProxyError::Transport(format!(
+                    "failed to initialize control-plane H2 client: {err}"
+                )));
             }
         };
         Self::spawn_health_checks(
@@ -692,14 +693,15 @@ impl QUICListener {
             health_client,
             Arc::clone(&shared_state.metrics),
         );
-        Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics));
-        Self::spawn_control_api_endpoint(config, shared_state, worker_count);
+        Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics))?;
+        Self::spawn_control_api_endpoint(config, shared_state, worker_count)?;
         Self::spawn_watchdog(
             config,
             Arc::clone(&shared_state.metrics),
             Arc::clone(&shared_state.resilience),
             Arc::clone(&shared_state.watchdog),
         );
+        Ok(())
     }
 
     pub fn bind_reuseport_sockets(
@@ -2070,55 +2072,6 @@ impl QUICListener {
                                         continue;
                                     }
                                 };
-
-                            match h2_pool.has_capacity(&addr) {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    drop(upstream_permit);
-                                    drop(global_permit);
-                                    metrics.inc_failure();
-                                    metrics.inc_overload_shed_reason(
-                                        OverloadShedReason::BackendInflight,
-                                    );
-                                    metrics.record_route(
-                                        &upstream_name,
-                                        request_start.elapsed(),
-                                        RouteOutcome::OverloadShed,
-                                    );
-                                    Self::send_overload_response(
-                                        h3,
-                                        &mut connection.quic,
-                                        stream_id,
-                                        b"backend overloaded, retry later\n",
-                                        resilience.shed_retry_after_seconds,
-                                    )?;
-                                    resilience
-                                        .adaptive_admission
-                                        .observe(request_start.elapsed(), true);
-                                    continue;
-                                }
-                                Err(_) => {
-                                    drop(upstream_permit);
-                                    drop(global_permit);
-                                    metrics.inc_failure();
-                                    metrics.record_route(
-                                        &upstream_name,
-                                        request_start.elapsed(),
-                                        RouteOutcome::Failure,
-                                    );
-                                    Self::send_simple_response(
-                                        h3,
-                                        &mut connection.quic,
-                                        stream_id,
-                                        http::StatusCode::SERVICE_UNAVAILABLE,
-                                        b"no upstream available\n",
-                                    )?;
-                                    resilience
-                                        .adaptive_admission
-                                        .observe(request_start.elapsed(), true);
-                                    continue;
-                                }
-                            }
 
                             let request_id = REQUEST_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
                             let incoming_traceparent = extract_header_value(&list, b"traceparent")
@@ -3561,7 +3514,7 @@ impl QUICListener {
             let idx = pool.pick(key);
             let idx = idx.ok_or_else(|| {
                 let total = pool.pool.len();
-                let healthy = pool.pool.healthy_indices().len();
+                let healthy = pool.pool.healthy_len();
                 error!(
                     "no healthy backends available: {}/{} backends healthy",
                     healthy, total
@@ -3602,8 +3555,7 @@ impl QUICListener {
         primary_index: usize,
     ) -> Option<(String, usize)> {
         let pool = upstream_pool.lock().ok()?;
-        let healthy = pool.pool.healthy_indices();
-        for index in healthy {
+        for index in pool.pool.healthy_indices_iter() {
             if index == primary_index {
                 continue;
             }
@@ -3981,11 +3933,15 @@ impl QUICListener {
         }
     }
 
-    fn spawn_metrics_endpoint(config: &SpookyConfig, metrics: Arc<Metrics>) {
+    fn spawn_metrics_endpoint(
+        config: &SpookyConfig,
+        metrics: Arc<Metrics>,
+    ) -> Result<(), ProxyError> {
         let endpoint = &config.observability.metrics;
         if !endpoint.enabled {
-            return;
+            return Ok(());
         }
+        let required = endpoint.required;
 
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
         let metrics_path = endpoint.path.clone();
@@ -3995,8 +3951,12 @@ impl QUICListener {
         let handle = match runtime_handle() {
             Some(handle) => handle,
             None => {
-                error!("Metrics endpoint disabled (no Tokio runtime available)");
-                return;
+                let msg = "metrics endpoint disabled (no Tokio runtime available)".to_string();
+                if required {
+                    return Err(ProxyError::Transport(msg));
+                }
+                error!("{}", msg);
+                return Ok(());
             }
         };
 
@@ -4004,25 +3964,37 @@ impl QUICListener {
         let std_listener = match std::net::TcpListener::bind(&bind) {
             Ok(listener) => listener,
             Err(err) => {
-                error!("Failed to bind metrics endpoint {}: {}", bind, err);
-                return;
+                let msg = format!("failed to bind metrics endpoint {bind}: {err}");
+                if required {
+                    return Err(ProxyError::Transport(msg));
+                }
+                error!("{}", msg);
+                return Ok(());
             }
         };
         if let Err(err) = std_listener.set_nonblocking(true) {
-            error!(
-                "Failed to set metrics endpoint listener nonblocking ({}): {}",
+            let msg = format!(
+                "failed to set metrics endpoint listener nonblocking ({}): {}",
                 bind, err
             );
-            return;
+            if required {
+                return Err(ProxyError::Transport(msg));
+            }
+            error!("{}", msg);
+            return Ok(());
         }
         let listener = match tokio::net::TcpListener::from_std(std_listener) {
             Ok(listener) => listener,
             Err(err) => {
-                error!(
-                    "Failed to register metrics endpoint listener {}: {}",
+                let msg = format!(
+                    "failed to register metrics endpoint listener {}: {}",
                     bind, err
                 );
-                return;
+                if required {
+                    return Err(ProxyError::Transport(msg));
+                }
+                error!("{}", msg);
+                return Ok(());
             }
         };
 
@@ -4089,6 +4061,7 @@ impl QUICListener {
                 }
             },
         );
+        Ok(())
     }
 
     fn handle_metrics_request(
@@ -4121,11 +4094,12 @@ impl QUICListener {
         config: &SpookyConfig,
         shared_state: &SharedRuntimeState,
         worker_count: usize,
-    ) {
+    ) -> Result<(), ProxyError> {
         let endpoint = &config.observability.control_api;
         if !endpoint.enabled {
-            return;
+            return Ok(());
         }
+        let required = endpoint.required;
 
         let bind = format!("{}:{}", endpoint.address, endpoint.port);
         let max_connections = endpoint.max_connections.max(1);
@@ -4149,33 +4123,49 @@ impl QUICListener {
         let handle = match runtime_handle() {
             Some(handle) => handle,
             None => {
-                error!("Control API disabled (no Tokio runtime available)");
-                return;
+                let msg = "control API disabled (no Tokio runtime available)".to_string();
+                if required {
+                    return Err(ProxyError::Transport(msg));
+                }
+                error!("{}", msg);
+                return Ok(());
             }
         };
 
         let std_listener = match std::net::TcpListener::bind(&bind) {
             Ok(listener) => listener,
             Err(err) => {
-                error!("Failed to bind control API endpoint {}: {}", bind, err);
-                return;
+                let msg = format!("failed to bind control API endpoint {bind}: {err}");
+                if required {
+                    return Err(ProxyError::Transport(msg));
+                }
+                error!("{}", msg);
+                return Ok(());
             }
         };
         if let Err(err) = std_listener.set_nonblocking(true) {
-            error!(
-                "Failed to set control API endpoint listener nonblocking ({}): {}",
+            let msg = format!(
+                "failed to set control API endpoint listener nonblocking ({}): {}",
                 bind, err
             );
-            return;
+            if required {
+                return Err(ProxyError::Transport(msg));
+            }
+            error!("{}", msg);
+            return Ok(());
         }
         let listener = match tokio::net::TcpListener::from_std(std_listener) {
             Ok(listener) => listener,
             Err(err) => {
-                error!(
-                    "Failed to register control API endpoint listener {}: {}",
+                let msg = format!(
+                    "failed to register control API endpoint listener {}: {}",
                     bind, err
                 );
-                return;
+                if required {
+                    return Err(ProxyError::Transport(msg));
+                }
+                error!("{}", msg);
+                return Ok(());
             }
         };
 
@@ -4241,6 +4231,7 @@ impl QUICListener {
                 }
             },
         );
+        Ok(())
     }
 
     fn json_response(status: StatusCode, value: serde_json::Value) -> Response<Full<Bytes>> {
@@ -4623,7 +4614,7 @@ impl QUICListener {
                 "health-check",
                 Some(supervise_metrics),
                 async move {
-                    let interval = Duration::from_millis(health.interval.max(1));
+                    let base_interval_ms = health.interval.max(1);
                     let timeout = Duration::from_millis(health.timeout_ms.max(1));
                     let path: &str = if health.path.is_empty() {
                         "/"
@@ -4641,9 +4632,20 @@ impl QUICListener {
                         }
                     };
                     let health_uri = endpoint.uri_for_path(path);
+                    let initial_jitter_ms = if base_interval_ms > 1 {
+                        crate::stable_hash64(address.as_bytes()) % base_interval_ms
+                    } else {
+                        0
+                    };
+                    if initial_jitter_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(initial_jitter_ms)).await;
+                    }
+                    let mut consecutive_failures = 0u32;
 
                     loop {
-                        tokio::time::sleep(interval).await;
+                        let backoff_multiplier = 1u64 << consecutive_failures.min(2);
+                        let sleep_ms = base_interval_ms.saturating_mul(backoff_multiplier);
+                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
 
                         let request = match http::Request::builder()
                             .method("GET")
@@ -4668,13 +4670,18 @@ impl QUICListener {
                             Ok(mut pool) => match outcome {
                                 HealthClassification::Success => {
                                     task_metrics.inc_health_check_success();
+                                    consecutive_failures = 0;
                                     pool.pool.mark_success(index)
                                 }
                                 HealthClassification::Failure => {
                                     task_metrics.inc_health_check_failure();
+                                    consecutive_failures = consecutive_failures.saturating_add(1);
                                     pool.pool.mark_failure(index)
                                 }
-                                HealthClassification::Neutral => None,
+                                HealthClassification::Neutral => {
+                                    consecutive_failures = 0;
+                                    None
+                                }
                             },
                             Err(_) => None,
                         };

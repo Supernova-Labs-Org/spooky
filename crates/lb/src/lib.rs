@@ -282,6 +282,14 @@ impl BackendPool {
         self.healthy.clone()
     }
 
+    pub fn healthy_len(&self) -> usize {
+        self.healthy.len()
+    }
+
+    pub fn healthy_indices_iter(&self) -> impl Iterator<Item = usize> + '_ {
+        self.healthy.iter().copied()
+    }
+
     pub fn all_indices(&self) -> Vec<usize> {
         (0..self.backends.len()).collect()
     }

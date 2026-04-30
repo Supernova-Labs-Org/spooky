@@ -107,3 +107,5 @@ site/
 
 
 deptest/
+
+bench/*

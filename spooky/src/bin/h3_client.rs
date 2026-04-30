@@ -221,7 +221,11 @@ fn run_client(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                             completed = completed.saturating_add(1);
                             emit_request_result(true, latency_ns, cli.report_latency);
 
-                            if !cli.quiet && !cli.report_latency && cli.requests == 1 && !state.body.is_empty() {
+                            if !cli.quiet
+                                && !cli.report_latency
+                                && cli.requests == 1
+                                && !state.body.is_empty()
+                            {
                                 let body = String::from_utf8_lossy(&state.body);
                                 println!("{body}");
                             }
@@ -287,7 +291,11 @@ fn run_client(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             .as_deref()
             .map(|msg| format!(": {msg}"))
             .unwrap_or_default();
-        return Err(format!("{} of {} request(s) failed{}", failures, cli.requests, suffix).into());
+        return Err(format!(
+            "{} of {} request(s) failed{}",
+            failures, cli.requests, suffix
+        )
+        .into());
     }
 
     Ok(())

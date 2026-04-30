@@ -899,9 +899,16 @@ fn connection_flood_is_rate_limited() {
     // Each packet comes from a different SCID so the listener sees each as a
     // new connection attempt (no existing DCID match).
     const FLOOD_COUNT: usize = 10;
+    // Build all packets up front so token consumption happens in a tight burst.
+    // This avoids slow-host timing where packet construction can allow a 1/s
+    // refill and make the assertion flaky.
+    let packets: Vec<Vec<u8>> = (0..FLOOD_COUNT)
+        .map(|_| build_initial_packet(addr))
+        .collect();
+    for pkt in &packets {
+        send_udp(addr, pkt);
+    }
     for _ in 0..FLOOD_COUNT {
-        let pkt = build_initial_packet(addr);
-        send_udp(addr, &pkt);
         listener.poll();
     }
 

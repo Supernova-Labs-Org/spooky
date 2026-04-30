@@ -1427,6 +1427,7 @@ upstream:
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,
+                required: false,
                 address: "127.0.0.1".to_string(),
                 port: 9901,
                 path: "metrics".to_string(),
@@ -1531,6 +1532,7 @@ upstream:
         cfg.observability = Observability {
             metrics: MetricsEndpoint {
                 enabled: true,
+                required: false,
                 address: "127.0.0.1".to_string(),
                 port: 9901,
                 path: "/metrics".to_string(),

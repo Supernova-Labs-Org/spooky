@@ -66,7 +66,7 @@ async fn main() {
 
     let config_path = cli
         .config
-        .unwrap_or_else(|| "./config/config.yaml".to_string());
+        .unwrap_or_else(|| "./config/config.development.yaml".to_string());
 
     // Read configuration file
     let config_yaml = match spooky_config::loader::read_config(&config_path) {
@@ -131,7 +131,12 @@ Use a port >= 1024 for unprivileged startup.",
         requested_workers
     };
     let effective_worker_count = worker_count.saturating_mul(shard_count);
-    QUICListener::spawn_control_plane_tasks(&config_yaml, &shared_state, effective_worker_count);
+    if let Err(err) =
+        QUICListener::spawn_control_plane_tasks(&config_yaml, &shared_state, effective_worker_count)
+    {
+        error!("Failed to initialize control-plane tasks: {}", err);
+        std::process::exit(1);
+    }
 
     let sockets = if worker_count > 1 {
         match QUICListener::bind_reuseport_sockets(&config_yaml, worker_count) {

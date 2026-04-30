@@ -104,6 +104,7 @@ performance:
 observability:
     metrics:
         enabled: true
+        required: false          # set true to fail fast when metrics endpoint cannot start
         address: "127.0.0.1"
         port: 9901
         path: "/metrics"
@@ -111,6 +112,7 @@ observability:
         connection_timeout_ms: 30000
     control_api:
         enabled: true
+        required: false          # set true to fail fast when control API endpoint cannot start
         address: "127.0.0.1"
         port: 9902
         health_path: "/health"

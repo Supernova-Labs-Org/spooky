@@ -136,7 +136,7 @@ impl SharedRuntimeState {
             };
             let pool_total = guard.pool.len();
             total = total.saturating_add(pool_total);
-            healthy = healthy.saturating_add(guard.pool.healthy_indices().len().min(pool_total));
+            healthy = healthy.saturating_add(guard.pool.healthy_len().min(pool_total));
         }
 
         (healthy, total)
@@ -926,7 +926,11 @@ impl Metrics {
             Err(_) => return,
         };
 
-        let entry = guard.entry(route.to_string()).or_default();
+        let entry = if let Some(entry) = guard.get_mut(route) {
+            entry
+        } else {
+            guard.entry(route.to_owned()).or_default()
+        };
         entry.requests_total = entry.requests_total.saturating_add(1);
 
         match outcome {

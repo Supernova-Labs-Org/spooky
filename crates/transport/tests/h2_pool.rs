@@ -165,7 +165,7 @@ async fn pool_rejects_unknown_backend() {
 }
 
 #[tokio::test]
-async fn pool_capacity_probe_reflects_inflight_state() {
+async fn pool_reports_overload_when_inflight_is_exhausted() {
     let tracker = Arc::new(ConcurrencyTracker::new());
     let port = start_h2_server(tracker).await.unwrap();
     let backend = format!("127.0.0.1:{port}");
@@ -184,9 +184,12 @@ async fn pool_capacity_probe_reflects_inflight_state() {
         .expect("pool"),
     );
 
-    assert!(pool.has_capacity(&backend).unwrap());
-
-    let req = Request::builder()
+    let req1 = Request::builder()
+        .method("GET")
+        .uri(format!("http://{backend}/"))
+        .body(Full::new(Bytes::new()).boxed())
+        .unwrap();
+    let req2 = Request::builder()
         .method("GET")
         .uri(format!("http://{backend}/"))
         .body(Full::new(Bytes::new()).boxed())
@@ -194,10 +197,11 @@ async fn pool_capacity_probe_reflects_inflight_state() {
 
     let pool_task = Arc::clone(&pool);
     let backend_task = backend.clone();
-    let handle = tokio::spawn(async move { pool_task.send(&backend_task, req).await });
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    let handle = tokio::spawn(async move { pool_task.send(&backend_task, req1).await });
 
-    assert!(!pool.has_capacity(&backend).unwrap());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let overload = pool.send(&backend, req2).await;
+    assert!(matches!(overload, Err(PoolError::BackendOverloaded(_))));
 
     let _ = handle.await.expect("request task join");
 }

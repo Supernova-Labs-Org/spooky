@@ -3,7 +3,7 @@ use std::{
     future::Future,
     net::{ToSocketAddrs, UdpSocket},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -112,7 +112,7 @@ type ResolvedBackend = (
     String,
     String,
     usize,
-    Arc<Mutex<UpstreamPool>>,
+    Arc<RwLock<UpstreamPool>>,
     String,
     usize,
     bool,
@@ -123,6 +123,40 @@ struct RequestValidationResult {
     method: String,
     path: String,
     authority: Option<String>,
+}
+
+#[derive(Clone)]
+struct ForwardRequestMeta {
+    method: Arc<str>,
+    path: Arc<str>,
+    authority: Option<Arc<str>>,
+    headers: Arc<Vec<quiche::h3::Header>>,
+    client_addr: SocketAddr,
+    request_id: u64,
+    traceparent: Option<Arc<str>>,
+}
+
+impl ForwardRequestMeta {
+    fn build_bodyless_request(
+        &self,
+        backend: &str,
+    ) -> Result<Request<BoxBody<Bytes, std::convert::Infallible>>, ProxyError> {
+        build_h2_request(
+            backend,
+            &self.method,
+            &self.path,
+            self.headers.as_slice(),
+            BoxBody::new(Full::new(Bytes::new())),
+            Some(0),
+            ForwardedContext {
+                client_addr: self.client_addr,
+                request_authority: self.authority.as_deref(),
+                request_id: self.request_id,
+                traceparent: self.traceparent.as_deref(),
+            },
+        )
+        .map_err(ProxyError::from)
+    }
 }
 
 #[derive(Clone)]
@@ -138,7 +172,7 @@ struct ControlApiState {
     metrics: Arc<Metrics>,
     resilience: Arc<RuntimeResilience>,
     watchdog: Arc<WatchdogCoordinator>,
-    upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
     expected_workers: usize,
     started_at: Instant,
     auth_token: Option<String>,
@@ -149,7 +183,7 @@ impl ControlApiState {
         let mut healthy = 0usize;
         let mut total = 0usize;
         for pool in self.upstream_pools.values() {
-            let guard = match pool.lock() {
+            let guard = match pool.read() {
                 Ok(guard) => guard,
                 Err(_) => continue,
             };
@@ -516,7 +550,7 @@ pub(crate) fn abort_stream(req: &mut RequestEnvelope, metrics: &Metrics) -> Stre
     let phase = req.phase.clone();
     if !req.backend_request_finished {
         if let (Some(pool), Some(index)) = (&req.upstream_pool, req.backend_index)
-            && let Ok(mut guard) = pool.lock()
+            && let Ok(mut guard) = pool.write()
         {
             guard.finish_request(
                 index,
@@ -642,7 +676,7 @@ impl QUICListener {
                     name, err
                 ))
             })?;
-            upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
+            upstream_pools.insert(name.clone(), Arc::new(RwLock::new(upstream_pool)));
             upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
         }
 
@@ -650,8 +684,36 @@ impl QUICListener {
             .resilience
             .validate()
             .map_err(|e| ProxyError::Transport(format!("invalid resilience config: {e}")))?;
+        let mut effective_resilience = config.resilience.clone();
+        let default_route_cap_limit = per_upstream_limit.saturating_mul(2).max(1);
+        if effective_resilience.route_queue.default_cap > default_route_cap_limit {
+            warn!(
+                "resilience.route_queue.default_cap={} is above tuned limit {}; clamping for steadier timeout/admission behavior",
+                effective_resilience.route_queue.default_cap, default_route_cap_limit
+            );
+            effective_resilience.route_queue.default_cap = default_route_cap_limit;
+        }
+        let global_route_cap_limit = global_inflight_limit.saturating_mul(2).max(1);
+        if effective_resilience.route_queue.global_cap > global_route_cap_limit {
+            warn!(
+                "resilience.route_queue.global_cap={} is above tuned limit {}; clamping for steadier timeout/admission behavior",
+                effective_resilience.route_queue.global_cap, global_route_cap_limit
+            );
+            effective_resilience.route_queue.global_cap = global_route_cap_limit;
+        }
+        for cap in effective_resilience.route_queue.caps.values_mut() {
+            *cap = (*cap).min(default_route_cap_limit).max(1);
+        }
+        let tuned_high_latency = ((config.performance.backend_timeout_ms * 7) / 10).max(50);
+        if effective_resilience.adaptive_admission.high_latency_ms > tuned_high_latency {
+            warn!(
+                "resilience.adaptive_admission.high_latency_ms={} is above tuned limit {}; clamping for faster overload reaction",
+                effective_resilience.adaptive_admission.high_latency_ms, tuned_high_latency
+            );
+            effective_resilience.adaptive_admission.high_latency_ms = tuned_high_latency;
+        }
         let resilience = Arc::new(RuntimeResilience::from_config(
-            &config.resilience,
+            &effective_resilience,
             global_inflight_limit,
         ));
         let watchdog = Arc::new(WatchdogCoordinator::new(&config.resilience.watchdog));
@@ -1760,7 +1822,7 @@ impl QUICListener {
     fn handle_h3(
         connection: &mut QuicConnection,
         h2_pool: Arc<H2Pool>,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         upstream_inflight: &HashMap<String, Arc<Semaphore>>,
         global_inflight: Arc<Semaphore>,
         backend_timeout: Duration,
@@ -2163,12 +2225,17 @@ impl QUICListener {
                             let hedge_delay = resilience.hedging_delay;
                             let alternate_backend =
                                 Self::pick_alternate_backend(&upstream_pool, idx);
-                            let method_owned = method.clone();
-                            let path_owned = path.clone();
-                            let authority_owned = authority.clone();
-                            let client_addr = connection.peer_address;
-                            let headers_owned = list.clone();
-                            let traceparent_for_upstream = traceparent.clone();
+                            let forward_meta = bodyless_mode.then(|| {
+                                Arc::new(ForwardRequestMeta {
+                                    method: Arc::<str>::from(method.as_str()),
+                                    path: Arc::<str>::from(path.as_str()),
+                                    authority: authority.as_deref().map(Arc::<str>::from),
+                                    headers: Arc::new(list.clone()),
+                                    client_addr: connection.peer_address,
+                                    request_id,
+                                    traceparent: traceparent.as_deref().map(Arc::<str>::from),
+                                })
+                            });
                             let trace_span_for_upstream = trace_span.clone();
                             let (result_tx, result_rx) = oneshot::channel::<UpstreamResult>();
                             let fut = async move {
@@ -2205,28 +2272,14 @@ impl QUICListener {
                                         };
 
                                     let response: Response<Incoming> = if allow_hedge {
-                                        let hedge_candidate = alternate_backend.clone().and_then(
-                                            |(backend, _idx)| {
-                                                build_h2_request(
-                                                    &backend,
-                                                    &method_owned,
-                                                    &path_owned,
-                                                    &headers_owned,
-                                                    BoxBody::new(Full::new(Bytes::new())),
-                                                    Some(0),
-                                                    ForwardedContext {
-                                                        client_addr,
-                                                        request_authority: authority_owned
-                                                            .as_deref(),
-                                                        request_id,
-                                                        traceparent: traceparent_for_upstream
-                                                            .as_deref(),
-                                                    },
-                                                )
-                                                .ok()
-                                                .map(|req| (backend, req))
-                                            },
-                                        );
+                                        let hedge_candidate = alternate_backend
+                                            .clone()
+                                            .and_then(|(backend, _idx)| {
+                                                let meta = forward_meta.as_ref()?;
+                                                meta.build_bodyless_request(&backend)
+                                                    .ok()
+                                                    .map(|req| (backend, req))
+                                            });
 
                                         if let Some((hedge_backend, hedge_request)) =
                                             hedge_candidate
@@ -2312,22 +2365,9 @@ impl QUICListener {
                                                     return Err(primary_err);
                                                 } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
-                                                    && let Ok(retry_request) = build_h2_request(
-                                                        &retry_backend,
-                                                        &method_owned,
-                                                        &path_owned,
-                                                        &headers_owned,
-                                                        BoxBody::new(Full::new(Bytes::new())),
-                                                        Some(0),
-                                                        ForwardedContext {
-                                                            client_addr,
-                                                            request_authority: authority_owned
-                                                                .as_deref(),
-                                                            request_id,
-                                                            traceparent: traceparent_for_upstream
-                                                                .as_deref(),
-                                                        },
-                                                    )
+                                                    && let Some(meta) = forward_meta.as_ref()
+                                                    && let Ok(retry_request) =
+                                                        meta.build_bodyless_request(&retry_backend)
                                                 {
                                                     retry_count = retry_count.saturating_add(1);
                                                     retry_attempt_reason = Some(retry_reason);
@@ -2736,7 +2776,7 @@ impl QUICListener {
         streams: &mut HashMap<u64, RequestEnvelope>,
         quic: &mut quiche::Connection,
         h3: &mut quiche::h3::Connection,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         routing_index: &RouteIndex,
         backend_body_idle_timeout: Duration,
         backend_body_total_timeout: Duration,
@@ -3159,7 +3199,7 @@ impl QUICListener {
                             if let (Some(addr), Some(idx)) = (&req.backend_addr, req.backend_index)
                                 && let Some(pool) = req.upstream_pool.as_ref()
                             {
-                                let transition = pool.lock().ok().and_then(|mut p| {
+                                let transition = pool.write().ok().and_then(|mut p| {
                                     match outcome_from_status(status) {
                                         crate::HealthClassification::Success => {
                                             p.pool.mark_success(idx)
@@ -3377,7 +3417,7 @@ impl QUICListener {
                             if let (Some(idx), Some(pool)) = (
                                 req.backend_index,
                                 upstream_name.and_then(|n| upstream_pools.get(n)),
-                            ) && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                            ) && let Some(t) = pool.write().ok().and_then(|mut p| {
                                 p.pool
                                     .mark_request_failure(idx, HealthFailureReason::HttpStatus5xx)
                             }) && let Some(addr) = &req.backend_addr
@@ -3479,7 +3519,7 @@ impl QUICListener {
         path: &str,
         authority: Option<&str>,
         cid_key: Option<&str>,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         routing_index: &RouteIndex,
     ) -> Result<ResolvedBackend, ProxyError> {
         if method.is_empty() || path.is_empty() {
@@ -3496,37 +3536,62 @@ impl QUICListener {
             .ok_or_else(|| ProxyError::Transport(format!("pool not found: {upstream_name}")))?
             .clone();
 
+        let request_key = authority.unwrap_or(if !path.is_empty() { path } else { method });
+        let key_for_lb = |lb_type: &str| -> &str {
+            if lb_type == "sticky-cid" {
+                cid_key.unwrap_or(request_key)
+            } else {
+                request_key
+            }
+        };
+
         let (backend_index, lb_type, backend_addr) = {
+            let (read_lb_type, read_fast_pick) = {
+                let pool = upstream_pool
+                    .read()
+                    .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
+                if pool.pool.is_empty() {
+                    return Err(ProxyError::Transport("no servers in upstream".into()));
+                }
+                let lb_type = pool.lb_name();
+                let key = key_for_lb(lb_type);
+                let fast_pick = pool
+                    .pick_readonly(key)
+                    .and_then(|idx| pool.pool.address(idx).map(|addr| (idx, addr.to_string())));
+                (lb_type, fast_pick)
+            };
+
             let mut pool = upstream_pool
-                .lock()
+                .write()
                 .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
             if pool.pool.is_empty() {
                 return Err(ProxyError::Transport("no servers in upstream".into()));
             }
             let lb_type = pool.lb_name();
-            let key: &str = if lb_type == "sticky-cid" {
-                cid_key.unwrap_or_else(|| {
-                    authority.unwrap_or(if !path.is_empty() { path } else { method })
-                })
+            let key = key_for_lb(lb_type);
+
+            if lb_type == read_lb_type
+                && let Some((idx, addr)) = read_fast_pick
+                && pool.begin_request_if_healthy(idx)
+            {
+                (idx, lb_type, addr)
             } else {
-                authority.unwrap_or(if !path.is_empty() { path } else { method })
-            };
-            let idx = pool.pick(key);
-            let idx = idx.ok_or_else(|| {
-                let total = pool.pool.len();
-                let healthy = pool.pool.healthy_len();
-                error!(
-                    "no healthy backends available: {}/{} backends healthy",
-                    healthy, total
-                );
-                ProxyError::Transport("no healthy servers".into())
-            })?;
-            let backend_addr = pool
-                .pool
-                .address(idx)
-                .map(str::to_string)
-                .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?;
-            (idx, lb_type, backend_addr)
+                let idx = pool.pick(key).ok_or_else(|| {
+                    let total = pool.pool.len();
+                    let healthy = pool.pool.healthy_len();
+                    error!(
+                        "no healthy backends available: {}/{} backends healthy",
+                        healthy, total
+                    );
+                    ProxyError::Transport("no healthy servers".into())
+                })?;
+                let backend_addr = pool
+                    .pool
+                    .address(idx)
+                    .map(str::to_string)
+                    .ok_or_else(|| ProxyError::Transport("invalid server address".into()))?;
+                (idx, lb_type, backend_addr)
+            }
         };
 
         debug!(
@@ -3551,10 +3616,10 @@ impl QUICListener {
     }
 
     fn pick_alternate_backend(
-        upstream_pool: &Arc<Mutex<UpstreamPool>>,
+        upstream_pool: &Arc<RwLock<UpstreamPool>>,
         primary_index: usize,
     ) -> Option<(String, usize)> {
-        let pool = upstream_pool.lock().ok()?;
+        let pool = upstream_pool.read().ok()?;
         for index in pool.pool.healthy_indices_iter() {
             if index == primary_index {
                 continue;
@@ -3659,7 +3724,7 @@ impl QUICListener {
         stream_id: u64,
         req: &RequestEnvelope,
         result: ForwardResult,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         routing_index: &RouteIndex,
         metrics: &Metrics,
         overload_retry_after_seconds: u32,
@@ -3782,7 +3847,7 @@ impl QUICListener {
                 error!("Upstream transport error");
                 metrics.inc_health_failure(HealthFailureReason::Transport);
                 if let Some(pool) = &upstream_pool
-                    && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                    && let Some(t) = pool.write().ok().and_then(|mut p| {
                         p.pool
                             .mark_request_failure(backend_index, HealthFailureReason::Transport)
                     })
@@ -3819,7 +3884,7 @@ impl QUICListener {
                 error!("request_id={} Upstream request timed out", req.request_id);
                 metrics.inc_health_failure(HealthFailureReason::Timeout);
                 if let Some(pool) = &upstream_pool
-                    && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                    && let Some(t) = pool.write().ok().and_then(|mut p| {
                         p.pool
                             .mark_request_failure(backend_index, HealthFailureReason::Timeout)
                     })
@@ -4569,32 +4634,72 @@ impl QUICListener {
     }
 
     fn spawn_health_checks(
-        upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
         health_client: Arc<H2Client>,
         metrics: Arc<Metrics>,
     ) {
-        let entries = {
-            let mut all_entries = Vec::new();
-            for (_upstream_name, upstream_pool) in upstream_pools.iter() {
-                let pool = match upstream_pool.lock() {
-                    Ok(pool) => pool,
-                    Err(_) => continue,
+        struct HealthCheckJob {
+            upstream_pool: Arc<RwLock<UpstreamPool>>,
+            index: usize,
+            address: String,
+            health_uri: String,
+            timeout: Duration,
+            base_interval_ms: u64,
+            consecutive_failures: u32,
+            next_due_at: Instant,
+        }
+
+        let mut grouped_jobs: HashMap<u64, Vec<HealthCheckJob>> = HashMap::new();
+        for (_upstream_name, upstream_pool) in upstream_pools.iter() {
+            let pool = match upstream_pool.read() {
+                Ok(pool) => pool,
+                Err(_) => continue,
+            };
+            for index in pool.pool.all_indices() {
+                let (address, health) =
+                    match (pool.pool.address(index), pool.pool.health_check(index)) {
+                        (Some(address), Some(health)) => (address.to_string(), health),
+                        _ => continue,
+                    };
+                let path: &str = if health.path.is_empty() {
+                    "/"
+                } else {
+                    &health.path
                 };
-                for index in pool.pool.all_indices() {
-                    if let (Some(address), Some(health)) =
-                        (pool.pool.address(index), pool.pool.health_check(index))
-                    {
-                        all_entries.push((
-                            upstream_pool.clone(),
-                            index,
-                            address.to_string(),
-                            health,
-                        ));
+                let endpoint = match BackendEndpoint::parse(&address) {
+                    Ok(endpoint) => endpoint,
+                    Err(err) => {
+                        error!(
+                            "disabling health checks for backend '{}' due to invalid endpoint: {}",
+                            address, err
+                        );
+                        continue;
                     }
-                }
+                };
+                let base_interval_ms = health.interval.max(1);
+                let initial_jitter_ms = if base_interval_ms > 1 {
+                    crate::stable_hash64(address.as_bytes()) % base_interval_ms
+                } else {
+                    0
+                };
+                let next_due_at = Instant::now() + Duration::from_millis(initial_jitter_ms);
+                let job = HealthCheckJob {
+                    upstream_pool: Arc::clone(upstream_pool),
+                    index,
+                    address,
+                    health_uri: endpoint.uri_for_path(path),
+                    timeout: Duration::from_millis(health.timeout_ms.max(1)),
+                    base_interval_ms,
+                    consecutive_failures: 0,
+                    next_due_at,
+                };
+                grouped_jobs.entry(base_interval_ms).or_default().push(job);
             }
-            all_entries
-        };
+        }
+
+        if grouped_jobs.is_empty() {
+            return;
+        }
 
         let handle = match runtime_handle() {
             Some(handle) => handle,
@@ -4604,90 +4709,77 @@ impl QUICListener {
             }
         };
 
-        for (upstream_pool, index, address, health) in entries {
+        for (base_interval_ms, mut jobs) in grouped_jobs {
             let health_client = Arc::clone(&health_client);
             let task_metrics = Arc::clone(&metrics);
             let handle = handle.clone();
             let supervise_metrics = Arc::clone(&task_metrics);
             spawn_supervised_async_task(
                 &handle,
-                "health-check",
+                "health-check-group",
                 Some(supervise_metrics),
                 async move {
-                    let base_interval_ms = health.interval.max(1);
-                    let timeout = Duration::from_millis(health.timeout_ms.max(1));
-                    let path: &str = if health.path.is_empty() {
-                        "/"
-                    } else {
-                        &health.path
-                    };
-                    let endpoint = match BackendEndpoint::parse(&address) {
-                        Ok(endpoint) => endpoint,
-                        Err(err) => {
-                            error!(
-                                "disabling health checks for backend '{}' due to invalid endpoint: {}",
-                                address, err
-                            );
-                            return;
-                        }
-                    };
-                    let health_uri = endpoint.uri_for_path(path);
-                    let initial_jitter_ms = if base_interval_ms > 1 {
-                        crate::stable_hash64(address.as_bytes()) % base_interval_ms
-                    } else {
-                        0
-                    };
-                    if initial_jitter_ms > 0 {
-                        tokio::time::sleep(Duration::from_millis(initial_jitter_ms)).await;
-                    }
-                    let mut consecutive_failures = 0u32;
+                    let scheduler_tick_ms = (base_interval_ms / 4).clamp(20, base_interval_ms);
+                    let mut ticker =
+                        tokio::time::interval(Duration::from_millis(scheduler_tick_ms.max(1)));
+                    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                     loop {
-                        let backoff_multiplier = 1u64 << consecutive_failures.min(2);
-                        let sleep_ms = base_interval_ms.saturating_mul(backoff_multiplier);
-                        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
-
-                        let request = match http::Request::builder()
-                            .method("GET")
-                            .uri(&health_uri)
-                            .body(BoxBody::new(Full::new(Bytes::new())))
-                        {
-                            Ok(req) => req,
-                            Err(_) => continue,
-                        };
-
-                        let result =
-                            tokio::time::timeout(timeout, health_client.send(request)).await;
-
-                        let outcome = match result {
-                            Ok(Ok(response)) => {
-                                classify_active_health_check_response(response.status())
+                        ticker.tick().await;
+                        let now = Instant::now();
+                        for job in jobs.iter_mut() {
+                            if now < job.next_due_at {
+                                continue;
                             }
-                            _ => HealthClassification::Failure,
-                        };
 
-                        let transition = match upstream_pool.lock() {
-                            Ok(mut pool) => match outcome {
-                                HealthClassification::Success => {
-                                    task_metrics.inc_health_check_success();
-                                    consecutive_failures = 0;
-                                    pool.pool.mark_success(index)
-                                }
-                                HealthClassification::Failure => {
-                                    task_metrics.inc_health_check_failure();
-                                    consecutive_failures = consecutive_failures.saturating_add(1);
-                                    pool.pool.mark_failure(index)
-                                }
-                                HealthClassification::Neutral => {
-                                    consecutive_failures = 0;
-                                    None
-                                }
-                            },
-                            Err(_) => None,
-                        };
+                            let request = match http::Request::builder()
+                                .method("GET")
+                                .uri(&job.health_uri)
+                                .body(BoxBody::new(Full::new(Bytes::new())))
+                            {
+                                Ok(req) => req,
+                                Err(_) => continue,
+                            };
 
-                        if let Some(transition) = transition {
-                            Self::log_health_transition(&address, transition);
+                            let result =
+                                tokio::time::timeout(job.timeout, health_client.send(request))
+                                    .await;
+
+                            let outcome = match result {
+                                Ok(Ok(response)) => {
+                                    classify_active_health_check_response(response.status())
+                                }
+                                _ => HealthClassification::Failure,
+                            };
+
+                            let transition = match job.upstream_pool.write() {
+                                Ok(mut pool) => match outcome {
+                                    HealthClassification::Success => {
+                                        task_metrics.inc_health_check_success();
+                                        job.consecutive_failures = 0;
+                                        pool.pool.mark_success(job.index)
+                                    }
+                                    HealthClassification::Failure => {
+                                        task_metrics.inc_health_check_failure();
+                                        job.consecutive_failures =
+                                            job.consecutive_failures.saturating_add(1);
+                                        pool.pool.mark_failure(job.index)
+                                    }
+                                    HealthClassification::Neutral => {
+                                        job.consecutive_failures = 0;
+                                        None
+                                    }
+                                },
+                                Err(_) => None,
+                            };
+
+                            let backoff_multiplier = 1u64 << job.consecutive_failures.min(2);
+                            let delay_ms = job.base_interval_ms.saturating_mul(backoff_multiplier);
+                            job.next_due_at = Instant::now() + Duration::from_millis(delay_ms);
+
+                            if let Some(transition) = transition {
+                                Self::log_health_transition(&job.address, transition);
+                            }
                         }
                     }
                 },
@@ -4912,14 +5004,14 @@ mod tests {
 
     #[test]
     fn token_bucket_refills_over_time() {
-        let mut tb = TokenBucket::new(1_000_000, 2); // 1 M tokens/sec = 1 per µs
+        let mut tb = TokenBucket::new(10, 2); // 10 tokens/sec = 1 token per 100ms
         // Drain the bucket.
         assert!(tb.try_consume());
         assert!(tb.try_consume());
         assert!(!tb.try_consume());
 
-        // Sleep slightly longer than 1 token's worth at 1M/s (1µs).
-        std::thread::sleep(std::time::Duration::from_micros(5));
+        // Sleep slightly longer than one refill interval (100ms).
+        std::thread::sleep(std::time::Duration::from_millis(120));
 
         // At least one token must have been refilled.
         assert!(

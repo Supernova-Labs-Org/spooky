@@ -3,10 +3,11 @@ use std::thread;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
+    env,
     net::UdpSocket,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -104,7 +105,7 @@ pub use quic_listener::configure_async_runtime;
 
 pub struct SharedRuntimeState {
     pub(crate) h2_pool: Arc<H2Pool>,
-    pub(crate) upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub(crate) upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
     pub(crate) upstream_inflight: HashMap<String, Arc<Semaphore>>,
     pub(crate) global_inflight: Arc<Semaphore>,
     pub(crate) metrics: Arc<Metrics>,
@@ -130,7 +131,7 @@ impl SharedRuntimeState {
         let mut total = 0usize;
 
         for pool in self.upstream_pools.values() {
-            let guard = match pool.lock() {
+            let guard = match pool.read() {
                 Ok(guard) => guard,
                 Err(_) => continue,
             };
@@ -149,7 +150,7 @@ pub struct QUICListener {
     pub quic_config: quiche::Config,
     pub h3_config: Arc<quiche::h3::Config>,
     pub h2_pool: Arc<H2Pool>,
-    pub upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
     pub upstream_inflight: HashMap<String, Arc<Semaphore>>,
     pub global_inflight: Arc<Semaphore>,
     pub(crate) routing_index: route_index::RouteIndex,
@@ -276,7 +277,7 @@ pub struct RequestEnvelope {
     pub route_path_len: Option<usize>,
     pub route_host_specific: Option<bool>,
     pub backend_lb: Option<String>,
-    pub upstream_pool: Option<Arc<Mutex<UpstreamPool>>>,
+    pub upstream_pool: Option<Arc<RwLock<UpstreamPool>>>,
     pub routing_transparency_enabled: bool,
     pub routing_transparency_include_reason: bool,
     pub response_status: Option<u16>,
@@ -396,6 +397,8 @@ pub struct Metrics {
     pub health_failure_timeout: AtomicU64,
     pub health_failure_transport: AtomicU64,
     pub health_failure_tls: AtomicU64,
+    route_latency_sample_every: u64,
+    route_latency_sample_counter: AtomicU64,
     route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
     worker_stats_shards: Vec<Mutex<HashMap<String, WorkerStats>>>,
 }
@@ -405,6 +408,7 @@ const LATENCY_BUCKETS_MS: [u64; 14] = [
 ];
 const ROUTE_STATS_SHARDS: usize = 32;
 const WORKER_STATS_SHARDS: usize = 32;
+const ROUTE_LATENCY_SAMPLE_EVERY_ENV: &str = "SPOOKY_ROUTE_LATENCY_SAMPLE_EVERY";
 
 #[derive(Default, Clone)]
 struct RouteStats {
@@ -463,6 +467,12 @@ pub use spooky_lb::HealthFailureReason;
 
 impl Default for Metrics {
     fn default() -> Self {
+        let route_latency_sample_every = env::var(ROUTE_LATENCY_SAMPLE_EVERY_ENV)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(1);
+
         let mut shards = Vec::with_capacity(ROUTE_STATS_SHARDS);
         for _ in 0..ROUTE_STATS_SHARDS {
             shards.push(Mutex::new(HashMap::new()));
@@ -535,6 +545,8 @@ impl Default for Metrics {
             health_failure_timeout: AtomicU64::new(0),
             health_failure_transport: AtomicU64::new(0),
             health_failure_tls: AtomicU64::new(0),
+            route_latency_sample_every,
+            route_latency_sample_counter: AtomicU64::new(0),
             route_stats_shards: shards,
             worker_stats_shards: worker_shards,
         }
@@ -948,6 +960,15 @@ impl Metrics {
             }
             RouteOutcome::OverloadShed => {
                 entry.overload_shed = entry.overload_shed.saturating_add(1);
+            }
+        }
+
+        if self.route_latency_sample_every > 1 {
+            let seq = self
+                .route_latency_sample_counter
+                .fetch_add(1, Ordering::Relaxed);
+            if !seq.is_multiple_of(self.route_latency_sample_every) {
+                return;
             }
         }
 
@@ -1417,6 +1438,14 @@ impl Metrics {
         out.push_str(&format!(
             "spooky_health_failures_total{{reason=\"tls\"}} {}\n",
             self.health_failure_tls.load(Ordering::Relaxed)
+        ));
+        out.push_str(
+            "# HELP spooky_route_latency_sample_every Route latency histogram sampling interval (1 = every request).\n",
+        );
+        out.push_str("# TYPE spooky_route_latency_sample_every gauge\n");
+        out.push_str(&format!(
+            "spooky_route_latency_sample_every {}\n",
+            self.route_latency_sample_every
         ));
 
         let mut snapshot: Vec<(String, RouteStats)> = Vec::new();

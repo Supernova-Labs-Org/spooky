@@ -5004,14 +5004,14 @@ mod tests {
 
     #[test]
     fn token_bucket_refills_over_time() {
-        let mut tb = TokenBucket::new(1_000_000, 2); // 1 M tokens/sec = 1 per µs
+        let mut tb = TokenBucket::new(10, 2); // 10 tokens/sec = 1 token per 100ms
         // Drain the bucket.
         assert!(tb.try_consume());
         assert!(tb.try_consume());
         assert!(!tb.try_consume());
 
-        // Sleep slightly longer than 1 token's worth at 1M/s (1µs).
-        std::thread::sleep(std::time::Duration::from_micros(5));
+        // Sleep slightly longer than one refill interval (100ms).
+        std::thread::sleep(std::time::Duration::from_millis(120));
 
         // At least one token must have been refilled.
         assert!(

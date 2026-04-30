@@ -50,6 +50,7 @@ nav:
   - Development:
       - Contributing: development/contributing.md
       - Benchmarks: benchmarks.md
+      - Load Test Results: benchmarks/load.md
       - Changelog: changelog.md
   - Protocols:
       - HTTP/3: protocols/http3.md

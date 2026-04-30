@@ -6,7 +6,7 @@ use std::{
     net::UdpSocket,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -104,7 +104,7 @@ pub use quic_listener::configure_async_runtime;
 
 pub struct SharedRuntimeState {
     pub(crate) h2_pool: Arc<H2Pool>,
-    pub(crate) upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub(crate) upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
     pub(crate) upstream_inflight: HashMap<String, Arc<Semaphore>>,
     pub(crate) global_inflight: Arc<Semaphore>,
     pub(crate) metrics: Arc<Metrics>,
@@ -130,7 +130,7 @@ impl SharedRuntimeState {
         let mut total = 0usize;
 
         for pool in self.upstream_pools.values() {
-            let guard = match pool.lock() {
+            let guard = match pool.read() {
                 Ok(guard) => guard,
                 Err(_) => continue,
             };
@@ -149,7 +149,7 @@ pub struct QUICListener {
     pub quic_config: quiche::Config,
     pub h3_config: Arc<quiche::h3::Config>,
     pub h2_pool: Arc<H2Pool>,
-    pub upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    pub upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
     pub upstream_inflight: HashMap<String, Arc<Semaphore>>,
     pub global_inflight: Arc<Semaphore>,
     pub(crate) routing_index: route_index::RouteIndex,
@@ -276,7 +276,7 @@ pub struct RequestEnvelope {
     pub route_path_len: Option<usize>,
     pub route_host_specific: Option<bool>,
     pub backend_lb: Option<String>,
-    pub upstream_pool: Option<Arc<Mutex<UpstreamPool>>>,
+    pub upstream_pool: Option<Arc<RwLock<UpstreamPool>>>,
     pub routing_transparency_enabled: bool,
     pub routing_transparency_include_reason: bool,
     pub response_status: Option<u16>,

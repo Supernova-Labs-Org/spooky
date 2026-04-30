@@ -3,7 +3,7 @@ use std::{
     future::Future,
     net::{ToSocketAddrs, UdpSocket},
     sync::{
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -112,7 +112,7 @@ type ResolvedBackend = (
     String,
     String,
     usize,
-    Arc<Mutex<UpstreamPool>>,
+    Arc<RwLock<UpstreamPool>>,
     String,
     usize,
     bool,
@@ -172,7 +172,7 @@ struct ControlApiState {
     metrics: Arc<Metrics>,
     resilience: Arc<RuntimeResilience>,
     watchdog: Arc<WatchdogCoordinator>,
-    upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+    upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
     expected_workers: usize,
     started_at: Instant,
     auth_token: Option<String>,
@@ -183,7 +183,7 @@ impl ControlApiState {
         let mut healthy = 0usize;
         let mut total = 0usize;
         for pool in self.upstream_pools.values() {
-            let guard = match pool.lock() {
+            let guard = match pool.read() {
                 Ok(guard) => guard,
                 Err(_) => continue,
             };
@@ -550,7 +550,7 @@ pub(crate) fn abort_stream(req: &mut RequestEnvelope, metrics: &Metrics) -> Stre
     let phase = req.phase.clone();
     if !req.backend_request_finished {
         if let (Some(pool), Some(index)) = (&req.upstream_pool, req.backend_index)
-            && let Ok(mut guard) = pool.lock()
+            && let Ok(mut guard) = pool.write()
         {
             guard.finish_request(
                 index,
@@ -676,7 +676,7 @@ impl QUICListener {
                     name, err
                 ))
             })?;
-            upstream_pools.insert(name.clone(), Arc::new(Mutex::new(upstream_pool)));
+            upstream_pools.insert(name.clone(), Arc::new(RwLock::new(upstream_pool)));
             upstream_inflight.insert(name.clone(), Arc::new(Semaphore::new(per_upstream_limit)));
         }
 
@@ -1794,7 +1794,7 @@ impl QUICListener {
     fn handle_h3(
         connection: &mut QuicConnection,
         h2_pool: Arc<H2Pool>,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         upstream_inflight: &HashMap<String, Arc<Semaphore>>,
         global_inflight: Arc<Semaphore>,
         backend_timeout: Duration,
@@ -2201,15 +2201,11 @@ impl QUICListener {
                                 Arc::new(ForwardRequestMeta {
                                     method: Arc::<str>::from(method.as_str()),
                                     path: Arc::<str>::from(path.as_str()),
-                                    authority: authority
-                                        .as_deref()
-                                        .map(Arc::<str>::from),
+                                    authority: authority.as_deref().map(Arc::<str>::from),
                                     headers: Arc::new(list.clone()),
                                     client_addr: connection.peer_address,
                                     request_id,
-                                    traceparent: traceparent
-                                        .as_deref()
-                                        .map(Arc::<str>::from),
+                                    traceparent: traceparent.as_deref().map(Arc::<str>::from),
                                 })
                             });
                             let trace_span_for_upstream = trace_span.clone();
@@ -2752,7 +2748,7 @@ impl QUICListener {
         streams: &mut HashMap<u64, RequestEnvelope>,
         quic: &mut quiche::Connection,
         h3: &mut quiche::h3::Connection,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         routing_index: &RouteIndex,
         backend_body_idle_timeout: Duration,
         backend_body_total_timeout: Duration,
@@ -3175,7 +3171,7 @@ impl QUICListener {
                             if let (Some(addr), Some(idx)) = (&req.backend_addr, req.backend_index)
                                 && let Some(pool) = req.upstream_pool.as_ref()
                             {
-                                let transition = pool.lock().ok().and_then(|mut p| {
+                                let transition = pool.write().ok().and_then(|mut p| {
                                     match outcome_from_status(status) {
                                         crate::HealthClassification::Success => {
                                             p.pool.mark_success(idx)
@@ -3393,7 +3389,7 @@ impl QUICListener {
                             if let (Some(idx), Some(pool)) = (
                                 req.backend_index,
                                 upstream_name.and_then(|n| upstream_pools.get(n)),
-                            ) && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                            ) && let Some(t) = pool.write().ok().and_then(|mut p| {
                                 p.pool
                                     .mark_request_failure(idx, HealthFailureReason::HttpStatus5xx)
                             }) && let Some(addr) = &req.backend_addr
@@ -3495,7 +3491,7 @@ impl QUICListener {
         path: &str,
         authority: Option<&str>,
         cid_key: Option<&str>,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         routing_index: &RouteIndex,
     ) -> Result<ResolvedBackend, ProxyError> {
         if method.is_empty() || path.is_empty() {
@@ -3514,7 +3510,7 @@ impl QUICListener {
 
         let (backend_index, lb_type, backend_addr) = {
             let mut pool = upstream_pool
-                .lock()
+                .write()
                 .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
             if pool.pool.is_empty() {
                 return Err(ProxyError::Transport("no servers in upstream".into()));
@@ -3567,10 +3563,10 @@ impl QUICListener {
     }
 
     fn pick_alternate_backend(
-        upstream_pool: &Arc<Mutex<UpstreamPool>>,
+        upstream_pool: &Arc<RwLock<UpstreamPool>>,
         primary_index: usize,
     ) -> Option<(String, usize)> {
-        let pool = upstream_pool.lock().ok()?;
+        let pool = upstream_pool.read().ok()?;
         for index in pool.pool.healthy_indices_iter() {
             if index == primary_index {
                 continue;
@@ -3675,7 +3671,7 @@ impl QUICListener {
         stream_id: u64,
         req: &RequestEnvelope,
         result: ForwardResult,
-        upstream_pools: &HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         routing_index: &RouteIndex,
         metrics: &Metrics,
         overload_retry_after_seconds: u32,
@@ -3798,7 +3794,7 @@ impl QUICListener {
                 error!("Upstream transport error");
                 metrics.inc_health_failure(HealthFailureReason::Transport);
                 if let Some(pool) = &upstream_pool
-                    && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                    && let Some(t) = pool.write().ok().and_then(|mut p| {
                         p.pool
                             .mark_request_failure(backend_index, HealthFailureReason::Transport)
                     })
@@ -3835,7 +3831,7 @@ impl QUICListener {
                 error!("request_id={} Upstream request timed out", req.request_id);
                 metrics.inc_health_failure(HealthFailureReason::Timeout);
                 if let Some(pool) = &upstream_pool
-                    && let Some(t) = pool.lock().ok().and_then(|mut p| {
+                    && let Some(t) = pool.write().ok().and_then(|mut p| {
                         p.pool
                             .mark_request_failure(backend_index, HealthFailureReason::Timeout)
                     })
@@ -4585,14 +4581,14 @@ impl QUICListener {
     }
 
     fn spawn_health_checks(
-        upstream_pools: HashMap<String, Arc<Mutex<UpstreamPool>>>,
+        upstream_pools: HashMap<String, Arc<RwLock<UpstreamPool>>>,
         health_client: Arc<H2Client>,
         metrics: Arc<Metrics>,
     ) {
         let entries = {
             let mut all_entries = Vec::new();
             for (_upstream_name, upstream_pool) in upstream_pools.iter() {
-                let pool = match upstream_pool.lock() {
+                let pool = match upstream_pool.read() {
                     Ok(pool) => pool,
                     Err(_) => continue,
                 };
@@ -4682,7 +4678,7 @@ impl QUICListener {
                             _ => HealthClassification::Failure,
                         };
 
-                        let transition = match upstream_pool.lock() {
+                        let transition = match upstream_pool.write() {
                             Ok(mut pool) => match outcome {
                                 HealthClassification::Success => {
                                     task_metrics.inc_health_check_success();

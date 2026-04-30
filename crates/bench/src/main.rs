@@ -1108,13 +1108,16 @@ fn compare_reports(
             tail_ratios.push(case.latency_p99_ns / base.latency_p99_ns);
         }
     }
+    // Normalize only for slower environments. Faster runs should not tighten
+    // baselines and create artificial regressions when a subset of cases
+    // improves significantly.
     let cpu_factor = if cpu_ratios.len() >= 5 {
-        median(&mut cpu_ratios).max(0.01)
+        median(&mut cpu_ratios).max(1.0)
     } else {
         1.0
     };
     let tail_factor = if tail_ratios.len() >= 5 {
-        median(&mut tail_ratios).max(0.01)
+        median(&mut tail_ratios).max(1.0)
     } else {
         1.0
     };

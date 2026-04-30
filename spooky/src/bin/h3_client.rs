@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     net::{SocketAddr, UdpSocket},
     time::{Duration, Instant},
 };
@@ -26,11 +27,37 @@ struct Cli {
 
     #[arg(long)]
     insecure: bool,
+
+    /// Number of requests to execute in this process.
+    #[arg(long, default_value_t = 1)]
+    requests: usize,
+
+    /// Maximum number of in-flight HTTP/3 request streams on a single QUIC connection.
+    #[arg(long, default_value_t = 1)]
+    parallel_streams: usize,
+
+    /// Emit one line per request as: "<ok:0|1> <latency_ns>".
+    /// Intended for load scripts that aggregate per-request latency.
+    #[arg(long)]
+    report_latency: bool,
+
+    /// Suppress response headers/body output.
+    #[arg(long)]
+    quiet: bool,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+struct RequestState {
+    start: Instant,
+    body: Vec<u8>,
+}
 
+fn emit_request_result(ok: bool, latency_ns: u128, report_latency: bool) {
+    if report_latency {
+        println!("{} {}", if ok { 1 } else { 0 }, latency_ns);
+    }
+}
+
+fn run_client(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let peer_addr: SocketAddr = cli.connect.parse()?;
     let bind_addr: SocketAddr = "0.0.0.0:0".parse()?;
 
@@ -57,26 +84,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut conn = quiche::connect(Some(&cli.host), &scid, local_addr, peer_addr, &mut config)?;
     let mut h3_conn: Option<quiche::h3::Connection> = None;
-    let mut req_sent = false;
-    let mut response_done = false;
-    let mut response_body = Vec::new();
 
     let mut out = [0u8; MAX_DATAGRAM_SIZE_BYTES];
     let mut buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
-    let start = Instant::now();
-    let mut last_timeout = Instant::now();
 
+    let mut next_request_idx = 0usize;
+    let mut completed = 0usize;
+    let mut failures = 0usize;
+    let mut last_error: Option<String> = None;
+    let mut inflight: HashMap<u64, RequestState> = HashMap::new();
+    let per_request_timeout = Duration::from_secs(REQUEST_TIMEOUT_SECS);
+
+    // Kick off handshake packet(s).
     let (write, send_info) = conn.send(&mut out)?;
     socket.send_to(&out[..write], send_info.to)?;
 
-    while !response_done && !conn.is_closed() {
+    while completed < cli.requests {
+        // Flush pending egress packets.
         loop {
             match conn.send(&mut out) {
                 Ok((write, send_info)) => {
                     let _ = socket.send_to(&out[..write], send_info.to);
                 }
                 Err(quiche::Error::Done) => break,
-                Err(e) => return Err(format!("send failed: {e:?}").into()),
+                Err(e) => {
+                    last_error = Some(format!("send failed: {e:?}"));
+                    break;
+                }
             }
         }
 
@@ -91,22 +125,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     from,
                     to: local_addr,
                 };
-                conn.recv(&mut buf[..len], recv_info)?;
+                if let Err(e) = conn.recv(&mut buf[..len], recv_info) {
+                    last_error = Some(format!("recv failed: {e:?}"));
+                }
             }
             Err(ref e)
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                let now = Instant::now();
-                if now >= last_timeout + timeout {
-                    conn.on_timeout();
-                    last_timeout = now;
-                }
+                conn.on_timeout();
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => {
+                last_error = Some(e.to_string());
+            }
         }
 
-        if conn.is_established() && h3_conn.is_none() {
+        if h3_conn.is_none() && (conn.is_established() || conn.is_in_early_data()) {
             let h3_config = quiche::h3::Config::new()?;
             h3_conn = Some(quiche::h3::Connection::with_transport(
                 &mut conn, &h3_config,
@@ -114,7 +148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Some(h3) = h3_conn.as_mut() {
-            if conn.is_established() && !req_sent {
+            // Submit more requests on the same connection up to stream concurrency cap.
+            while next_request_idx < cli.requests && inflight.len() < cli.parallel_streams {
                 let req = vec![
                     quiche::h3::Header::new(b":method", b"GET"),
                     quiche::h3::Header::new(b":scheme", b"https"),
@@ -122,54 +157,160 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     quiche::h3::Header::new(b":path", cli.path.as_bytes()),
                     quiche::h3::Header::new(b"user-agent", b"spooky-h3-client"),
                 ];
-                h3.send_request(&mut conn, &req, true)?;
-                req_sent = true;
+
+                match h3.send_request(&mut conn, &req, true) {
+                    Ok(stream_id) => {
+                        inflight.insert(
+                            stream_id,
+                            RequestState {
+                                start: Instant::now(),
+                                body: Vec::new(),
+                            },
+                        );
+                        next_request_idx = next_request_idx.saturating_add(1);
+                    }
+                    Err(quiche::h3::Error::Done) | Err(quiche::h3::Error::StreamBlocked) => {
+                        break;
+                    }
+                    Err(e) => {
+                        // Count this unsent request as failed and move on.
+                        failures = failures.saturating_add(1);
+                        completed = completed.saturating_add(1);
+                        next_request_idx = next_request_idx.saturating_add(1);
+                        last_error = Some(format!("send_request failed: {e:?}"));
+                        emit_request_result(false, 0, cli.report_latency);
+                    }
+                }
             }
 
             loop {
                 match h3.poll(&mut conn) {
                     Ok((_stream_id, quiche::h3::Event::Headers { list, .. })) => {
-                        for header in list {
-                            let name = String::from_utf8_lossy(header.name());
-                            let value = String::from_utf8_lossy(header.value());
-                            println!("{name}: {value}");
+                        if !cli.quiet && !cli.report_latency && cli.requests == 1 {
+                            for header in list {
+                                let name = String::from_utf8_lossy(header.name());
+                                let value = String::from_utf8_lossy(header.value());
+                                println!("{name}: {value}");
+                            }
+                            println!();
                         }
-                        println!();
                     }
                     Ok((stream_id, quiche::h3::Event::Data)) => loop {
                         match h3.recv_body(&mut conn, stream_id, &mut buf) {
-                            Ok(read) => response_body.extend_from_slice(&buf[..read]),
+                            Ok(read) => {
+                                if let Some(state) = inflight.get_mut(&stream_id) {
+                                    state.body.extend_from_slice(&buf[..read]);
+                                }
+                            }
                             Err(quiche::h3::Error::Done) => break,
-                            Err(e) => return Err(format!("recv_body failed: {e:?}").into()),
+                            Err(e) => {
+                                if let Some(state) = inflight.remove(&stream_id) {
+                                    let latency_ns = state.start.elapsed().as_nanos();
+                                    failures = failures.saturating_add(1);
+                                    completed = completed.saturating_add(1);
+                                    emit_request_result(false, latency_ns, cli.report_latency);
+                                }
+                                last_error = Some(format!("recv_body failed: {e:?}"));
+                                break;
+                            }
                         }
                     },
-                    Ok((_stream_id, quiche::h3::Event::Finished)) => {
-                        response_done = true;
-                        break;
+                    Ok((stream_id, quiche::h3::Event::Finished)) => {
+                        if let Some(state) = inflight.remove(&stream_id) {
+                            let latency_ns = state.start.elapsed().as_nanos();
+                            completed = completed.saturating_add(1);
+                            emit_request_result(true, latency_ns, cli.report_latency);
+
+                            if !cli.quiet
+                                && !cli.report_latency
+                                && cli.requests == 1
+                                && !state.body.is_empty()
+                            {
+                                let body = String::from_utf8_lossy(&state.body);
+                                println!("{body}");
+                            }
+                        }
+                    }
+                    Ok((stream_id, quiche::h3::Event::Reset(_))) => {
+                        let latency_ns = inflight
+                            .remove(&stream_id)
+                            .map(|state| state.start.elapsed().as_nanos())
+                            .unwrap_or(0);
+                        failures = failures.saturating_add(1);
+                        completed = completed.saturating_add(1);
+                        emit_request_result(false, latency_ns, cli.report_latency);
                     }
                     Ok((_stream_id, quiche::h3::Event::PriorityUpdate)) => {}
-                    Ok((_stream_id, quiche::h3::Event::GoAway)) => {
-                        response_done = true;
+                    Ok((_stream_id, quiche::h3::Event::GoAway)) => {}
+                    Err(quiche::h3::Error::Done) => break,
+                    Err(e) => {
+                        last_error = Some(format!("h3 poll failed: {e:?}"));
                         break;
                     }
-                    Ok((_stream_id, quiche::h3::Event::Reset(_))) => {
-                        return Err("stream reset by peer".into());
-                    }
-                    Err(quiche::h3::Error::Done) => break,
-                    Err(e) => return Err(format!("h3 poll failed: {e:?}").into()),
                 }
             }
         }
 
-        if start.elapsed() > Duration::from_secs(REQUEST_TIMEOUT_SECS) && !response_done {
-            return Err("timeout waiting for response".into());
+        // Per-request timeout enforcement for in-flight streams.
+        let mut timed_out = Vec::new();
+        for (stream_id, state) in &inflight {
+            if state.start.elapsed() > per_request_timeout {
+                timed_out.push(*stream_id);
+            }
+        }
+        for stream_id in timed_out {
+            if let Some(state) = inflight.remove(&stream_id) {
+                let latency_ns = state.start.elapsed().as_nanos();
+                failures = failures.saturating_add(1);
+                completed = completed.saturating_add(1);
+                emit_request_result(false, latency_ns, cli.report_latency);
+            }
+        }
+
+        if conn.is_closed() {
+            // Fail any remaining in-flight and unsent requests.
+            for (_stream_id, state) in inflight.drain() {
+                failures = failures.saturating_add(1);
+                completed = completed.saturating_add(1);
+                emit_request_result(false, state.start.elapsed().as_nanos(), cli.report_latency);
+            }
+
+            if completed < cli.requests {
+                let remaining = cli.requests - completed;
+                failures = failures.saturating_add(remaining);
+                for _ in 0..remaining {
+                    emit_request_result(false, 0, cli.report_latency);
+                }
+                completed = cli.requests;
+            }
         }
     }
 
-    if !response_body.is_empty() {
-        let body = String::from_utf8_lossy(&response_body);
-        println!("{body}");
+    if !cli.report_latency && failures > 0 {
+        let suffix = last_error
+            .as_deref()
+            .map(|msg| format!(": {msg}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "{} of {} request(s) failed{}",
+            failures, cli.requests, suffix
+        )
+        .into());
     }
 
     Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+
+    if cli.requests == 0 {
+        return Err("--requests must be >= 1".into());
+    }
+
+    if cli.parallel_streams == 0 {
+        return Err("--parallel-streams must be >= 1".into());
+    }
+
+    run_client(&cli)
 }

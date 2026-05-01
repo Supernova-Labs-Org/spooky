@@ -24,7 +24,7 @@ use quiche::h3::NameValue;
 use rand::RngCore;
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
-use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
+use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request_for_endpoint};
 use spooky_errors::{PoolError, ProxyError, is_retryable};
 use spooky_lb::{HealthFailureReason, HealthTransition, UpstreamPool};
 use spooky_transport::h2_client::{H2Client, TlsClientConfig};
@@ -139,10 +139,10 @@ struct ForwardRequestMeta {
 impl ForwardRequestMeta {
     fn build_bodyless_request(
         &self,
-        backend: &str,
+        endpoint: &BackendEndpoint,
     ) -> Result<Request<BoxBody<Bytes, std::convert::Infallible>>, ProxyError> {
-        build_h2_request(
-            backend,
+        build_h2_request_for_endpoint(
+            endpoint,
             &self.method,
             &self.path,
             self.headers.as_slice(),
@@ -729,6 +729,18 @@ impl QUICListener {
 
         Ok(SharedRuntimeState {
             h2_pool,
+            backend_endpoints: Arc::new(
+                config
+                    .upstream
+                    .values()
+                    .flat_map(|upstream| upstream.backends.iter())
+                    .filter_map(|backend| {
+                        BackendEndpoint::parse(&backend.address)
+                            .ok()
+                            .map(|endpoint| (backend.address.clone(), endpoint))
+                    })
+                    .collect(),
+            ),
             upstream_pools,
             upstream_inflight,
             global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
@@ -849,6 +861,7 @@ impl QUICListener {
             quic_config,
             h3_config,
             h2_pool: Arc::clone(&shared_state.h2_pool),
+            backend_endpoints: Arc::clone(&shared_state.backend_endpoints),
             upstream_pools: shared_state.upstream_pools.clone(),
             upstream_inflight: shared_state.upstream_inflight.clone(),
             global_inflight: Arc::clone(&shared_state.global_inflight),
@@ -2200,8 +2213,33 @@ impl QUICListener {
                                     ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
                                 (Some(tx), channel_body.boxed(), false)
                             };
-                            let request = match build_h2_request(
-                                &addr,
+                            let backend_endpoint = match self.backend_endpoints.get(&addr).cloned() {
+                                Some(endpoint) => endpoint,
+                                None => {
+                                    drop(upstream_permit);
+                                    drop(global_permit);
+                                    metrics.inc_failure();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::Failure,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::BAD_GATEWAY,
+                                        b"unknown backend endpoint\n",
+                                    )?;
+                                    error!("missing parsed backend endpoint for {}", addr);
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
+                                    continue;
+                                }
+                            };
+                            let request = match build_h2_request_for_endpoint(
+                                &backend_endpoint,
                                 &method,
                                 &path,
                                 &list,
@@ -2244,6 +2282,7 @@ impl QUICListener {
                             let cb = Arc::clone(&resilience.circuit_breakers);
                             let retry_budget = Arc::clone(&resilience.retry_budget);
                             let route_name = upstream_name.clone();
+                            let backend_endpoints = Arc::clone(&self.backend_endpoints);
                             let allow_hedge = bodyless_mode
                                 && resilience.hedging_allowed_for(&method, &upstream_name, true);
                             let hedge_delay = resilience.hedging_delay;
@@ -2300,7 +2339,8 @@ impl QUICListener {
                                             .clone()
                                             .and_then(|(backend, _idx)| {
                                                 let meta = forward_meta.as_ref()?;
-                                                meta.build_bodyless_request(&backend)
+                                                let endpoint = backend_endpoints.get(&backend)?;
+                                                meta.build_bodyless_request(endpoint)
                                                     .ok()
                                                     .map(|req| (backend, req))
                                             });
@@ -2390,8 +2430,10 @@ impl QUICListener {
                                                 } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
                                                     && let Some(meta) = forward_meta.as_ref()
+                                                    && let Some(endpoint) = backend_endpoints
+                                                        .get(&retry_backend)
                                                     && let Ok(retry_request) =
-                                                        meta.build_bodyless_request(&retry_backend)
+                                                        meta.build_bodyless_request(endpoint)
                                                 {
                                                     retry_count = retry_count.saturating_add(1);
                                                     retry_attempt_reason = Some(retry_reason);

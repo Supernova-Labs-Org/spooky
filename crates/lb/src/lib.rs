@@ -341,11 +341,12 @@ impl BackendPool {
             return;
         };
 
-        let _ = backend.active_requests.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| Some(current.saturating_sub(1)),
-        );
+        let _ =
+            backend
+                .active_requests
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(1))
+                });
 
         if status.is_some_and(|code| (500..=599).contains(&code)) {
             return;
@@ -926,7 +927,7 @@ mod tests {
 
     #[test]
     fn least_connections_picks_lowest_active() {
-        let mut pool = BackendPool::new_from_states(vec![
+        let pool = BackendPool::new_from_states(vec![
             create_backend_state("10.0.0.1:1", 1),
             create_backend_state("10.0.0.2:1", 1),
             create_backend_state("10.0.0.3:1", 1),

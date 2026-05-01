@@ -1470,10 +1470,7 @@ impl QUICListener {
         let h2_pool = self.h2_pool.clone();
 
         // First, try to find existing connection by DCID
-        debug!(
-            "Looking up connection with DCID: {:?}",
-            hex::encode(dcid)
-        );
+        debug!("Looking up connection with DCID: {:?}", hex::encode(dcid));
         let (mut connection, current_primary) =
             if let Some(mut conn) = self.connections.remove(dcid) {
                 let primary = Arc::clone(&conn.primary_scid);
@@ -3124,7 +3121,8 @@ impl QUICListener {
                                 for (name, value) in &owned_h3_headers {
                                     h3_headers.push(quiche::h3::Header::new(name, value));
                                 }
-                                if let Err(err) = h3.send_response(quic, stream_id, &h3_headers, true)
+                                if let Err(err) =
+                                    h3.send_response(quic, stream_id, &h3_headers, true)
                                 {
                                     if let Some(req) = streams.get(&stream_id) {
                                         let protocol = ProxyError::Protocol(format!(
@@ -3201,7 +3199,8 @@ impl QUICListener {
                                             .saturating_duration_since(now)
                                             .min(backend_body_idle_timeout)
                                     };
-                                    let result = tokio::time::timeout(wait_timeout, frame_fut).await;
+                                    let result =
+                                        tokio::time::timeout(wait_timeout, frame_fut).await;
                                     match result {
                                         Err(_elapsed) => {
                                             // Body read idle timeout — signal timeout to flush loop.
@@ -3216,9 +3215,11 @@ impl QUICListener {
                                                     saw_body_progress = true;
                                                 }
                                                 if defer_headers_until_body_validated {
-                                                    response_bytes_received = response_bytes_received
-                                                        .saturating_add(data.len());
-                                                    if response_bytes_received > max_response_body_bytes
+                                                    response_bytes_received =
+                                                        response_bytes_received
+                                                            .saturating_add(data.len());
+                                                    if response_bytes_received
+                                                        > max_response_body_bytes
                                                     {
                                                         let _ = chunk_tx
                                                             .send(ResponseChunk::Error(ProxyError::Pool(
@@ -3245,18 +3246,23 @@ impl QUICListener {
                                                     for start in (0..data.len())
                                                         .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
                                                     {
-                                                        let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                        let end = (start
+                                                            + RESPONSE_CHUNK_BYTES_LIMIT)
                                                             .min(data.len());
-                                                        buffered_chunks.push(data.slice(start..end));
+                                                        buffered_chunks
+                                                            .push(data.slice(start..end));
                                                     }
                                                 } else {
                                                     for start in (0..data.len())
                                                         .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
                                                     {
-                                                        let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                        let end = (start
+                                                            + RESPONSE_CHUNK_BYTES_LIMIT)
                                                             .min(data.len());
                                                         if chunk_tx
-                                                            .send(ResponseChunk::Data(data.slice(start..end)))
+                                                            .send(ResponseChunk::Data(
+                                                                data.slice(start..end),
+                                                            ))
                                                             .await
                                                             .is_err()
                                                         {
@@ -3311,9 +3317,9 @@ impl QUICListener {
                                 None => spawn_async_task(fut, "body-pump"),
                             };
                             if !spawned {
-                                let _ = fail_tx.try_send(ResponseChunk::Error(ProxyError::Transport(
-                                    "runtime unavailable".into(),
-                                )));
+                                let _ = fail_tx.try_send(ResponseChunk::Error(
+                                    ProxyError::Transport("runtime unavailable".into()),
+                                ));
                             }
 
                             if let Some(req) = streams.get_mut(&stream_id) {
@@ -3695,8 +3701,9 @@ impl QUICListener {
                 let fast_pick = pool
                     .pick_readonly(key)
                     .and_then(|idx| pool.pool.address(idx).map(|addr| (idx, addr.to_string())));
-                let fast_selected = fast_pick
-                    .and_then(|(idx, addr)| pool.begin_request_if_healthy(idx).then_some((idx, addr)));
+                let fast_selected = fast_pick.and_then(|(idx, addr)| {
+                    pool.begin_request_if_healthy(idx).then_some((idx, addr))
+                });
                 (lb_type, fast_selected)
             };
 

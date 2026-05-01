@@ -900,7 +900,9 @@ impl Metrics {
 
     fn inc_worker_ingress_queue_drop_bytes(&self, bytes: u64) {
         if let Some(stats) = self.current_worker_stats() {
-            stats.ingress_queue_drop_bytes.fetch_add(bytes, Ordering::Relaxed);
+            stats
+                .ingress_queue_drop_bytes
+                .fetch_add(bytes, Ordering::Relaxed);
         }
     }
 
@@ -1717,7 +1719,7 @@ mod tests {
 
     #[test]
     fn metrics_render_includes_route_percentiles() {
-        let metrics = Metrics::default();
+        let metrics = Metrics::new(1, [String::from("api_pool")]);
         metrics.record_route("api_pool", Duration::from_millis(12), RouteOutcome::Success);
         metrics.record_route(
             "api_pool",
@@ -1739,11 +1741,11 @@ mod tests {
 
     #[test]
     fn metrics_render_collects_routes_from_multiple_shards() {
-        let metrics = Metrics::default();
-        for idx in 0..128 {
-            let route = format!("route-{idx:03}");
+        let routes: Vec<String> = (0..128).map(|idx| format!("route-{idx:03}")).collect();
+        let metrics = Metrics::new(1, routes.clone());
+        for (idx, route) in routes.iter().enumerate().take(128) {
             metrics.record_route(
-                &route,
+                route,
                 Duration::from_millis(5 + idx as u64),
                 RouteOutcome::Success,
             );

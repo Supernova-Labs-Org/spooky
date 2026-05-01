@@ -11,7 +11,7 @@ use std::{
 
 use core::net::SocketAddr;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
@@ -24,7 +24,7 @@ use quiche::h3::NameValue;
 use rand::RngCore;
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
-use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request};
+use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request_for_endpoint};
 use spooky_errors::{PoolError, ProxyError, is_retryable};
 use spooky_lb::{HealthFailureReason, HealthTransition, UpstreamPool};
 use spooky_transport::h2_client::{H2Client, TlsClientConfig};
@@ -139,10 +139,10 @@ struct ForwardRequestMeta {
 impl ForwardRequestMeta {
     fn build_bodyless_request(
         &self,
-        backend: &str,
+        endpoint: &BackendEndpoint,
     ) -> Result<Request<BoxBody<Bytes, std::convert::Infallible>>, ProxyError> {
-        build_h2_request(
-            backend,
+        build_h2_request_for_endpoint(
+            endpoint,
             &self.method,
             &self.path,
             self.headers.as_slice(),
@@ -595,6 +595,13 @@ impl QUICListener {
 
     pub fn build_shared_state(config: &SpookyConfig) -> Result<SharedRuntimeState, ProxyError> {
         let worker_threads = config.performance.worker_threads.max(1);
+        let shard_count = config.performance.packet_shards_per_worker.max(1);
+        let active_worker_threads = if worker_threads > 1 && !config.performance.reuseport {
+            1
+        } else {
+            worker_threads
+        };
+        let worker_slots = active_worker_threads.saturating_mul(shard_count).max(1);
         let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
         let global_inflight_limit = config.performance.global_inflight_limit.max(1);
         let max_inflight_per_backend = config
@@ -717,13 +724,27 @@ impl QUICListener {
             global_inflight_limit,
         ));
         let watchdog = Arc::new(WatchdogCoordinator::new(&config.resilience.watchdog));
+        let mut route_labels = config.upstream.keys().cloned().collect::<Vec<_>>();
+        route_labels.push("unrouted".to_string());
 
         Ok(SharedRuntimeState {
             h2_pool,
+            backend_endpoints: Arc::new(
+                config
+                    .upstream
+                    .values()
+                    .flat_map(|upstream| upstream.backends.iter())
+                    .filter_map(|backend| {
+                        BackendEndpoint::parse(&backend.address)
+                            .ok()
+                            .map(|endpoint| (backend.address.clone(), endpoint))
+                    })
+                    .collect(),
+            ),
             upstream_pools,
             upstream_inflight,
             global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::new(Metrics::new(worker_slots, route_labels)),
             resilience,
             watchdog,
         })
@@ -835,10 +856,12 @@ impl QUICListener {
 
         Ok(Self {
             socket,
+            local_addr,
             config,
             quic_config,
             h3_config,
             h2_pool: Arc::clone(&shared_state.h2_pool),
+            backend_endpoints: Arc::clone(&shared_state.backend_endpoints),
             upstream_pools: shared_state.upstream_pools.clone(),
             upstream_inflight: shared_state.upstream_inflight.clone(),
             global_inflight: Arc::clone(&shared_state.global_inflight),
@@ -1098,41 +1121,33 @@ impl QUICListener {
         &mut self,
         peer: SocketAddr,
         local_addr: SocketAddr,
-        packets: &[u8],
+        packet_type: quiche::Type,
+        dcid: &[u8],
+        has_token: bool,
     ) -> Option<(QuicConnection, Arc<[u8]>)> {
-        let mut buf = packets.to_vec();
-        let header = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
-            Ok(hdr) => hdr,
-            Err(_) => {
-                error!("Failed to parse QUIC packet header");
-                self.metrics.inc_ingress_bad_header();
-                return None;
-            }
-        };
-
-        let dcid_bytes: Arc<[u8]> = Arc::from(header.dcid.as_ref());
         debug!(
             "Packet DCID (len={}): {:02x?}, type: {:?}, active connections: {}",
-            dcid_bytes.len(),
-            &dcid_bytes,
-            header.ty,
+            dcid.len(),
+            dcid,
+            packet_type,
             self.connections.len()
         );
 
         // Try exact match first
-        if let Some(mut connection) = self.connections.remove(&dcid_bytes) {
-            debug!("Found existing connection for DCID: {:02x?}", &dcid_bytes);
+        if let Some(mut connection) = self.connections.remove(dcid) {
+            debug!("Found existing connection for DCID: {:02x?}", dcid);
+            let primary = Arc::clone(&connection.primary_scid);
             self.peer_routes.remove(&connection.peer_address);
             connection.peer_address = peer;
-            return Some((connection, dcid_bytes));
+            return Some((connection, primary));
         }
 
         // For Short packets, try prefix match (client may append bytes to our SCID)
         // This handles cases where client uses longer DCIDs based on server's SCID
-        if header.ty == quiche::Type::Short
-            && dcid_bytes.len() > MIN_SCID_LEN_BYTES
+        if packet_type == quiche::Type::Short
+            && dcid.len() > MIN_SCID_LEN_BYTES
             && let Some(primary_cid) = resolve_primary_from_radix_prefix(
-                &dcid_bytes,
+                dcid,
                 &self.connections,
                 &mut self.cid_routes,
                 &mut self.cid_radix,
@@ -1140,7 +1155,7 @@ impl QUICListener {
         {
             debug!(
                 "Found connection via prefix match. Resolved CID: {:02x?}, Packet DCID: {:02x?}",
-                primary_cid, &dcid_bytes
+                primary_cid, dcid
             );
             if let Some(mut connection) = self.connections.remove(primary_cid.as_ref()) {
                 self.peer_routes.remove(&connection.peer_address);
@@ -1155,14 +1170,14 @@ impl QUICListener {
         }
 
         // Only create new connections for Initial packets
-        if header.ty != quiche::Type::Initial {
+        if packet_type != quiche::Type::Initial {
             debug!("Non-Initial packet for unknown connection, ignoring");
             self.metrics.inc_ingress_unroutable();
             return None;
         }
 
         // If this is a 0-RTT packet without a valid token, we need to reject it
-        if header.token.is_some() {
+        if has_token {
             debug!("Received 0-RTT attempt, will negotiate fresh connection");
             // return None;
         }
@@ -1388,14 +1403,12 @@ impl QUICListener {
         };
 
         debug!("Received UDP datagram ({} bytes)", len);
-
-        let local_addr = match self.socket.local_addr() {
-            Ok(addr) => addr,
-            Err(_) => return,
-        };
-
-        let packet = self.recv_buf[..len].to_vec();
-        self.process_datagram_inner(peer, local_addr, &packet);
+        let local_addr = self.local_addr;
+        let packet_ptr = self.recv_buf.as_mut_ptr();
+        // SAFETY: `packet_ptr` points into `self.recv_buf` and remains valid for this call.
+        // We do not access `self.recv_buf` again until `process_datagram_inner` returns.
+        let packet = unsafe { std::slice::from_raw_parts_mut(packet_ptr, len) };
+        self.process_datagram_inner(peer, local_addr, packet);
     }
 
     pub fn poll_idle(&mut self) {
@@ -1405,18 +1418,27 @@ impl QUICListener {
         self.handle_timeouts();
     }
 
-    pub fn process_datagram(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+    pub fn process_datagram(
+        &mut self,
+        peer: SocketAddr,
+        local_addr: SocketAddr,
+        packet: &mut [u8],
+    ) {
         if !self.poll_preamble() {
             return;
         }
         self.process_datagram_inner(peer, local_addr, packet);
     }
 
-    fn process_datagram_inner(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+    fn process_datagram_inner(
+        &mut self,
+        peer: SocketAddr,
+        local_addr: SocketAddr,
+        packet: &mut [u8],
+    ) {
         self.metrics.inc_ingress_packet();
 
-        let mut recv_data = BytesMut::from(packet);
-        let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
+        let header = match quiche::Header::from_slice(packet, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => {
                 error!("Failed to parse QUIC packet header");
@@ -1424,8 +1446,11 @@ impl QUICListener {
                 return;
             }
         };
+        let packet_type = header.ty;
+        let header_has_token = header.token.is_some();
+        let dcid = header.dcid.as_ref();
 
-        if header.ty == quiche::Type::VersionNegotiation {
+        if packet_type == quiche::Type::VersionNegotiation {
             let len =
                 match quiche::negotiate_version(&header.scid, &header.dcid, &mut self.send_buf) {
                     Ok(len) => len,
@@ -1445,31 +1470,34 @@ impl QUICListener {
         let h2_pool = self.h2_pool.clone();
 
         // First, try to find existing connection by DCID
-        let lookup_key: Arc<[u8]> = Arc::from(header.dcid.as_ref());
-        debug!(
-            "Looking up connection with DCID: {:?}",
-            hex::encode(&lookup_key)
-        );
+        debug!("Looking up connection with DCID: {:?}", hex::encode(dcid));
         let (mut connection, current_primary) =
-            if let Some(mut conn) = self.connections.remove(&lookup_key) {
+            if let Some(mut conn) = self.connections.remove(dcid) {
+                let primary = Arc::clone(&conn.primary_scid);
                 self.peer_routes.remove(&conn.peer_address);
                 conn.peer_address = peer;
                 debug!("Found existing connection for {}", peer);
-                (conn, lookup_key)
-            } else if let Some(primary) = self.cid_routes.get(lookup_key.as_ref()).cloned() {
+                (conn, primary)
+            } else if let Some(primary) = self.cid_routes.get(dcid).cloned() {
                 if let Some(mut conn) = self.connections.remove(&primary) {
                     self.peer_routes.remove(&conn.peer_address);
                     conn.peer_address = peer;
                     debug!(
                         "Found existing connection via SCID alias {} -> {}",
-                        hex::encode(&lookup_key),
+                        hex::encode(dcid),
                         hex::encode(&primary)
                     );
                     (conn, primary)
                 } else {
                     // Stale alias entry.
-                    self.cid_routes.remove(lookup_key.as_ref());
-                    match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                    self.cid_routes.remove(dcid);
+                    match self.take_or_create_connection(
+                        peer,
+                        local_addr,
+                        packet_type,
+                        dcid,
+                        header_has_token,
+                    ) {
                         Some(conn) => {
                             debug!("Created new connection for {}", peer);
                             conn
@@ -1478,7 +1506,7 @@ impl QUICListener {
                             debug!(
                                 "Dropping packet for unknown connection from {} (DCID: {:?})",
                                 peer,
-                                hex::encode(&lookup_key)
+                                hex::encode(dcid)
                             );
                             return;
                         }
@@ -1497,7 +1525,13 @@ impl QUICListener {
                 } else {
                     // Stale peer map entry.
                     self.peer_routes.remove(&peer);
-                    match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                    match self.take_or_create_connection(
+                        peer,
+                        local_addr,
+                        packet_type,
+                        dcid,
+                        header_has_token,
+                    ) {
                         Some(conn_pair) => {
                             debug!("Created new connection for {}", peer);
                             conn_pair
@@ -1506,7 +1540,7 @@ impl QUICListener {
                             debug!(
                                 "Dropping packet for unknown connection from {} (DCID: {:?})",
                                 peer,
-                                hex::encode(&lookup_key)
+                                hex::encode(dcid)
                             );
                             return;
                         }
@@ -1514,7 +1548,13 @@ impl QUICListener {
                 }
             } else {
                 // No existing connection found, try to create new one.
-                match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                match self.take_or_create_connection(
+                    peer,
+                    local_addr,
+                    packet_type,
+                    dcid,
+                    header_has_token,
+                ) {
                     Some(conn_pair) => {
                         debug!("Created new connection for {}", peer);
                         conn_pair
@@ -1523,7 +1563,7 @@ impl QUICListener {
                         debug!(
                             "Dropping packet for unknown connection from {} (DCID: {:?})",
                             peer,
-                            hex::encode(&lookup_key)
+                            hex::encode(dcid)
                         );
                         return;
                     }
@@ -1535,7 +1575,7 @@ impl QUICListener {
             to: local_addr,
         };
 
-        if let Err(e) = connection.quic.recv(&mut recv_data, recv_info) {
+        if let Err(e) = connection.quic.recv(packet, recv_info) {
             error!("QUIC recv failed: {:?}", e);
             Self::release_connection_streams(&mut connection, &self.metrics);
             self.remove_connection_routes(&connection);
@@ -1580,6 +1620,7 @@ impl QUICListener {
             && let Err(e) = Self::handle_h3(
                 &mut connection,
                 Arc::clone(&h2_pool),
+                Arc::clone(&self.backend_endpoints),
                 &self.upstream_pools,
                 &self.upstream_inflight,
                 Arc::clone(&self.global_inflight),
@@ -1822,6 +1863,7 @@ impl QUICListener {
     fn handle_h3(
         connection: &mut QuicConnection,
         h2_pool: Arc<H2Pool>,
+        backend_endpoints: Arc<HashMap<String, BackendEndpoint>>,
         upstream_pools: &HashMap<String, Arc<RwLock<UpstreamPool>>>,
         upstream_inflight: &HashMap<String, Arc<Semaphore>>,
         global_inflight: Arc<Semaphore>,
@@ -2176,8 +2218,33 @@ impl QUICListener {
                                     ChannelBody::channel(REQUEST_CHUNK_CHANNEL_CAPACITY);
                                 (Some(tx), channel_body.boxed(), false)
                             };
-                            let request = match build_h2_request(
-                                &addr,
+                            let backend_endpoint = match backend_endpoints.get(&addr).cloned() {
+                                Some(endpoint) => endpoint,
+                                None => {
+                                    drop(upstream_permit);
+                                    drop(global_permit);
+                                    metrics.inc_failure();
+                                    metrics.record_route(
+                                        &upstream_name,
+                                        request_start.elapsed(),
+                                        RouteOutcome::Failure,
+                                    );
+                                    Self::send_simple_response(
+                                        h3,
+                                        &mut connection.quic,
+                                        stream_id,
+                                        http::StatusCode::BAD_GATEWAY,
+                                        b"unknown backend endpoint\n",
+                                    )?;
+                                    error!("missing parsed backend endpoint for {}", addr);
+                                    resilience
+                                        .adaptive_admission
+                                        .observe(request_start.elapsed(), true);
+                                    continue;
+                                }
+                            };
+                            let request = match build_h2_request_for_endpoint(
+                                &backend_endpoint,
                                 &method,
                                 &path,
                                 &list,
@@ -2220,6 +2287,7 @@ impl QUICListener {
                             let cb = Arc::clone(&resilience.circuit_breakers);
                             let retry_budget = Arc::clone(&resilience.retry_budget);
                             let route_name = upstream_name.clone();
+                            let backend_endpoints = Arc::clone(&backend_endpoints);
                             let allow_hedge = bodyless_mode
                                 && resilience.hedging_allowed_for(&method, &upstream_name, true);
                             let hedge_delay = resilience.hedging_delay;
@@ -2276,7 +2344,8 @@ impl QUICListener {
                                             .clone()
                                             .and_then(|(backend, _idx)| {
                                                 let meta = forward_meta.as_ref()?;
-                                                meta.build_bodyless_request(&backend)
+                                                let endpoint = backend_endpoints.get(&backend)?;
+                                                meta.build_bodyless_request(endpoint)
                                                     .ok()
                                                     .map(|req| (backend, req))
                                             });
@@ -2366,8 +2435,10 @@ impl QUICListener {
                                                 } else if let Some((retry_backend, _)) =
                                                         alternate_backend.clone()
                                                     && let Some(meta) = forward_meta.as_ref()
+                                                    && let Some(endpoint) = backend_endpoints
+                                                        .get(&retry_backend)
                                                     && let Ok(retry_request) =
-                                                        meta.build_bodyless_request(&retry_backend)
+                                                        meta.build_bodyless_request(endpoint)
                                                 {
                                                     retry_count = retry_count.saturating_add(1);
                                                     retry_attempt_reason = Some(retry_reason);
@@ -2988,6 +3059,10 @@ impl QUICListener {
                         }
 
                         let defer_headers_until_body_validated = upstream_content_length.is_none();
+                        let immediate_end = upstream_content_length == Some(0)
+                            || status == http::StatusCode::NO_CONTENT
+                            || status == http::StatusCode::NOT_MODIFIED;
+                        let mut immediate_terminal = false;
 
                         if !defer_headers_until_body_validated {
                             // For declared-length responses within cap, emit headers immediately
@@ -3000,7 +3075,8 @@ impl QUICListener {
                             for (name, value) in &owned_h3_headers {
                                 h3_headers.push(quiche::h3::Header::new(name, value));
                             }
-                            if let Err(err) = h3.send_response(quic, stream_id, &h3_headers, false)
+                            if let Err(err) =
+                                h3.send_response(quic, stream_id, &h3_headers, immediate_end)
                             {
                                 if let Some(req) = streams.get(&stream_id) {
                                     let protocol = ProxyError::Protocol(format!(
@@ -3035,99 +3111,191 @@ impl QUICListener {
                             }
                         }
 
-                        // Spawn a task that pumps body frames into a ResponseChunk channel.
-                        // Enforces body deadlines; for unknown-length responses it first
-                        // validates total body size against cap before emitting any headers.
-                        let (chunk_tx, chunk_rx) =
-                            mpsc::channel::<ResponseChunk>(RESPONSE_CHUNK_CHANNEL_CAPACITY);
-                        let fail_tx = chunk_tx.clone();
-                        // `backend_body_total_timeout` is used as a pre-first-byte guard:
-                        // once the upstream starts making body progress, the idle timeout
-                        // governs pacing and the stream may continue until request deadline.
-                        let first_byte_deadline =
-                            tokio::time::Instant::now() + backend_body_total_timeout;
-                        let deferred_status = status;
-                        let deferred_headers = owned_h3_headers.clone();
-                        let fut = async move {
-                            use http_body_util::BodyExt;
-                            let mut body: hyper::body::Incoming = body;
-                            let mut response_bytes_received: usize = 0;
-                            let mut buffered_chunks: Vec<Bytes> = Vec::new();
-                            let mut saw_body_progress = false;
-                            loop {
-                                let frame_fut = BodyExt::frame(&mut body);
-                                let now = tokio::time::Instant::now();
-                                if !saw_body_progress && now >= first_byte_deadline {
-                                    let _ = chunk_tx
-                                        .send(ResponseChunk::Error(ProxyError::Timeout))
-                                        .await;
-                                    return;
+                        if immediate_end {
+                            if defer_headers_until_body_validated {
+                                let mut h3_headers = Vec::with_capacity(owned_h3_headers.len() + 1);
+                                h3_headers.push(quiche::h3::Header::new(
+                                    b":status",
+                                    status.as_str().as_bytes(),
+                                ));
+                                for (name, value) in &owned_h3_headers {
+                                    h3_headers.push(quiche::h3::Header::new(name, value));
                                 }
-                                let wait_timeout = if saw_body_progress {
-                                    backend_body_idle_timeout
-                                } else {
-                                    first_byte_deadline
-                                        .saturating_duration_since(now)
-                                        .min(backend_body_idle_timeout)
-                                };
-                                let result = tokio::time::timeout(wait_timeout, frame_fut).await;
-                                match result {
-                                    Err(_elapsed) => {
-                                        // Body read idle timeout — signal timeout to flush loop.
+                                if let Err(err) =
+                                    h3.send_response(quic, stream_id, &h3_headers, true)
+                                {
+                                    if let Some(req) = streams.get(&stream_id) {
+                                        let protocol = ProxyError::Protocol(format!(
+                                            "failed to send HTTP/3 response headers: {:?}",
+                                            err
+                                        ));
+                                        if let Err(protocol_err) = Self::handle_forward_result(
+                                            h3,
+                                            quic,
+                                            stream_id,
+                                            req,
+                                            Err(protocol),
+                                            upstream_pools,
+                                            routing_index,
+                                            metrics,
+                                            resilience.shed_retry_after_seconds,
+                                        ) {
+                                            error!(
+                                                "failed to emit protocol recovery response on stream {}: {:?}",
+                                                stream_id, protocol_err
+                                            );
+                                        }
+                                        resilience
+                                            .adaptive_admission
+                                            .observe(req.start.elapsed(), true);
+                                    }
+                                    if let Some(req) = streams.get_mut(&stream_id) {
+                                        abort_stream(req, metrics);
+                                    }
+                                    streams.remove(&stream_id);
+                                    continue;
+                                }
+                            }
+                            if let Some(req) = streams.get_mut(&stream_id) {
+                                req.response_chunk_rx = None;
+                                req.response_headers_sent = true;
+                                req.phase = StreamPhase::Completed;
+                                req.response_status = Some(status.as_u16());
+                            }
+                            immediate_terminal = true;
+                        } else {
+                            // Spawn a task that pumps body frames into a ResponseChunk channel.
+                            // Enforces body deadlines; for unknown-length responses it first
+                            // validates total body size against cap before emitting any headers.
+                            let (chunk_tx, chunk_rx) =
+                                mpsc::channel::<ResponseChunk>(RESPONSE_CHUNK_CHANNEL_CAPACITY);
+                            let fail_tx = chunk_tx.clone();
+                            // `backend_body_total_timeout` is used as a pre-first-byte guard:
+                            // once the upstream starts making body progress, the idle timeout
+                            // governs pacing and the stream may continue until request deadline.
+                            let first_byte_deadline =
+                                tokio::time::Instant::now() + backend_body_total_timeout;
+                            let deferred_status = status;
+                            let deferred_headers = owned_h3_headers.clone();
+                            let fut = async move {
+                                use http_body_util::BodyExt;
+                                let mut body: hyper::body::Incoming = body;
+                                let mut response_bytes_received: usize = 0;
+                                let mut buffered_chunks: Vec<Bytes> = Vec::new();
+                                let mut saw_body_progress = false;
+                                loop {
+                                    let frame_fut = BodyExt::frame(&mut body);
+                                    let now = tokio::time::Instant::now();
+                                    if !saw_body_progress && now >= first_byte_deadline {
                                         let _ = chunk_tx
                                             .send(ResponseChunk::Error(ProxyError::Timeout))
                                             .await;
                                         return;
                                     }
-                                    Ok(Some(Ok(f))) => {
-                                        if let Ok(data) = f.into_data() {
-                                            if !data.is_empty() {
-                                                saw_body_progress = true;
+                                    let wait_timeout = if saw_body_progress {
+                                        backend_body_idle_timeout
+                                    } else {
+                                        first_byte_deadline
+                                            .saturating_duration_since(now)
+                                            .min(backend_body_idle_timeout)
+                                    };
+                                    let result =
+                                        tokio::time::timeout(wait_timeout, frame_fut).await;
+                                    match result {
+                                        Err(_elapsed) => {
+                                            // Body read idle timeout — signal timeout to flush loop.
+                                            let _ = chunk_tx
+                                                .send(ResponseChunk::Error(ProxyError::Timeout))
+                                                .await;
+                                            return;
+                                        }
+                                        Ok(Some(Ok(f))) => {
+                                            if let Ok(data) = f.into_data() {
+                                                if !data.is_empty() {
+                                                    saw_body_progress = true;
+                                                }
+                                                if defer_headers_until_body_validated {
+                                                    response_bytes_received =
+                                                        response_bytes_received
+                                                            .saturating_add(data.len());
+                                                    if response_bytes_received
+                                                        > max_response_body_bytes
+                                                    {
+                                                        let _ = chunk_tx
+                                                            .send(ResponseChunk::Error(ProxyError::Pool(
+                                                                PoolError::BackendOverloaded(
+                                                                    "upstream response body too large".into(),
+                                                                ),
+                                                            )))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                    if response_bytes_received
+                                                        > unknown_length_response_prebuffer_bytes
+                                                    {
+                                                        let _ = chunk_tx
+                                                            .send(ResponseChunk::Error(ProxyError::Pool(
+                                                                PoolError::BackendOverloaded(
+                                                                    "unknown-length response prebuffer limit exceeded"
+                                                                        .into(),
+                                                                ),
+                                                            )))
+                                                            .await;
+                                                        return;
+                                                    }
+                                                    for start in (0..data.len())
+                                                        .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                                    {
+                                                        let end = (start
+                                                            + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                            .min(data.len());
+                                                        buffered_chunks
+                                                            .push(data.slice(start..end));
+                                                    }
+                                                } else {
+                                                    for start in (0..data.len())
+                                                        .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
+                                                    {
+                                                        let end = (start
+                                                            + RESPONSE_CHUNK_BYTES_LIMIT)
+                                                            .min(data.len());
+                                                        if chunk_tx
+                                                            .send(ResponseChunk::Data(
+                                                                data.slice(start..end),
+                                                            ))
+                                                            .await
+                                                            .is_err()
+                                                        {
+                                                            return;
+                                                        }
+                                                    }
+                                                }
                                             }
+                                            // skip trailers / other frame types
+                                        }
+                                        Ok(Some(Err(_))) => {
+                                            let _ = chunk_tx
+                                                .send(ResponseChunk::Error(ProxyError::Transport(
+                                                    "upstream body error".into(),
+                                                )))
+                                                .await;
+                                            return;
+                                        }
+                                        Ok(None) => {
                                             if defer_headers_until_body_validated {
-                                                response_bytes_received = response_bytes_received
-                                                    .saturating_add(data.len());
-                                                if response_bytes_received > max_response_body_bytes
+                                                if chunk_tx
+                                                    .send(ResponseChunk::Start {
+                                                        status: deferred_status,
+                                                        headers: deferred_headers,
+                                                    })
+                                                    .await
+                                                    .is_err()
                                                 {
-                                                    let _ = chunk_tx
-                                                        .send(ResponseChunk::Error(ProxyError::Pool(
-                                                            PoolError::BackendOverloaded(
-                                                                "upstream response body too large".into(),
-                                                            ),
-                                                        )))
-                                                        .await;
                                                     return;
                                                 }
-                                                if response_bytes_received
-                                                    > unknown_length_response_prebuffer_bytes
-                                                {
-                                                    let _ = chunk_tx
-                                                        .send(ResponseChunk::Error(ProxyError::Pool(
-                                                            PoolError::BackendOverloaded(
-                                                                "unknown-length response prebuffer limit exceeded"
-                                                                    .into(),
-                                                            ),
-                                                        )))
-                                                        .await;
-                                                    return;
-                                                }
-                                                for start in (0..data.len())
-                                                    .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
-                                                {
-                                                    let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
-                                                        .min(data.len());
-                                                    buffered_chunks.push(data.slice(start..end));
-                                                }
-                                            } else {
-                                                for start in (0..data.len())
-                                                    .step_by(RESPONSE_CHUNK_BYTES_LIMIT)
-                                                {
-                                                    let end = (start + RESPONSE_CHUNK_BYTES_LIMIT)
-                                                        .min(data.len());
+                                                for chunk in buffered_chunks {
                                                     if chunk_tx
-                                                        .send(ResponseChunk::Data(
-                                                            data.slice(start..end),
-                                                        ))
+                                                        .send(ResponseChunk::Data(chunk))
                                                         .await
                                                         .is_err()
                                                     {
@@ -3135,63 +3303,31 @@ impl QUICListener {
                                                     }
                                                 }
                                             }
+                                            let _ = chunk_tx.send(ResponseChunk::End).await;
+                                            return;
                                         }
-                                        // skip trailers / other frame types
-                                    }
-                                    Ok(Some(Err(_))) => {
-                                        let _ = chunk_tx
-                                            .send(ResponseChunk::Error(ProxyError::Transport(
-                                                "upstream body error".into(),
-                                            )))
-                                            .await;
-                                        return;
-                                    }
-                                    Ok(None) => {
-                                        if defer_headers_until_body_validated {
-                                            if chunk_tx
-                                                .send(ResponseChunk::Start {
-                                                    status: deferred_status,
-                                                    headers: deferred_headers,
-                                                })
-                                                .await
-                                                .is_err()
-                                            {
-                                                return;
-                                            }
-                                            for chunk in buffered_chunks {
-                                                if chunk_tx
-                                                    .send(ResponseChunk::Data(chunk))
-                                                    .await
-                                                    .is_err()
-                                                {
-                                                    return;
-                                                }
-                                            }
-                                        }
-                                        let _ = chunk_tx.send(ResponseChunk::End).await;
-                                        return;
                                     }
                                 }
+                            };
+                            let request_span = streams
+                                .get(&stream_id)
+                                .and_then(|req| req.trace_span.clone());
+                            let spawned = match request_span {
+                                Some(span) => spawn_async_task(fut.instrument(span), "body-pump"),
+                                None => spawn_async_task(fut, "body-pump"),
+                            };
+                            if !spawned {
+                                let _ = fail_tx.try_send(ResponseChunk::Error(
+                                    ProxyError::Transport("runtime unavailable".into()),
+                                ));
                             }
-                        };
-                        let request_span = streams
-                            .get(&stream_id)
-                            .and_then(|req| req.trace_span.clone());
-                        let spawned = match request_span {
-                            Some(span) => spawn_async_task(fut.instrument(span), "body-pump"),
-                            None => spawn_async_task(fut, "body-pump"),
-                        };
-                        if !spawned {
-                            let _ = fail_tx.try_send(ResponseChunk::Error(ProxyError::Transport(
-                                "runtime unavailable".into(),
-                            )));
-                        }
 
-                        if let Some(req) = streams.get_mut(&stream_id) {
-                            req.response_chunk_rx = Some(chunk_rx);
-                            req.response_headers_sent = !defer_headers_until_body_validated;
-                            req.phase = StreamPhase::SendingResponse;
-                            req.response_status = Some(status.as_u16());
+                            if let Some(req) = streams.get_mut(&stream_id) {
+                                req.response_chunk_rx = Some(chunk_rx);
+                                req.response_headers_sent = !defer_headers_until_body_validated;
+                                req.phase = StreamPhase::SendingResponse;
+                                req.response_status = Some(status.as_u16());
+                            }
                         }
 
                         // Update health/metrics for successful upstream response.
@@ -3228,6 +3364,13 @@ impl QUICListener {
                                 .adaptive_admission
                                 .observe(req.start.elapsed(), false);
                             Self::log_access(req, status.as_u16());
+                        }
+                        if immediate_terminal {
+                            if let Some(req) = streams.get_mut(&stream_id) {
+                                abort_stream(req, metrics);
+                            }
+                            streams.remove(&stream_id);
+                            continue;
                         }
                     }
                     Err(err) => {
@@ -3546,7 +3689,7 @@ impl QUICListener {
         };
 
         let (backend_index, lb_type, backend_addr) = {
-            let (read_lb_type, read_fast_pick) = {
+            let (read_lb_type, read_fast_selected) = {
                 let pool = upstream_pool
                     .read()
                     .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
@@ -3558,24 +3701,24 @@ impl QUICListener {
                 let fast_pick = pool
                     .pick_readonly(key)
                     .and_then(|idx| pool.pool.address(idx).map(|addr| (idx, addr.to_string())));
-                (lb_type, fast_pick)
+                let fast_selected = fast_pick.and_then(|(idx, addr)| {
+                    pool.begin_request_if_healthy(idx).then_some((idx, addr))
+                });
+                (lb_type, fast_selected)
             };
 
-            let mut pool = upstream_pool
-                .write()
-                .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
-            if pool.pool.is_empty() {
-                return Err(ProxyError::Transport("no servers in upstream".into()));
-            }
-            let lb_type = pool.lb_name();
-            let key = key_for_lb(lb_type);
-
-            if lb_type == read_lb_type
-                && let Some((idx, addr)) = read_fast_pick
-                && pool.begin_request_if_healthy(idx)
-            {
-                (idx, lb_type, addr)
+            if let Some((idx, addr)) = read_fast_selected {
+                (idx, read_lb_type, addr)
             } else {
+                let mut pool = upstream_pool
+                    .write()
+                    .map_err(|_| ProxyError::Transport("upstream pool lock poisoned".into()))?;
+                if pool.pool.is_empty() {
+                    return Err(ProxyError::Transport("no servers in upstream".into()));
+                }
+                let lb_type = pool.lb_name();
+                let key = key_for_lb(lb_type);
+
                 let idx = pool.pick(key).ok_or_else(|| {
                     let total = pool.pool.len();
                     let healthy = pool.pool.healthy_len();

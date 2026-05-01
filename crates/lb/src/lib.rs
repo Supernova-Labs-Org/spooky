@@ -1,6 +1,9 @@
 use std::{
     cell::RefCell,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -31,7 +34,7 @@ pub struct BackendState {
     health_check: HealthCheck,
     consecutive_failures: u32,
     health_state: HealthState,
-    active_requests: usize,
+    active_requests: Arc<AtomicUsize>,
     ewma_latency_ms: Option<f64>,
 }
 
@@ -60,7 +63,7 @@ impl BackendState {
             health_check: backend.health_check.clone(),
             consecutive_failures: 0,
             health_state: HealthState::Healthy,
-            active_requests: 0,
+            active_requests: Arc::new(AtomicUsize::new(0)),
             ewma_latency_ms: None,
         }
     }
@@ -89,7 +92,7 @@ impl BackendState {
     }
 
     pub fn active_requests(&self) -> usize {
-        self.active_requests
+        self.active_requests.load(Ordering::Relaxed)
     }
 
     pub fn ewma_latency_ms(&self) -> Option<f64> {
@@ -172,7 +175,7 @@ impl UpstreamPool {
         self.load_balancer.pick_readonly(key, &self.pool)
     }
 
-    pub fn begin_request_if_healthy(&mut self, index: usize) -> bool {
+    pub fn begin_request_if_healthy(&self, index: usize) -> bool {
         if self.pool.is_healthy_index(index) {
             self.pool.begin_request(index);
             true
@@ -327,9 +330,9 @@ impl BackendPool {
         self.healthy_pos.get(index).copied().flatten().is_some()
     }
 
-    pub fn begin_request(&mut self, index: usize) {
-        if let Some(backend) = self.backends.get_mut(index) {
-            backend.active_requests = backend.active_requests.saturating_add(1);
+    pub fn begin_request(&self, index: usize) {
+        if let Some(backend) = self.backends.get(index) {
+            backend.active_requests.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -338,9 +341,12 @@ impl BackendPool {
             return;
         };
 
-        if backend.active_requests > 0 {
-            backend.active_requests -= 1;
-        }
+        let _ =
+            backend
+                .active_requests
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                    Some(current.saturating_sub(1))
+                });
 
         if status.is_some_and(|code| (500..=599).contains(&code)) {
             return;
@@ -921,7 +927,7 @@ mod tests {
 
     #[test]
     fn least_connections_picks_lowest_active() {
-        let mut pool = BackendPool::new_from_states(vec![
+        let pool = BackendPool::new_from_states(vec![
             create_backend_state("10.0.0.1:1", 1),
             create_backend_state("10.0.0.2:1", 1),
             create_backend_state("10.0.0.3:1", 1),

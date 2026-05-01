@@ -31,9 +31,28 @@ pub fn build_h2_request(
     content_length: Option<usize>,
     forwarded_ctx: ForwardedContext<'_>,
 ) -> Result<Request<BoxBody<Bytes, Infallible>>, BridgeError> {
-    let method = Method::from_bytes(method.as_bytes()).map_err(|_| BridgeError::InvalidMethod)?;
     let endpoint = BackendEndpoint::parse(backend).map_err(|_| BridgeError::InvalidUri)?;
+    build_h2_request_for_endpoint(
+        &endpoint,
+        method,
+        path,
+        headers,
+        body,
+        content_length,
+        forwarded_ctx,
+    )
+}
 
+pub fn build_h2_request_for_endpoint(
+    endpoint: &BackendEndpoint,
+    method: &str,
+    path: &str,
+    headers: &[quiche::h3::Header],
+    body: BoxBody<Bytes, Infallible>,
+    content_length: Option<usize>,
+    forwarded_ctx: ForwardedContext<'_>,
+) -> Result<Request<BoxBody<Bytes, Infallible>>, BridgeError> {
+    let method = Method::from_bytes(method.as_bytes()).map_err(|_| BridgeError::InvalidMethod)?;
     let request_path = if path.is_empty() { "/" } else { path };
     let uri = endpoint.uri_for_path(request_path);
     let uri = Uri::try_from(uri).map_err(|_| BridgeError::InvalidUri)?;

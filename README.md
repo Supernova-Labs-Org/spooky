@@ -14,6 +14,19 @@ Modern clients increasingly expect HTTP/3 support, but most production backends 
 - Supporting path and host-based routing
 - Enforcing bounded request/response memory with deterministic overload failures
 
+## Performance
+
+On a laptop (Intel i5-11320H, 4 physical cores, 15 GiB RAM), loopback backends:
+
+| Scenario | Throughput | Success | p99 |
+|---|---|---|---|
+| Burst (120 concurrent) | **21,235 req/s** | 100% | 102 ms |
+| Burst (80 concurrent) | **14,691 req/s** | 100% | 65 ms |
+| Slow upstream (80 concurrent) | **9,549 req/s** | 100% | 62 ms |
+| QUIC packet loss (120 concurrent) | **12,500 req/s** | 100% | 91 ms |
+
+See [load test results](docs/benchmarks/load.md) for full details.
+
 ## Quick Start
 
 ```bash

@@ -893,8 +893,7 @@
     </div>
   </div>
   <div class="typography w-full flex-1 *:data-[slot=alert]:first:mt-0">
-    <p>Load testing with the internal <code>vex</code> HTTP/3 load tool against Spooky proxy.</p>
-<h2 id="test-environment">Test Environment</h2>
+    <h2 id="test-environment">Test Environment</h2>
 <div class="table-wrapper"><table>
 <thead>
 <tr>
@@ -917,7 +916,7 @@
 </tr>
 <tr>
 <td><strong>Protocol</strong></td>
-<td>HTTP/3 over QUIC, TLS (self-signed)</td>
+<td>HTTP/3 over QUIC → HTTP/2 upstream, TLS (self-signed)</td>
 </tr>
 <tr>
 <td><strong>Backends</strong></td>
@@ -927,12 +926,16 @@
 <td><strong>Config</strong></td>
 <td><code>config/config.yaml</code> — worker_threads=4, per_backend_inflight_limit=256, global_inflight_limit=4096, adaptive admission enabled</td>
 </tr>
+<tr>
+<td><strong>Run ID</strong></td>
+<td><code>20260501T170035Z</code></td>
+</tr>
 </tbody>
 </table></div>
 <hr />
 <h2 id="scenarios">Scenarios</h2>
-<h3 id="burst-high-concurrency-clean-traffic">Burst — high concurrency, clean traffic</h3>
-<p>3,000 requests, 160 concurrent connections.</p>
+<h3 id="burst-peak-concurrency">Burst — peak concurrency</h3>
+<p>3,000 requests, 120 concurrent connections.</p>
 <div class="table-wrapper"><table>
 <thead>
 <tr>
@@ -943,7 +946,7 @@
 <tbody>
 <tr>
 <td>Throughput</td>
-<td><strong>20,311 req/s</strong></td>
+<td><strong>21,235 req/s</strong></td>
 </tr>
 <tr>
 <td>Success rate</td>
@@ -951,19 +954,19 @@
 </tr>
 <tr>
 <td>p50 latency</td>
-<td>21.1 ms</td>
+<td>19.1 ms</td>
 </tr>
 <tr>
 <td>p95 latency</td>
-<td>117.4 ms</td>
+<td>87.8 ms</td>
 </tr>
 <tr>
 <td>p99 latency</td>
-<td>125.5 ms</td>
+<td>102.4 ms</td>
 </tr>
 </tbody>
 </table></div>
-<h3 id="burst-moderate-concurrency">Burst — moderate concurrency</h3>
+<h3 id="burst-high-concurrency">Burst — high concurrency</h3>
 <p>3,000 requests, 80 concurrent connections.</p>
 <div class="table-wrapper"><table>
 <thead>
@@ -975,7 +978,7 @@
 <tbody>
 <tr>
 <td>Throughput</td>
-<td><strong>16,331 req/s</strong></td>
+<td><strong>14,691 req/s</strong></td>
 </tr>
 <tr>
 <td>Success rate</td>
@@ -983,15 +986,15 @@
 </tr>
 <tr>
 <td>p50 latency</td>
-<td>22.7 ms</td>
+<td>25.1 ms</td>
 </tr>
 <tr>
 <td>p95 latency</td>
-<td>53.1 ms</td>
+<td>57.7 ms</td>
 </tr>
 <tr>
 <td>p99 latency</td>
-<td>66.9 ms</td>
+<td>64.6 ms</td>
 </tr>
 </tbody>
 </table></div>
@@ -1007,7 +1010,7 @@
 <tbody>
 <tr>
 <td>Throughput</td>
-<td><strong>9,239 req/s</strong></td>
+<td><strong>9,549 req/s</strong></td>
 </tr>
 <tr>
 <td>Success rate</td>
@@ -1015,15 +1018,15 @@
 </tr>
 <tr>
 <td>p50 latency</td>
-<td>25.5 ms</td>
+<td>26.9 ms</td>
 </tr>
 <tr>
 <td>p95 latency</td>
-<td>65.1 ms</td>
+<td>58.1 ms</td>
 </tr>
 <tr>
 <td>p99 latency</td>
-<td>71.0 ms</td>
+<td>62.0 ms</td>
 </tr>
 </tbody>
 </table></div>
@@ -1039,7 +1042,7 @@
 <tbody>
 <tr>
 <td>Throughput</td>
-<td><strong>12,433 req/s</strong></td>
+<td><strong>12,500 req/s</strong></td>
 </tr>
 <tr>
 <td>Success rate</td>
@@ -1047,22 +1050,22 @@
 </tr>
 <tr>
 <td>p50 latency</td>
-<td>43.9 ms</td>
+<td>44.2 ms</td>
 </tr>
 <tr>
 <td>p95 latency</td>
-<td>81.6 ms</td>
+<td>79.7 ms</td>
 </tr>
 <tr>
 <td>p99 latency</td>
-<td>95.4 ms</td>
+<td>91.2 ms</td>
 </tr>
 </tbody>
 </table></div>
 <hr />
 <h2 id="summary">Summary</h2>
-<p>Spooky sustains <strong>20k+ req/s</strong> at full concurrency with zero errors across burst, slow-upstream, and packet-loss scenarios. p99 latency stays under 130 ms even at 160 concurrent connections.</p>
-<p>The async data plane, per-backend inflight limits, and adaptive admission control together ensure that slow or lossy backends do not stall the proxy — fast paths remain fast while degraded upstreams are isolated.</p>
+<p>Spooky sustains <strong>21k+ req/s</strong> at full concurrency with zero errors across burst, slow-upstream, and packet-loss scenarios. p99 latency stays under 103 ms even at 120 concurrent connections.</p>
+<p>The async data plane, per-backend inflight limits, and adaptive admission control ensure that slow or lossy backends do not stall the proxy — fast paths remain fast while degraded upstreams are isolated.</p>
   </div>
   
   <script>
@@ -1355,16 +1358,16 @@
         </a>
         
         
-        <a href="#burst-high-concurrency-clean-traffic"
+        <a href="#burst-peak-concurrency"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#burst-high-concurrency-clean-traffic');">
-            Burst — high concurrency, clean traffic
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#burst-peak-concurrency');">
+            Burst — peak concurrency
         </a>
         
-        <a href="#burst-moderate-concurrency"
+        <a href="#burst-high-concurrency"
             class="text-muted-foreground hover:text-foreground data-[active=true]:text-foreground text-[0.8rem] no-underline transition-colors data-[depth=3]:pl-4 data-[depth=4]:pl-6"
-            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#burst-moderate-concurrency');">
-            Burst — moderate concurrency
+            data-active="false" data-depth="3" onClick="deferSetActiveTocLink('#burst-high-concurrency');">
+            Burst — high concurrency
         </a>
         
         <a href="#slow-upstream-backend-latency-simulation"

@@ -4395,20 +4395,20 @@ impl QUICListener {
             );
             return Ok(());
         }
-        let listener = match tokio::net::TcpListener::from_std(std_listener) {
-            Ok(l) => l,
-            Err(err) => {
-                warn!(
-                    "Bootstrap TLS listener registration failed ({}): {}",
-                    bind, err
-                );
-                return Ok(());
-            }
-        };
 
         let routing_index = Arc::new(routing_index);
 
         spawn_supervised_async_task(&handle, "bootstrap-tls-listener", None, async move {
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => l,
+                Err(err) => {
+                    warn!(
+                        "Bootstrap TLS listener registration failed ({}): {}",
+                        bind, err
+                    );
+                    return;
+                }
+            };
             info!(
                 "Bootstrap TLS listener on https://{} (TCP+TLS) — advertising Alt-Svc: {}",
                 bind, alt_svc_value
@@ -4576,40 +4576,52 @@ impl QUICListener {
                                 Ok(collected) => collected.to_bytes(),
                                 Err(_) => Bytes::new(),
                             };
-                            let upstream_body = http_body_util::Full::new(body_bytes.clone())
-                                .map_err(|e: std::convert::Infallible| e)
-                                .boxed();
 
-                            let upstream_request = match upstream_req.body(upstream_body) {
-                                Ok(r) => r,
-                                Err(_) => {
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::BAD_GATEWAY)
-                                        .header("alt-svc", &alt)
-                                        .body(Full::new(Bytes::from_static(b"request build error\n")))
-                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                            // Build a template request (no body) then clone per retry attempt
+                            let template = upstream_req.body(()).expect("builder cannot fail with unit body");
+                            let (parts, _) = template.into_parts();
+                            let parts = Arc::new(parts);
+
+                            // Forward to backend — retry on connection errors (pool not yet warm)
+                            const MAX_RETRIES: u32 = 3;
+                            let mut last_err = String::new();
+                            let mut upstream_resp_opt = None;
+                            for attempt in 0..=MAX_RETRIES {
+                                if attempt > 0 {
+                                    tokio::time::sleep(Duration::from_millis(150)).await;
                                 }
-                            };
-
-                            // Forward to backend
-                            let upstream_resp = match tokio::time::timeout(
-                                backend_timeout,
-                                h2_pool.send(&backend_addr, upstream_request),
-                            ).await {
-                                Ok(Ok(resp)) => resp,
-                                Ok(Err(err)) => {
-                                    warn!("Bootstrap proxy upstream error: {}", err);
+                                let retry_body = http_body_util::Full::new(body_bytes.clone())
+                                    .map_err(|e: std::convert::Infallible| e)
+                                    .boxed();
+                                let retry_req = Request::from_parts((*parts).clone(), retry_body);
+                                match tokio::time::timeout(
+                                    backend_timeout,
+                                    h2_pool.send(&backend_addr, retry_req),
+                                ).await {
+                                    Ok(Ok(resp)) => {
+                                        upstream_resp_opt = Some(resp);
+                                        break;
+                                    }
+                                    Ok(Err(err)) => {
+                                        last_err = err.to_string();
+                                    }
+                                    Err(_) => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::GATEWAY_TIMEOUT)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(b"upstream timeout\n")))
+                                            .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                    }
+                                }
+                            }
+                            let upstream_resp = match upstream_resp_opt {
+                                Some(r) => r,
+                                None => {
+                                    warn!("Bootstrap proxy upstream error after retries: {}", last_err);
                                     return Ok(Response::builder()
                                         .status(StatusCode::BAD_GATEWAY)
                                         .header("alt-svc", &alt)
                                         .body(Full::new(Bytes::from_static(b"upstream error\n")))
-                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
-                                }
-                                Err(_) => {
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::GATEWAY_TIMEOUT)
-                                        .header("alt-svc", &alt)
-                                        .body(Full::new(Bytes::from_static(b"upstream timeout\n")))
                                         .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
                                 }
                             };

@@ -4327,8 +4327,8 @@ impl QUICListener {
                     .map_err(|err| {
                         ProxyError::Tls(format!("failed to parse PKCS8 key PEM: {}", err))
                     })?;
-            if !pkcs8.is_empty() {
-                pkcs8.into_iter().next().unwrap()
+            if let Some(key) = pkcs8.into_iter().next() {
+                key
             } else {
                 let mut reader2 = BufReader::new(key_bytes.as_slice());
                 let rsa: Vec<rustls::pki_types::PrivateKeyDer<'static>> =
@@ -4604,9 +4604,20 @@ impl QUICListener {
                             };
 
                             // Build a template request (no body) then clone per retry attempt
-                            let template = upstream_req
-                                .body(())
-                                .expect("builder cannot fail with unit body");
+                            let template = match upstream_req.body(()) {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .header("alt-svc", &alt)
+                                        .body(Full::new(Bytes::from_static(
+                                            b"request build error\n",
+                                        )))
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
+                                }
+                            };
                             let (parts, _) = template.into_parts();
                             let parts = Arc::new(parts);
 

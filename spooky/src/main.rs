@@ -304,6 +304,8 @@ fn run_sharded_listener_worker(
     worker_shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
     maybe_pin_worker(worker_idx, pin_workers);
+    let dispatcher_slot = worker_idx.saturating_mul(shard_count);
+    worker_shared.bind_metrics_worker_slot(dispatcher_slot);
 
     let local_addr = socket
         .local_addr()
@@ -337,6 +339,7 @@ fn run_sharded_listener_worker(
             .name(shard_name)
             .spawn(move || -> Result<(), String> {
                 maybe_pin_worker(shard_thread_idx, pin_workers);
+                shard_shared.bind_metrics_worker_slot(shard_thread_idx);
                 let mut listener = QUICListener::new_with_socket_and_shared_state(
                     shard_config,
                     shard_socket,
@@ -493,6 +496,7 @@ fn run_single_listener_worker(
     worker_shutdown: Arc<AtomicBool>,
 ) -> Result<(), String> {
     maybe_pin_worker(worker_idx, pin_workers);
+    worker_shared.bind_metrics_worker_slot(worker_idx);
     let mut listener =
         QUICListener::new_with_socket_and_shared_state(worker_config, socket, worker_shared)
             .map_err(|err| format!("worker {} listener init failed: {}", worker_idx, err))?;

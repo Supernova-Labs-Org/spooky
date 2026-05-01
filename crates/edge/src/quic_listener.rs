@@ -595,6 +595,13 @@ impl QUICListener {
 
     pub fn build_shared_state(config: &SpookyConfig) -> Result<SharedRuntimeState, ProxyError> {
         let worker_threads = config.performance.worker_threads.max(1);
+        let shard_count = config.performance.packet_shards_per_worker.max(1);
+        let active_worker_threads = if worker_threads > 1 && !config.performance.reuseport {
+            1
+        } else {
+            worker_threads
+        };
+        let worker_slots = active_worker_threads.saturating_mul(shard_count).max(1);
         let per_upstream_limit = config.performance.per_upstream_inflight_limit.max(1);
         let global_inflight_limit = config.performance.global_inflight_limit.max(1);
         let max_inflight_per_backend = config
@@ -717,13 +724,15 @@ impl QUICListener {
             global_inflight_limit,
         ));
         let watchdog = Arc::new(WatchdogCoordinator::new(&config.resilience.watchdog));
+        let mut route_labels = config.upstream.keys().cloned().collect::<Vec<_>>();
+        route_labels.push("unrouted".to_string());
 
         Ok(SharedRuntimeState {
             h2_pool,
             upstream_pools,
             upstream_inflight,
             global_inflight: Arc::new(Semaphore::new(global_inflight_limit)),
-            metrics: Arc::new(Metrics::default()),
+            metrics: Arc::new(Metrics::new(worker_slots, route_labels)),
             resilience,
             watchdog,
         })

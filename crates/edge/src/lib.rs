@@ -1,13 +1,13 @@
 use bytes::Bytes;
-use std::thread;
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     convert::Infallible,
     env,
     net::UdpSocket,
     pin::Pin,
     sync::{
-        Arc, Mutex, RwLock,
+        Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
     task::{Context, Poll},
@@ -114,6 +114,10 @@ pub struct SharedRuntimeState {
 }
 
 impl SharedRuntimeState {
+    pub fn bind_metrics_worker_slot(&self, slot: usize) {
+        self.metrics.bind_worker_slot(slot);
+    }
+
     pub fn inc_ingress_queue_drop(&self) {
         self.metrics.inc_ingress_queue_drop();
     }
@@ -399,15 +403,17 @@ pub struct Metrics {
     pub health_failure_tls: AtomicU64,
     route_latency_sample_every: u64,
     route_latency_sample_counter: AtomicU64,
-    route_stats_shards: Vec<Mutex<HashMap<String, RouteStats>>>,
-    worker_stats_shards: Vec<Mutex<HashMap<String, WorkerStats>>>,
+    route_labels: Vec<String>,
+    route_label_to_id: HashMap<String, usize>,
+    route_stats: Vec<RouteStatsAtomic>,
+    unrouted_route_id: usize,
+    worker_labels: Vec<String>,
+    worker_stats: Vec<WorkerStatsAtomic>,
 }
 
 const LATENCY_BUCKETS_MS: [u64; 14] = [
     1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_000, 5_000, 10_000, 30_000, 60_000,
 ];
-const ROUTE_STATS_SHARDS: usize = 32;
-const WORKER_STATS_SHARDS: usize = 32;
 const ROUTE_LATENCY_SAMPLE_EVERY_ENV: &str = "SPOOKY_ROUTE_LATENCY_SAMPLE_EVERY";
 
 #[derive(Default, Clone)]
@@ -429,6 +435,80 @@ struct WorkerStats {
     ingress_packets_total: u64,
     ingress_queue_drops: u64,
     ingress_queue_drop_bytes: u64,
+}
+
+struct RouteStatsAtomic {
+    requests_total: AtomicU64,
+    success: AtomicU64,
+    failure: AtomicU64,
+    timeout: AtomicU64,
+    backend_error: AtomicU64,
+    overload_shed: AtomicU64,
+    latency_buckets: [AtomicU64; LATENCY_BUCKETS_MS.len() + 1],
+}
+
+impl RouteStatsAtomic {
+    fn new() -> Self {
+        Self {
+            requests_total: AtomicU64::new(0),
+            success: AtomicU64::new(0),
+            failure: AtomicU64::new(0),
+            timeout: AtomicU64::new(0),
+            backend_error: AtomicU64::new(0),
+            overload_shed: AtomicU64::new(0),
+            latency_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+
+    fn snapshot(&self) -> RouteStats {
+        let mut latency_buckets = [0u64; LATENCY_BUCKETS_MS.len() + 1];
+        for (idx, bucket) in self.latency_buckets.iter().enumerate() {
+            latency_buckets[idx] = bucket.load(Ordering::Relaxed);
+        }
+
+        RouteStats {
+            requests_total: self.requests_total.load(Ordering::Relaxed),
+            success: self.success.load(Ordering::Relaxed),
+            failure: self.failure.load(Ordering::Relaxed),
+            timeout: self.timeout.load(Ordering::Relaxed),
+            backend_error: self.backend_error.load(Ordering::Relaxed),
+            overload_shed: self.overload_shed.load(Ordering::Relaxed),
+            latency_buckets,
+        }
+    }
+}
+
+struct WorkerStatsAtomic {
+    requests_total: AtomicU64,
+    requests_success: AtomicU64,
+    requests_failure: AtomicU64,
+    ingress_packets_total: AtomicU64,
+    ingress_queue_drops: AtomicU64,
+    ingress_queue_drop_bytes: AtomicU64,
+}
+
+impl WorkerStatsAtomic {
+    fn new() -> Self {
+        Self {
+            requests_total: AtomicU64::new(0),
+            requests_success: AtomicU64::new(0),
+            requests_failure: AtomicU64::new(0),
+            ingress_packets_total: AtomicU64::new(0),
+            ingress_queue_drops: AtomicU64::new(0),
+            ingress_queue_drop_bytes: AtomicU64::new(0),
+        }
+    }
+
+    fn snapshot(&self) -> WorkerStats {
+        WorkerStats {
+            requests_total: self.requests_total.load(Ordering::Relaxed),
+            requests_success: self.requests_success.load(Ordering::Relaxed),
+            requests_failure: self.requests_failure.load(Ordering::Relaxed),
+            ingress_packets_total: self.ingress_packets_total.load(Ordering::Relaxed),
+            ingress_queue_drops: self.ingress_queue_drops.load(Ordering::Relaxed),
+            ingress_queue_drop_bytes: self.ingress_queue_drop_bytes.load(Ordering::Relaxed),
+        }
+    }
 }
 
 pub enum RouteOutcome {
@@ -467,20 +547,55 @@ pub use spooky_lb::HealthFailureReason;
 
 impl Default for Metrics {
     fn default() -> Self {
+        Self::new(1, [String::from("unrouted")])
+    }
+}
+
+thread_local! {
+    static WORKER_METRICS_SLOT: Cell<usize> = const { Cell::new(0) };
+}
+
+impl Metrics {
+    pub fn new<I>(worker_slots: usize, route_labels: I) -> Self
+    where
+        I: IntoIterator<Item = String>,
+    {
         let route_latency_sample_every = env::var(ROUTE_LATENCY_SAMPLE_EVERY_ENV)
             .ok()
             .and_then(|raw| raw.trim().parse::<u64>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(1);
 
-        let mut shards = Vec::with_capacity(ROUTE_STATS_SHARDS);
-        for _ in 0..ROUTE_STATS_SHARDS {
-            shards.push(Mutex::new(HashMap::new()));
+        let mut route_labels_dedup = Vec::new();
+        let mut route_label_to_id = HashMap::new();
+        for raw in route_labels {
+            let label = raw.trim();
+            if label.is_empty() || route_label_to_id.contains_key(label) {
+                continue;
+            }
+            let id = route_labels_dedup.len();
+            route_labels_dedup.push(label.to_string());
+            route_label_to_id.insert(label.to_string(), id);
         }
-        let mut worker_shards = Vec::with_capacity(WORKER_STATS_SHARDS);
-        for _ in 0..WORKER_STATS_SHARDS {
-            worker_shards.push(Mutex::new(HashMap::new()));
+        if !route_label_to_id.contains_key("unrouted") {
+            let id = route_labels_dedup.len();
+            route_labels_dedup.push("unrouted".to_string());
+            route_label_to_id.insert("unrouted".to_string(), id);
         }
+        let unrouted_route_id = route_label_to_id.get("unrouted").copied().unwrap_or(0);
+
+        let worker_slots = worker_slots.max(1);
+        let worker_labels = (0..worker_slots)
+            .map(|idx| format!("worker-{idx}"))
+            .collect::<Vec<_>>();
+        let worker_stats = (0..worker_slots)
+            .map(|_| WorkerStatsAtomic::new())
+            .collect::<Vec<_>>();
+        let route_stats = route_labels_dedup
+            .iter()
+            .map(|_| RouteStatsAtomic::new())
+            .collect::<Vec<_>>();
+
         Self {
             requests_total: AtomicU64::new(0),
             requests_success: AtomicU64::new(0),
@@ -547,13 +662,20 @@ impl Default for Metrics {
             health_failure_tls: AtomicU64::new(0),
             route_latency_sample_every,
             route_latency_sample_counter: AtomicU64::new(0),
-            route_stats_shards: shards,
-            worker_stats_shards: worker_shards,
+            route_labels: route_labels_dedup,
+            route_label_to_id,
+            route_stats,
+            unrouted_route_id,
+            worker_labels,
+            worker_stats,
         }
     }
-}
 
-impl Metrics {
+    pub fn bind_worker_slot(&self, slot: usize) {
+        let max_index = self.worker_stats.len().saturating_sub(1);
+        WORKER_METRICS_SLOT.with(|current| current.set(slot.min(max_index)));
+    }
+
     pub fn inc_total(&self) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
         self.inc_worker_requests_total();
@@ -735,56 +857,47 @@ impl Metrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
-    fn with_worker_stats_mut<F>(&self, mut update: F)
-    where
-        F: FnMut(&mut WorkerStats),
-    {
-        let worker = current_worker_label();
-        let shard_idx = worker_stats_shard(&worker);
-        let Some(shard) = self.worker_stats_shards.get(shard_idx) else {
-            return;
-        };
-        let Ok(mut guard) = shard.lock() else {
-            return;
-        };
-        let entry = guard.entry(worker).or_default();
-        update(entry);
+    fn current_worker_stats(&self) -> Option<&WorkerStatsAtomic> {
+        let idx = WORKER_METRICS_SLOT.with(|current| current.get());
+        self.worker_stats
+            .get(idx)
+            .or_else(|| self.worker_stats.first())
     }
 
     fn inc_worker_requests_total(&self) {
-        self.with_worker_stats_mut(|entry| {
-            entry.requests_total = entry.requests_total.saturating_add(1);
-        });
+        if let Some(stats) = self.current_worker_stats() {
+            stats.requests_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn inc_worker_requests_success(&self) {
-        self.with_worker_stats_mut(|entry| {
-            entry.requests_success = entry.requests_success.saturating_add(1);
-        });
+        if let Some(stats) = self.current_worker_stats() {
+            stats.requests_success.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn inc_worker_requests_failure(&self) {
-        self.with_worker_stats_mut(|entry| {
-            entry.requests_failure = entry.requests_failure.saturating_add(1);
-        });
+        if let Some(stats) = self.current_worker_stats() {
+            stats.requests_failure.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn inc_worker_ingress_packets_total(&self) {
-        self.with_worker_stats_mut(|entry| {
-            entry.ingress_packets_total = entry.ingress_packets_total.saturating_add(1);
-        });
+        if let Some(stats) = self.current_worker_stats() {
+            stats.ingress_packets_total.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn inc_worker_ingress_queue_drops(&self) {
-        self.with_worker_stats_mut(|entry| {
-            entry.ingress_queue_drops = entry.ingress_queue_drops.saturating_add(1);
-        });
+        if let Some(stats) = self.current_worker_stats() {
+            stats.ingress_queue_drops.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn inc_worker_ingress_queue_drop_bytes(&self, bytes: u64) {
-        self.with_worker_stats_mut(|entry| {
-            entry.ingress_queue_drop_bytes = entry.ingress_queue_drop_bytes.saturating_add(bytes);
-        });
+        if let Some(stats) = self.current_worker_stats() {
+            stats.ingress_queue_drop_bytes.fetch_add(bytes, Ordering::Relaxed);
+        }
     }
 
     pub fn try_reserve_request_buffer(&self, bytes: usize, cap_bytes: usize) -> bool {
@@ -928,38 +1041,31 @@ impl Metrics {
     }
 
     pub fn record_route(&self, route: &str, latency: Duration, outcome: RouteOutcome) {
-        let shard_idx = route_stats_shard(route);
-        let shard = match self.route_stats_shards.get(shard_idx) {
-            Some(shard) => shard,
-            None => return,
+        let route_id = self
+            .route_label_to_id
+            .get(route)
+            .copied()
+            .unwrap_or(self.unrouted_route_id);
+        let Some(entry) = self.route_stats.get(route_id) else {
+            return;
         };
-        let mut guard = match shard.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-
-        let entry = if let Some(entry) = guard.get_mut(route) {
-            entry
-        } else {
-            guard.entry(route.to_owned()).or_default()
-        };
-        entry.requests_total = entry.requests_total.saturating_add(1);
+        entry.requests_total.fetch_add(1, Ordering::Relaxed);
 
         match outcome {
             RouteOutcome::Success => {
-                entry.success = entry.success.saturating_add(1);
+                entry.success.fetch_add(1, Ordering::Relaxed);
             }
             RouteOutcome::Failure => {
-                entry.failure = entry.failure.saturating_add(1);
+                entry.failure.fetch_add(1, Ordering::Relaxed);
             }
             RouteOutcome::Timeout => {
-                entry.timeout = entry.timeout.saturating_add(1);
+                entry.timeout.fetch_add(1, Ordering::Relaxed);
             }
             RouteOutcome::BackendError => {
-                entry.backend_error = entry.backend_error.saturating_add(1);
+                entry.backend_error.fetch_add(1, Ordering::Relaxed);
             }
             RouteOutcome::OverloadShed => {
-                entry.overload_shed = entry.overload_shed.saturating_add(1);
+                entry.overload_shed.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -977,7 +1083,7 @@ impl Metrics {
             .iter()
             .position(|cutoff| latency_ms <= *cutoff)
             .unwrap_or(LATENCY_BUCKETS_MS.len());
-        entry.latency_buckets[bucket] = entry.latency_buckets[bucket].saturating_add(1);
+        entry.latency_buckets[bucket].fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn render_prometheus(&self) -> String {
@@ -1448,16 +1554,16 @@ impl Metrics {
             self.route_latency_sample_every
         ));
 
-        let mut snapshot: Vec<(String, RouteStats)> = Vec::new();
-        for shard in &self.route_stats_shards {
-            if let Ok(route_stats) = shard.lock() {
-                snapshot.extend(
-                    route_stats
-                        .iter()
-                        .map(|(route, stats)| (route.clone(), stats.clone())),
-                );
-            }
-        }
+        let mut snapshot: Vec<(String, RouteStats)> = self
+            .route_labels
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, route)| {
+                self.route_stats
+                    .get(idx)
+                    .map(|stats| (route.clone(), stats.snapshot()))
+            })
+            .collect();
         snapshot.sort_by(|(left, _), (right, _)| left.cmp(right));
 
         for (route, stats) in snapshot {
@@ -1503,16 +1609,16 @@ impl Metrics {
             ));
         }
 
-        let mut worker_snapshot: Vec<(String, WorkerStats)> = Vec::new();
-        for shard in &self.worker_stats_shards {
-            if let Ok(worker_stats) = shard.lock() {
-                worker_snapshot.extend(
-                    worker_stats
-                        .iter()
-                        .map(|(worker, stats)| (worker.clone(), stats.clone())),
-                );
-            }
-        }
+        let mut worker_snapshot: Vec<(String, WorkerStats)> = self
+            .worker_labels
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, worker)| {
+                self.worker_stats
+                    .get(idx)
+                    .map(|stats| (worker.clone(), stats.snapshot()))
+            })
+            .collect();
         worker_snapshot.sort_by(|(left, _), (right, _)| left.cmp(right));
 
         out.push_str(
@@ -1570,21 +1676,6 @@ impl Metrics {
 
         out
     }
-}
-
-fn route_stats_shard(route: &str) -> usize {
-    (stable_hash64(route.as_bytes()) as usize) % ROUTE_STATS_SHARDS
-}
-
-fn worker_stats_shard(worker: &str) -> usize {
-    (stable_hash64(worker.as_bytes()) as usize) % WORKER_STATS_SHARDS
-}
-
-fn current_worker_label() -> String {
-    thread::current()
-        .name()
-        .map(|name| name.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn percentile_ms(stats: &RouteStats, quantile: f64) -> f64 {

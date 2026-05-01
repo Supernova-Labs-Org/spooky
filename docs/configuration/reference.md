@@ -290,7 +290,7 @@ Each backend represents an upstream server that can handle requests.
 **Address format notes:**
 - `host:port` or `host` — shorthand, treated as `https://host:port` (port defaults to `443`)
 - `https://host[:port]` — TLS upstream; port defaults to `443` if omitted
-- `http://host[:port]` — cleartext upstream (plain HTTP); port defaults to `80` if omitted
+- `http://host[:port]` — cleartext upstream over h2c; port defaults to `80` if omitted. HTTP/1.1 upstream is not yet supported.
 
 #### Health Check Configuration
 

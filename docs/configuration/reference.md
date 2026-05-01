@@ -283,14 +283,14 @@ Each backend represents an upstream server that can handle requests.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `id` | string | Yes | - | Unique identifier for the backend |
-| `address` | string | Yes | - | Backend server address. Accepted forms: `host:port` (defaults to `https://`), `https://host:port`, `http://host:port` |
+| `address` | string | Yes | - | Backend server address. Accepted forms: `host:port`, `host` (defaults to `https://host:443`), `https://host[:port]`, `http://host[:port]` |
 | `weight` | integer | No | `100` | Load balancing weight (higher values receive more traffic) |
-| `health_check` | object | Yes | - | Health check configuration |
+| `health_check` | object | No | - | Health check configuration. Omit to disable active health polling — backend starts and stays healthy. |
 
 **Address format notes:**
-- `host:port` — shorthand, treated as `https://host:port`
-- `https://host:port` — TLS connection with certificate verification enabled by default (`upstream_tls.verify_certificates=true`)
-- `http://host:port` — plain HTTP/1.1 only; HTTP/2 over cleartext (h2c) is not supported
+- `host:port` or `host` — shorthand, treated as `https://host:port` (port defaults to `443`)
+- `https://host[:port]` — TLS upstream; port defaults to `443` if omitted
+- `http://host[:port]` — cleartext upstream (plain HTTP); port defaults to `80` if omitted
 
 #### Health Check Configuration
 
@@ -316,7 +316,12 @@ Health check behavior:
 #### Backend Examples
 
 ```yaml
-# Minimal backend configuration
+# Minimal backend — no health check (backend stays permanently healthy)
+backends:
+  - id: "backend1"
+    address: "https://example.com"
+
+# Minimal backend with health check
 backends:
   - id: "backend1"
     address: "10.0.1.10:8080"

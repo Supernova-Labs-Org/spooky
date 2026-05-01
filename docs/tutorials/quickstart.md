@@ -49,7 +49,7 @@ You need an HTTP/2 backend for Spooky to forward traffic to. If you don't have o
 cargo run --bin h2_backend -- --port 8080
 ```
 
-This starts an HTTP/2-only server on `127.0.0.1:8080`. Spooky requires HTTP/2 backends - HTTP/1.1 backends are not supported.
+This starts an HTTP/2 test server on `127.0.0.1:8080`. For plain HTTP/1.1 backends (Vite, Express, nginx without h2), use `http://host:port` as the backend address instead.
 
 ## Step 4: Create Configuration File
 
@@ -76,22 +76,17 @@ upstream:
       - id: "local-backend"
         address: "127.0.0.1:8080"
         weight: 100
-        health_check:
-          path: "/"
-          interval: 5000
-          timeout_ms: 2000
-          success_threshold: 2
-          failure_threshold: 3
+        # health_check is optional — omit to disable active health polling
 
 log:
   level: info
 ```
 
 This configuration:
-- Listens for HTTP/3 connections on UDP port 9889
+- Listens for HTTP/3 (QUIC) on UDP port 9889 and HTTP/1.1+HTTP/2 (TLS) on TCP port 9889
 - Uses the generated self-signed certificates
 - Forwards all requests to `127.0.0.1:8080` using random load balancing
-- Performs health checks every 5 seconds on the backend
+- Advertises `Alt-Svc` on every response so browsers upgrade to HTTP/3 automatically
 
 ## Step 5: Start Spooky
 
@@ -143,7 +138,7 @@ Verify HTTP/3 connectivity by forcing HTTP/3-only requests:
 curl -k --http3-only https://localhost:9889/
 ```
 
-If successful, you should receive a response from your backend. HTTP/3 connectivity is confirmed when the request succeeds (Spooky doesn't advertise Alt-Svc headers).
+If successful, you should receive a response from your backend. Spooky advertises `Alt-Svc: h3=":PORT"; ma=86400` on every response, so browsers automatically upgrade to HTTP/3 on subsequent visits. HTTP/3 connectivity is confirmed when the response contains the `alt-svc` header or when you force `--http3-only` and the request succeeds.
 
 ### Using a Custom HTTP/3 Client
 

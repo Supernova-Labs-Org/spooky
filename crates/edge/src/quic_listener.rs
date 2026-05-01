@@ -111,6 +111,10 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
+type BootstrapServiceFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, hyper::Error>> + Send>,
+>;
+
 type ResolvedBackend = (
     String,
     String,
@@ -4451,7 +4455,7 @@ impl QUICListener {
                     let io = TokioIo::new(tls_stream);
                     let alt_svc_conn = alt_svc.clone();
 
-                    let svc = service_fn(move |req: Request<Incoming>| -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response<Full<Bytes>>, hyper::Error>> + Send>> {
+                    let svc = service_fn(move |req: Request<Incoming>| -> BootstrapServiceFuture {
                         let alt = alt_svc_conn.clone();
                         let h2_pool = Arc::clone(&h2_pool);
                         let backend_endpoints = Arc::clone(&backend_endpoints);
@@ -4659,12 +4663,10 @@ impl QUICListener {
                         {
                             debug!("Bootstrap h2 connection from {} closed: {}", peer, err);
                         }
-                    } else {
-                        if let Err(err) =
-                            http1::Builder::new().serve_connection(io, svc).await
-                        {
-                            debug!("Bootstrap h1 connection from {} closed: {}", peer, err);
-                        }
+                    } else if let Err(err) =
+                        http1::Builder::new().serve_connection(io, svc).await
+                    {
+                        debug!("Bootstrap h1 connection from {} closed: {}", peer, err);
                     }
                 });
             }

@@ -1,5 +1,7 @@
 # Spooky Documentation
 
+Spooky lets HAProxy, NGINX, and Apache environments adopt QUIC/HTTP/3 in days instead of quarters.
+
 Technical documentation for the Spooky HTTP/3 edge proxy and load balancer.
 
 ## Quick Navigation

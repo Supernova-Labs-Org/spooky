@@ -7,21 +7,24 @@ listen:
   tls:
     cert: certs/proxy-fullchain.pem
     key: certs/proxy-key-pkcs8.pem
+    client_auth:
+        enabled: false
+        require_client_cert: false
+        ca_file: null
 
 upstream:
   default:
     route:
       path_prefix: "/"
     backends:
-      - id: "backend1"
-        address: "http://127.0.0.1:8080" # local/dev-only cleartext upstream
-        health_check:
-          path: "/health"
-          interval: 5000
+      - id: "frontend1"
+        address: "https://127.0.0.1:443" # local/dev-only cleartext upstream
+        # health_check is optional — omit it to disable active health checks
 
 upstream_tls:
-  verify_certificates: false # development-only: do not copy into production
-  strict_sni: false
+    verify_certificates: false
+    strict_sni: false
+    ca_file: certs/ca-cert.pem
 
 performance:
   worker_threads: 1

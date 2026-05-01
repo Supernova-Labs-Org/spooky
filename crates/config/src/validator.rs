@@ -972,47 +972,47 @@ pub fn validate(config: &Config) -> bool {
                 return false;
             }
 
-            // Validate health check
-            let hc = &backend.health_check;
+            // Validate health check (optional — omitting it disables active health checks)
+            if let Some(hc) = &backend.health_check {
+                if hc.interval == 0 {
+                    error!(
+                        "Health check interval is invalid (0) for backend '{}' in upstream '{}'",
+                        backend.id, upstream_name
+                    );
+                    return false;
+                }
 
-            if hc.interval == 0 {
-                error!(
-                    "Health check interval is invalid (0) for backend '{}' in upstream '{}'",
-                    backend.id, upstream_name
-                );
-                return false;
-            }
+                if hc.timeout_ms == 0 {
+                    error!(
+                        "Health check timeout is invalid (0) for backend '{}' in upstream '{}'",
+                        backend.id, upstream_name
+                    );
+                    return false;
+                }
 
-            if hc.timeout_ms == 0 {
-                error!(
-                    "Health check timeout is invalid (0) for backend '{}' in upstream '{}'",
-                    backend.id, upstream_name
-                );
-                return false;
-            }
+                if hc.failure_threshold == 0 {
+                    error!(
+                        "Health check failure threshold is invalid (0) for backend '{}' in upstream '{}'",
+                        backend.id, upstream_name
+                    );
+                    return false;
+                }
 
-            if hc.failure_threshold == 0 {
-                error!(
-                    "Health check failure threshold is invalid (0) for backend '{}' in upstream '{}'",
-                    backend.id, upstream_name
-                );
-                return false;
-            }
+                if hc.success_threshold == 0 {
+                    error!(
+                        "Health check success threshold is invalid (0) for backend '{}' in upstream '{}'",
+                        backend.id, upstream_name
+                    );
+                    return false;
+                }
 
-            if hc.success_threshold == 0 {
-                error!(
-                    "Health check success threshold is invalid (0) for backend '{}' in upstream '{}'",
-                    backend.id, upstream_name
-                );
-                return false;
-            }
-
-            if hc.cooldown_ms == 0 {
-                error!(
-                    "Health check cooldown is invalid (0) for backend '{}' in upstream '{}'",
-                    backend.id, upstream_name
-                );
-                return false;
+                if hc.cooldown_ms == 0 {
+                    error!(
+                        "Health check cooldown is invalid (0) for backend '{}' in upstream '{}'",
+                        backend.id, upstream_name
+                    );
+                    return false;
+                }
             }
         }
     }
@@ -1068,14 +1068,14 @@ mod tests {
                     id: "backend-1".to_string(),
                     address: "127.0.0.1:8080".to_string(),
                     weight: 1,
-                    health_check: HealthCheck {
+                    health_check: Some(HealthCheck {
                         path: "/health".to_string(),
                         interval: 1000,
                         timeout_ms: 1000,
                         failure_threshold: 3,
                         success_threshold: 1,
                         cooldown_ms: 1000,
-                    },
+                    }),
                 }],
             },
         );

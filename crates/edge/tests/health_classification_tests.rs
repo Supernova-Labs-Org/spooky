@@ -9,14 +9,14 @@ fn create_test_backend_pool() -> BackendPool {
         id: "bk-1".to_string(),
         address: "127.0.0.1:8001".to_string(),
         weight: 1,
-        health_check: HealthCheck {
+        health_check: Some(HealthCheck {
             path: "/health".to_string(),
             interval: 1000,
             timeout_ms: 5000,
             failure_threshold: 3,
             success_threshold: 2,
             cooldown_ms: 10000,
-        },
+        }),
     }];
     let backend_states = backends.iter().map(spooky_lb::BackendState::new).collect();
     BackendPool::new_from_states(backend_states)

@@ -286,27 +286,27 @@ fn round_robin_across_backends() {
             id: "a".to_string(),
             address: backend_a.to_string(),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 1000,
                 failure_threshold: 3,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         },
         Backend {
             id: "b".to_string(),
             address: backend_b.to_string(),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 1000,
                 failure_threshold: 3,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         },
     ];
 
@@ -356,27 +356,27 @@ fn consistent_hash_is_stable_per_authority() {
             id: "a".to_string(),
             address: backend_a.to_string(),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 1000,
                 failure_threshold: 3,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         },
         Backend {
             id: "b".to_string(),
             address: backend_b.to_string(),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 1000,
                 failure_threshold: 3,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         },
     ];
 

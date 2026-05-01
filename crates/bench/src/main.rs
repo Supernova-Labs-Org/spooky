@@ -720,14 +720,14 @@ fn build_lb_upstream(scale: usize, lb_type: &str) -> Upstream {
             id: format!("backend-{idx:05}"),
             address: format!("127.0.0.1:{}", 10_000 + (idx % 50_000)),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 5_000,
                 timeout_ms: 1_000,
                 failure_threshold: 3,
                 success_threshold: 2,
                 cooldown_ms: 5_000,
-            },
+            }),
         })
         .collect();
 

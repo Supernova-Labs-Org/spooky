@@ -39,7 +39,7 @@ fn build_benchmark_upstream(host: Option<String>, path_prefix: String) -> Upstre
             id: "placeholder".to_string(),
             address: "127.0.0.1:1".to_string(),
             weight: 1,
-            health_check: default_health_check(),
+            health_check: Some(default_health_check()),
         }],
     }
 }

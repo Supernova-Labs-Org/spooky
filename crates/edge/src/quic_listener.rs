@@ -11,7 +11,7 @@ use std::{
 
 use core::net::SocketAddr;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
@@ -844,6 +844,7 @@ impl QUICListener {
 
         Ok(Self {
             socket,
+            local_addr,
             config,
             quic_config,
             h3_config,
@@ -1107,24 +1108,16 @@ impl QUICListener {
         &mut self,
         peer: SocketAddr,
         local_addr: SocketAddr,
-        packets: &[u8],
+        packet_type: quiche::Type,
+        dcid: &[u8],
+        has_token: bool,
     ) -> Option<(QuicConnection, Arc<[u8]>)> {
-        let mut buf = packets.to_vec();
-        let header = match quiche::Header::from_slice(&mut buf, quiche::MAX_CONN_ID_LEN) {
-            Ok(hdr) => hdr,
-            Err(_) => {
-                error!("Failed to parse QUIC packet header");
-                self.metrics.inc_ingress_bad_header();
-                return None;
-            }
-        };
-
-        let dcid_bytes: Arc<[u8]> = Arc::from(header.dcid.as_ref());
+        let dcid_bytes: Arc<[u8]> = Arc::from(dcid);
         debug!(
             "Packet DCID (len={}): {:02x?}, type: {:?}, active connections: {}",
             dcid_bytes.len(),
             &dcid_bytes,
-            header.ty,
+            packet_type,
             self.connections.len()
         );
 
@@ -1138,7 +1131,7 @@ impl QUICListener {
 
         // For Short packets, try prefix match (client may append bytes to our SCID)
         // This handles cases where client uses longer DCIDs based on server's SCID
-        if header.ty == quiche::Type::Short
+        if packet_type == quiche::Type::Short
             && dcid_bytes.len() > MIN_SCID_LEN_BYTES
             && let Some(primary_cid) = resolve_primary_from_radix_prefix(
                 &dcid_bytes,
@@ -1164,14 +1157,14 @@ impl QUICListener {
         }
 
         // Only create new connections for Initial packets
-        if header.ty != quiche::Type::Initial {
+        if packet_type != quiche::Type::Initial {
             debug!("Non-Initial packet for unknown connection, ignoring");
             self.metrics.inc_ingress_unroutable();
             return None;
         }
 
         // If this is a 0-RTT packet without a valid token, we need to reject it
-        if header.token.is_some() {
+        if has_token {
             debug!("Received 0-RTT attempt, will negotiate fresh connection");
             // return None;
         }
@@ -1397,14 +1390,7 @@ impl QUICListener {
         };
 
         debug!("Received UDP datagram ({} bytes)", len);
-
-        let local_addr = match self.socket.local_addr() {
-            Ok(addr) => addr,
-            Err(_) => return,
-        };
-
-        let packet = self.recv_buf[..len].to_vec();
-        self.process_datagram_inner(peer, local_addr, &packet);
+        self.process_datagram_inner(peer, self.local_addr, &mut self.recv_buf[..len]);
     }
 
     pub fn poll_idle(&mut self) {
@@ -1414,18 +1400,27 @@ impl QUICListener {
         self.handle_timeouts();
     }
 
-    pub fn process_datagram(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+    pub fn process_datagram(
+        &mut self,
+        peer: SocketAddr,
+        local_addr: SocketAddr,
+        packet: &mut [u8],
+    ) {
         if !self.poll_preamble() {
             return;
         }
         self.process_datagram_inner(peer, local_addr, packet);
     }
 
-    fn process_datagram_inner(&mut self, peer: SocketAddr, local_addr: SocketAddr, packet: &[u8]) {
+    fn process_datagram_inner(
+        &mut self,
+        peer: SocketAddr,
+        local_addr: SocketAddr,
+        packet: &mut [u8],
+    ) {
         self.metrics.inc_ingress_packet();
 
-        let mut recv_data = BytesMut::from(packet);
-        let header = match quiche::Header::from_slice(&mut recv_data, quiche::MAX_CONN_ID_LEN) {
+        let header = match quiche::Header::from_slice(packet, quiche::MAX_CONN_ID_LEN) {
             Ok(hdr) => hdr,
             Err(_) => {
                 error!("Failed to parse QUIC packet header");
@@ -1433,8 +1428,11 @@ impl QUICListener {
                 return;
             }
         };
+        let packet_type = header.ty;
+        let header_has_token = header.token.is_some();
+        let lookup_key: Arc<[u8]> = Arc::from(header.dcid.as_ref());
 
-        if header.ty == quiche::Type::VersionNegotiation {
+        if packet_type == quiche::Type::VersionNegotiation {
             let len =
                 match quiche::negotiate_version(&header.scid, &header.dcid, &mut self.send_buf) {
                     Ok(len) => len,
@@ -1454,7 +1452,6 @@ impl QUICListener {
         let h2_pool = self.h2_pool.clone();
 
         // First, try to find existing connection by DCID
-        let lookup_key: Arc<[u8]> = Arc::from(header.dcid.as_ref());
         debug!(
             "Looking up connection with DCID: {:?}",
             hex::encode(&lookup_key)
@@ -1478,7 +1475,13 @@ impl QUICListener {
                 } else {
                     // Stale alias entry.
                     self.cid_routes.remove(lookup_key.as_ref());
-                    match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                    match self.take_or_create_connection(
+                        peer,
+                        local_addr,
+                        packet_type,
+                        lookup_key.as_ref(),
+                        header_has_token,
+                    ) {
                         Some(conn) => {
                             debug!("Created new connection for {}", peer);
                             conn
@@ -1506,7 +1509,13 @@ impl QUICListener {
                 } else {
                     // Stale peer map entry.
                     self.peer_routes.remove(&peer);
-                    match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                    match self.take_or_create_connection(
+                        peer,
+                        local_addr,
+                        packet_type,
+                        lookup_key.as_ref(),
+                        header_has_token,
+                    ) {
                         Some(conn_pair) => {
                             debug!("Created new connection for {}", peer);
                             conn_pair
@@ -1523,7 +1532,13 @@ impl QUICListener {
                 }
             } else {
                 // No existing connection found, try to create new one.
-                match self.take_or_create_connection(peer, local_addr, &recv_data) {
+                match self.take_or_create_connection(
+                    peer,
+                    local_addr,
+                    packet_type,
+                    lookup_key.as_ref(),
+                    header_has_token,
+                ) {
                     Some(conn_pair) => {
                         debug!("Created new connection for {}", peer);
                         conn_pair
@@ -1544,7 +1559,7 @@ impl QUICListener {
             to: local_addr,
         };
 
-        if let Err(e) = connection.quic.recv(&mut recv_data, recv_info) {
+        if let Err(e) = connection.quic.recv(packet, recv_info) {
             error!("QUIC recv failed: {:?}", e);
             Self::release_connection_streams(&mut connection, &self.metrics);
             self.remove_connection_routes(&connection);

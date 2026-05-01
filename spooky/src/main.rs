@@ -355,12 +355,12 @@ fn run_sharded_listener_worker(
                 let idle_timeout = Duration::from_millis(10);
                 while !shard_shutdown.load(Ordering::Relaxed) {
                     match rx.recv_timeout(idle_timeout) {
-                        Ok(packet) => {
+                        Ok(mut packet) => {
                             let packet_bytes = packet.bytes.len();
                             listener.process_datagram(
                                 packet.peer,
                                 packet.local_addr,
-                                &packet.bytes,
+                                &mut packet.bytes,
                             );
                             release_shard_queue_bytes(
                                 shard_queue_bytes_counter.as_ref(),

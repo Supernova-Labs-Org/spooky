@@ -150,6 +150,7 @@ impl SharedRuntimeState {
 
 pub struct QUICListener {
     pub socket: UdpSocket,
+    pub local_addr: SocketAddr,
     pub config: Config,
     pub quic_config: quiche::Config,
     pub h3_config: Arc<quiche::h3::Config>,

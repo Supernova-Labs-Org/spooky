@@ -184,8 +184,10 @@ Use a port >= 1024 for unprivileged startup.",
     info!("Spooky is starting");
     info!(
         "Ingress: HTTP/3 (QUIC) on UDP {}:{}, HTTP/1.1+HTTP/2 bootstrap (TLS) on TCP {}:{} with Alt-Svc upgrade",
-        config_yaml.listen.address, config_yaml.listen.port,
-        config_yaml.listen.address, config_yaml.listen.port,
+        config_yaml.listen.address,
+        config_yaml.listen.port,
+        config_yaml.listen.address,
+        config_yaml.listen.port,
     );
     info!(
         "Data-plane workers={} packet_shards_per_worker={} reuseport={} pin_workers={}",

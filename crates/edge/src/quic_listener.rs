@@ -19,12 +19,11 @@ use hyper::server::conn::http1;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
-use rustls::ServerConfig as RustlsServerConfig;
-use tokio_rustls::TlsAcceptor;
 use log::{debug, error, info, warn};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
+use rustls::ServerConfig as RustlsServerConfig;
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request_for_endpoint};
@@ -38,6 +37,7 @@ use tokio::sync::{
     mpsc::error::{TryRecvError, TrySendError},
     oneshot,
 };
+use tokio_rustls::TlsAcceptor;
 use tracing::{Instrument, info_span};
 
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
@@ -112,7 +112,14 @@ fn is_hop_header(name: &str) -> bool {
 }
 
 type BootstrapServiceFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<hyper::Response<http_body_util::Full<hyper::body::Bytes>>, hyper::Error>> + Send>,
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    hyper::Response<http_body_util::Full<hyper::body::Bytes>>,
+                    hyper::Error,
+                >,
+            > + Send,
+    >,
 >;
 
 type ResolvedBackend = (
@@ -4309,9 +4316,7 @@ impl QUICListener {
         let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
             certs(&mut BufReader::new(cert_bytes.as_slice()))
                 .collect::<Result<_, _>>()
-                .map_err(|err| {
-                    ProxyError::Tls(format!("failed to parse TLS cert PEM: {}", err))
-                })?;
+                .map_err(|err| ProxyError::Tls(format!("failed to parse TLS cert PEM: {}", err)))?;
 
         let key = {
             let mut reader = BufReader::new(key_bytes.as_slice());
@@ -4342,7 +4347,9 @@ impl QUICListener {
         let mut tls_config = RustlsServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
-            .map_err(|err| ProxyError::Tls(format!("failed to build rustls ServerConfig: {}", err)))?;
+            .map_err(|err| {
+                ProxyError::Tls(format!("failed to build rustls ServerConfig: {}", err))
+            })?;
 
         tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
@@ -4437,19 +4444,12 @@ impl QUICListener {
                     let tls_stream = match acceptor.accept(stream).await {
                         Ok(s) => s,
                         Err(err) => {
-                            debug!(
-                                "Bootstrap TLS handshake failed from {}: {}",
-                                peer, err
-                            );
+                            debug!("Bootstrap TLS handshake failed from {}: {}", peer, err);
                             return;
                         }
                     };
 
-                    let negotiated = tls_stream
-                        .get_ref()
-                        .1
-                        .alpn_protocol()
-                        .map(|p| p.to_vec());
+                    let negotiated = tls_stream.get_ref().1.alpn_protocol().map(|p| p.to_vec());
                     let use_h2 = negotiated.as_deref() == Some(b"h2");
 
                     let io = TokioIo::new(tls_stream);
@@ -4464,10 +4464,14 @@ impl QUICListener {
 
                         Box::pin(async move {
                             let _method = req.method().to_string();
-                            let path = req.uri().path_and_query()
+                            let path = req
+                                .uri()
+                                .path_and_query()
                                 .map(|pq| pq.as_str().to_owned())
                                 .unwrap_or_else(|| "/".to_string());
-                            let authority = req.uri().authority()
+                            let authority = req
+                                .uri()
+                                .authority()
                                 .map(|a| a.as_str().to_owned())
                                 .or_else(|| {
                                     req.headers()
@@ -4477,8 +4481,7 @@ impl QUICListener {
                                 });
 
                             // Route lookup
-                            let upstream_name = routing_index
-                                .lookup(&path, authority.as_deref());
+                            let upstream_name = routing_index.lookup(&path, authority.as_deref());
                             let upstream_name = match upstream_name {
                                 Some(name) => name.to_string(),
                                 None => {
@@ -4486,7 +4489,9 @@ impl QUICListener {
                                         .status(StatusCode::BAD_GATEWAY)
                                         .header("alt-svc", &alt)
                                         .body(Full::new(Bytes::from_static(b"no route\n")))
-                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
                                 }
                             };
 
@@ -4499,7 +4504,11 @@ impl QUICListener {
                                             .status(StatusCode::BAD_GATEWAY)
                                             .header("alt-svc", &alt)
                                             .body(Full::new(Bytes::from_static(b"no pool\n")))
-                                            .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
                                     }
                                 };
                                 let pool = match pool_lock.read() {
@@ -4509,7 +4518,11 @@ impl QUICListener {
                                             .status(StatusCode::BAD_GATEWAY)
                                             .header("alt-svc", &alt)
                                             .body(Full::new(Bytes::from_static(b"pool error\n")))
-                                            .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
                                     }
                                 };
                                 match pool.pool.address(0).map(str::to_owned) {
@@ -4519,7 +4532,11 @@ impl QUICListener {
                                             .status(StatusCode::SERVICE_UNAVAILABLE)
                                             .header("alt-svc", &alt)
                                             .body(Full::new(Bytes::from_static(b"no backends\n")))
-                                            .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
                                     }
                                 }
                             };
@@ -4531,22 +4548,29 @@ impl QUICListener {
                                         .status(StatusCode::BAD_GATEWAY)
                                         .header("alt-svc", &alt)
                                         .body(Full::new(Bytes::from_static(b"no endpoint\n")))
-                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
                                 }
                             };
 
                             // Build upstream request
                             let request_path = if path.is_empty() { "/" } else { &path };
-                            let upstream_uri = match http::Uri::try_from(endpoint.uri_for_path(request_path)) {
-                                Ok(u) => u,
-                                Err(_) => {
-                                    return Ok(Response::builder()
-                                        .status(StatusCode::BAD_GATEWAY)
-                                        .header("alt-svc", &alt)
-                                        .body(Full::new(Bytes::from_static(b"bad uri\n")))
-                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
-                                }
-                            };
+                            let upstream_uri =
+                                match http::Uri::try_from(endpoint.uri_for_path(request_path)) {
+                                    Ok(u) => u,
+                                    Err(_) => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::BAD_GATEWAY)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(b"bad uri\n")))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
+                                    }
+                                };
 
                             let mut upstream_req = Request::builder()
                                 .method(req.method().clone())
@@ -4571,10 +4595,8 @@ impl QUICListener {
                                 http::header::HOST,
                                 authority.as_deref().unwrap_or(endpoint.authority()),
                             );
-                            upstream_req = upstream_req.header(
-                                "forwarded",
-                                format!("for={};proto=https", peer.ip()),
-                            );
+                            upstream_req = upstream_req
+                                .header("forwarded", format!("for={};proto=https", peer.ip()));
 
                             let body_bytes = match req.into_body().collect().await {
                                 Ok(collected) => collected.to_bytes(),
@@ -4582,7 +4604,9 @@ impl QUICListener {
                             };
 
                             // Build a template request (no body) then clone per retry attempt
-                            let template = upstream_req.body(()).expect("builder cannot fail with unit body");
+                            let template = upstream_req
+                                .body(())
+                                .expect("builder cannot fail with unit body");
                             let (parts, _) = template.into_parts();
                             let parts = Arc::new(parts);
 
@@ -4601,7 +4625,9 @@ impl QUICListener {
                                 match tokio::time::timeout(
                                     backend_timeout,
                                     h2_pool.send(&backend_addr, retry_req),
-                                ).await {
+                                )
+                                .await
+                                {
                                     Ok(Ok(resp)) => {
                                         upstream_resp_opt = Some(resp);
                                         break;
@@ -4613,20 +4639,31 @@ impl QUICListener {
                                         return Ok(Response::builder()
                                             .status(StatusCode::GATEWAY_TIMEOUT)
                                             .header("alt-svc", &alt)
-                                            .body(Full::new(Bytes::from_static(b"upstream timeout\n")))
-                                            .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                            .body(Full::new(Bytes::from_static(
+                                                b"upstream timeout\n",
+                                            )))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
                                     }
                                 }
                             }
                             let upstream_resp = match upstream_resp_opt {
                                 Some(r) => r,
                                 None => {
-                                    warn!("Bootstrap proxy upstream error after retries: {}", last_err);
+                                    warn!(
+                                        "Bootstrap proxy upstream error after retries: {}",
+                                        last_err
+                                    );
                                     return Ok(Response::builder()
                                         .status(StatusCode::BAD_GATEWAY)
                                         .header("alt-svc", &alt)
                                         .body(Full::new(Bytes::from_static(b"upstream error\n")))
-                                        .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"error\n")))));
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
                                 }
                             };
 
@@ -4658,14 +4695,13 @@ impl QUICListener {
 
                     if use_h2 {
                         let executor = hyper_util::rt::TokioExecutor::new();
-                        if let Err(err) =
-                            http2::Builder::new(executor).serve_connection(io, svc).await
+                        if let Err(err) = http2::Builder::new(executor)
+                            .serve_connection(io, svc)
+                            .await
                         {
                             debug!("Bootstrap h2 connection from {} closed: {}", peer, err);
                         }
-                    } else if let Err(err) =
-                        http1::Builder::new().serve_connection(io, svc).await
-                    {
+                    } else if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
                         debug!("Bootstrap h1 connection from {} closed: {}", peer, err);
                     }
                 });

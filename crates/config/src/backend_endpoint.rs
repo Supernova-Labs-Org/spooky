@@ -55,10 +55,7 @@ impl BackendEndpoint {
 
         validate_authority(&authority)?;
 
-        Ok(Self {
-            scheme,
-            authority,
-        })
+        Ok(Self { scheme, authority })
     }
 
     pub fn scheme(&self) -> BackendScheme {

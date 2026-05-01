@@ -113,7 +113,10 @@ impl BackendState {
                 }
 
                 *successes += 1;
-                let success_threshold = self.health_check.as_ref().map_or(1, |hc| hc.success_threshold);
+                let success_threshold = self
+                    .health_check
+                    .as_ref()
+                    .map_or(1, |hc| hc.success_threshold);
                 if *successes >= success_threshold {
                     self.consecutive_failures = 0;
                     self.health_state = HealthState::Healthy;
@@ -126,13 +129,20 @@ impl BackendState {
 
     pub fn record_failure(&mut self, reason: HealthFailureReason) -> Option<HealthTransition> {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        let threshold = self.health_check.as_ref().map_or(3, |hc| hc.failure_threshold);
+        let threshold = self
+            .health_check
+            .as_ref()
+            .map_or(3, |hc| hc.failure_threshold);
         if self.consecutive_failures < threshold {
             return None;
         }
 
         self.consecutive_failures = 0;
-        let cooldown = Duration::from_millis(self.health_check.as_ref().map_or(10_000, |hc| hc.cooldown_ms));
+        let cooldown = Duration::from_millis(
+            self.health_check
+                .as_ref()
+                .map_or(10_000, |hc| hc.cooldown_ms),
+        );
         self.health_state = HealthState::Unhealthy {
             until: Instant::now() + cooldown,
             successes: 0,
@@ -300,7 +310,9 @@ impl BackendPool {
     }
 
     pub fn health_check(&self, index: usize) -> Option<HealthCheck> {
-        self.backends.get(index).and_then(|b| b.health_check().cloned())
+        self.backends
+            .get(index)
+            .and_then(|b| b.health_check().cloned())
     }
 
     pub fn healthy_indices(&self) -> Vec<usize> {

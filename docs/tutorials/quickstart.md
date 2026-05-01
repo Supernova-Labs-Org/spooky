@@ -49,7 +49,7 @@ You need an HTTP/2 backend for Spooky to forward traffic to. If you don't have o
 cargo run --bin h2_backend -- --port 8080
 ```
 
-This starts an HTTP/2 test server on `127.0.0.1:8080`. For plain HTTP/1.1 backends (Vite, Express, nginx without h2), use `http://host:port` as the backend address instead.
+This starts an HTTP/2 test server on `127.0.0.1:8080`. Spooky currently requires HTTP/2 backends — plain HTTP/1.1 upstream support is not yet implemented.
 
 ## Step 4: Create Configuration File
 

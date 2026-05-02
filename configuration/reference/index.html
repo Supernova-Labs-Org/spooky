@@ -1398,7 +1398,7 @@ upstream:
 <td>string</td>
 <td>Yes</td>
 <td>-</td>
-<td>Backend server address. Accepted forms: <code>host:port</code> (defaults to <code>https://</code>), <code>https://host:port</code>, <code>http://host:port</code></td>
+<td>Backend server address. Accepted forms: <code>host:port</code>, <code>host</code> (defaults to <code>https://host:443</code>), <code>https://host[:port]</code>, <code>http://host[:port]</code></td>
 </tr>
 <tr>
 <td><code>weight</code></td>
@@ -1410,16 +1410,16 @@ upstream:
 <tr>
 <td><code>health_check</code></td>
 <td>object</td>
-<td>Yes</td>
+<td>No</td>
 <td>-</td>
-<td>Health check configuration</td>
+<td>Health check configuration. Omit to disable active health polling — backend starts and stays healthy.</td>
 </tr>
 </tbody>
 </table></div>
 <p><strong>Address format notes:</strong>
-- <code>host:port</code> — shorthand, treated as <code>https://host:port</code>
-- <code>https://host:port</code> — TLS connection with certificate verification enabled by default (<code>upstream_tls.verify_certificates=true</code>)
-- <code>http://host:port</code> — plain HTTP/1.1 only; HTTP/2 over cleartext (h2c) is not supported</p>
+- <code>host:port</code> or <code>host</code> — shorthand, treated as <code>https://host:port</code> (port defaults to <code>443</code>)
+- <code>https://host[:port]</code> — TLS upstream; port defaults to <code>443</code> if omitted
+- <code>http://host[:port]</code> — cleartext upstream over h2c; port defaults to <code>80</code> if omitted. HTTP/1.1 upstream is not yet supported.</p>
 <h4 id="health-check-configuration">Health Check Configuration</h4>
 <p>Health checks monitor backend availability and automatically remove unhealthy backends from the pool.</p>
 <div class="table-wrapper"><table>
@@ -1486,7 +1486,12 @@ upstream:
 <li>A backend is marked healthy after <code>success_threshold</code> consecutive successes</li>
 </ol>
 <h4 id="backend-examples">Backend Examples</h4>
-<pre><code class="language-yaml"># Minimal backend configuration
+<pre><code class="language-yaml"># Minimal backend — no health check (backend stays permanently healthy)
+backends:
+  - id: &quot;backend1&quot;
+    address: &quot;https://example.com&quot;
+
+# Minimal backend with health check
 backends:
   - id: &quot;backend1&quot;
     address: &quot;10.0.1.10:8080&quot;

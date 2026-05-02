@@ -926,7 +926,7 @@ openssl req -x509 -newkey rsa:4096 -nodes \
 <pre><code class="language-bash"># Using Spooky's built-in HTTP/2 test backend
 cargo run --bin h2_backend -- --port 8080
 </code></pre>
-<p>This starts an HTTP/2-only server on <code>127.0.0.1:8080</code>. Spooky requires HTTP/2 backends - HTTP/1.1 backends are not supported.</p>
+<p>This starts an HTTP/2 test server on <code>127.0.0.1:8080</code>. Spooky currently requires HTTP/2 backends — plain HTTP/1.1 upstream support is not yet implemented.</p>
 <h2 id="step-4-create-configuration-file">Step 4: Create Configuration File</h2>
 <p>Create a minimal configuration file named <code>config.yaml</code>:</p>
 <pre><code class="language-yaml">version: 1
@@ -949,21 +949,16 @@ upstream:
       - id: &quot;local-backend&quot;
         address: &quot;127.0.0.1:8080&quot;
         weight: 100
-        health_check:
-          path: &quot;/&quot;
-          interval: 5000
-          timeout_ms: 2000
-          success_threshold: 2
-          failure_threshold: 3
+        # health_check is optional — omit to disable active health polling
 
 log:
   level: info
 </code></pre>
 <p>This configuration:
-- Listens for HTTP/3 connections on UDP port 9889
+- Listens for HTTP/3 (QUIC) on UDP port 9889 and HTTP/1.1+HTTP/2 (TLS) on TCP port 9889
 - Uses the generated self-signed certificates
 - Forwards all requests to <code>127.0.0.1:8080</code> using random load balancing
-- Performs health checks every 5 seconds on the backend</p>
+- Advertises <code>Alt-Svc</code> on every response so browsers upgrade to HTTP/3 automatically</p>
 <h2 id="step-5-start-spooky">Step 5: Start Spooky</h2>
 <p>Launch the proxy with the configuration file:</p>
 <pre><code class="language-bash">./target/release/spooky --config config.yaml
@@ -992,7 +987,7 @@ log:
 <p>Verify HTTP/3 connectivity by forcing HTTP/3-only requests:</p>
 <pre><code class="language-bash">curl -k --http3-only https://localhost:9889/
 </code></pre>
-<p>If successful, you should receive a response from your backend. HTTP/3 connectivity is confirmed when the request succeeds (Spooky doesn't advertise Alt-Svc headers).</p>
+<p>If successful, you should receive a response from your backend. Spooky advertises <code>Alt-Svc: h3=":PORT"; ma=86400</code> on every response, so browsers automatically upgrade to HTTP/3 on subsequent visits. HTTP/3 connectivity is confirmed when the response contains the <code>alt-svc</code> header or when you force <code>--http3-only</code> and the request succeeds.</p>
 <h3 id="using-a-custom-http3-client">Using a Custom HTTP/3 Client</h3>
 <p>If you don't have HTTP/3 support in curl, you can use other clients:</p>
 <p><strong>Using h3i (HTTP/3 interactive client):</strong></p>

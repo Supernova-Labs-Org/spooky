@@ -31,7 +31,7 @@ const FNV_PRIME: u64 = 0x00000100000001b3;
 pub struct BackendState {
     address: String,
     weight: u32,
-    health_check: HealthCheck,
+    health_check: Option<HealthCheck>,
     consecutive_failures: u32,
     health_state: HealthState,
     active_requests: Arc<AtomicUsize>,
@@ -76,15 +76,15 @@ impl BackendState {
     /// When active checks are present, only the health-check loop should drive
     /// consecutive_failures — request-path failures should not contribute.
     pub fn has_active_health_check(&self) -> bool {
-        self.health_check.interval > 0
+        self.health_check.as_ref().is_some_and(|hc| hc.interval > 0)
     }
 
     pub fn address(&self) -> &str {
         &self.address
     }
 
-    pub fn health_check(&self) -> &HealthCheck {
-        &self.health_check
+    pub fn health_check(&self) -> Option<&HealthCheck> {
+        self.health_check.as_ref()
     }
 
     pub fn weight(&self) -> u32 {
@@ -113,7 +113,11 @@ impl BackendState {
                 }
 
                 *successes += 1;
-                if *successes >= self.health_check.success_threshold {
+                let success_threshold = self
+                    .health_check
+                    .as_ref()
+                    .map_or(1, |hc| hc.success_threshold);
+                if *successes >= success_threshold {
                     self.consecutive_failures = 0;
                     self.health_state = HealthState::Healthy;
                     return Some(HealthTransition::BecameHealthy);
@@ -125,13 +129,20 @@ impl BackendState {
 
     pub fn record_failure(&mut self, reason: HealthFailureReason) -> Option<HealthTransition> {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        let threshold = self.health_check.failure_threshold;
+        let threshold = self
+            .health_check
+            .as_ref()
+            .map_or(3, |hc| hc.failure_threshold);
         if self.consecutive_failures < threshold {
             return None;
         }
 
         self.consecutive_failures = 0;
-        let cooldown = Duration::from_millis(self.health_check.cooldown_ms);
+        let cooldown = Duration::from_millis(
+            self.health_check
+                .as_ref()
+                .map_or(10_000, |hc| hc.cooldown_ms),
+        );
         self.health_state = HealthState::Unhealthy {
             until: Instant::now() + cooldown,
             successes: 0,
@@ -299,7 +310,9 @@ impl BackendPool {
     }
 
     pub fn health_check(&self, index: usize) -> Option<HealthCheck> {
-        self.backends.get(index).map(|b| b.health_check().clone())
+        self.backends
+            .get(index)
+            .and_then(|b| b.health_check().cloned())
     }
 
     pub fn healthy_indices(&self) -> Vec<usize> {
@@ -760,14 +773,14 @@ mod tests {
             id: format!("backend-{}", address),
             address: address.to_string(),
             weight,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 1000,
                 failure_threshold: 3,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         };
         BackendState::new(&backend)
     }
@@ -1007,27 +1020,27 @@ mod tests {
                     id: "backend1".to_string(),
                     address: "127.0.0.1:8001".to_string(),
                     weight: 100,
-                    health_check: HealthCheck {
+                    health_check: Some(HealthCheck {
                         path: "/health".to_string(),
                         interval: 5000,
                         timeout_ms: 2000,
                         failure_threshold: 3,
                         success_threshold: 2,
                         cooldown_ms: 10000,
-                    },
+                    }),
                 },
                 Backend {
                     id: "backend2".to_string(),
                     address: "127.0.0.1:8002".to_string(),
                     weight: 200,
-                    health_check: HealthCheck {
+                    health_check: Some(HealthCheck {
                         path: "/health".to_string(),
                         interval: 5000,
                         timeout_ms: 2000,
                         failure_threshold: 3,
                         success_threshold: 2,
                         cooldown_ms: 10000,
-                    },
+                    }),
                 },
             ],
         };

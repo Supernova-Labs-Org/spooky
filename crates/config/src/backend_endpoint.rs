@@ -51,12 +51,11 @@ impl BackendEndpoint {
             return Err("backend address must not include path, query, or fragment".to_string());
         }
 
-        validate_authority(authority)?;
+        let authority = normalize_authority(authority, scheme);
 
-        Ok(Self {
-            scheme,
-            authority: authority.to_string(),
-        })
+        validate_authority(&authority)?;
+
+        Ok(Self { scheme, authority })
     }
 
     pub fn scheme(&self) -> BackendScheme {
@@ -81,6 +80,22 @@ impl BackendEndpoint {
         };
         format!("{}{}", self.origin(), normalized)
     }
+}
+
+fn normalize_authority(authority: &str, scheme: BackendScheme) -> String {
+    if authority.starts_with('[') {
+        // IPv6: always requires explicit port per validate_authority rules
+        return authority.to_string();
+    }
+    if authority.rsplit_once(':').is_none() {
+        // No port — append the scheme default
+        let default_port = match scheme {
+            BackendScheme::Https => 443,
+            BackendScheme::Http => 80,
+        };
+        return format!("{}:{}", authority, default_port);
+    }
+    authority.to_string()
 }
 
 fn validate_authority(authority: &str) -> Result<(), String> {
@@ -170,10 +185,25 @@ mod tests {
 
     #[test]
     fn parse_rejects_invalid_authority() {
-        assert!(BackendEndpoint::parse("127.0.0.1").is_err());
         assert!(BackendEndpoint::parse("127.0.0.1:abc").is_err());
         assert!(BackendEndpoint::parse("::1:443").is_err());
         assert!(BackendEndpoint::parse("https://:443").is_err());
+    }
+
+    #[test]
+    fn parse_defaults_port_from_scheme() {
+        let ep = BackendEndpoint::parse("https://wearebackbenchers.info").expect("https no port");
+        assert_eq!(ep.scheme(), BackendScheme::Https);
+        assert_eq!(ep.authority(), "wearebackbenchers.info:443");
+        assert_eq!(ep.origin(), "https://wearebackbenchers.info:443");
+
+        let ep = BackendEndpoint::parse("http://localhost").expect("http no port");
+        assert_eq!(ep.scheme(), BackendScheme::Http);
+        assert_eq!(ep.authority(), "localhost:80");
+
+        let ep = BackendEndpoint::parse("127.0.0.1").expect("bare host defaults https:443");
+        assert_eq!(ep.scheme(), BackendScheme::Https);
+        assert_eq!(ep.authority(), "127.0.0.1:443");
     }
 
     #[test]

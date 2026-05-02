@@ -81,14 +81,14 @@ fn make_config(port: u32, backend_addr: String, cert: String, key: String) -> Co
                 id: "backend1".to_string(),
                 address: normalize_backend_address(backend_addr),
                 weight: 1,
-                health_check: HealthCheck {
+                health_check: Some(HealthCheck {
                     path: "/health".to_string(),
                     interval: 1000,
                     timeout_ms: 1000,
                     failure_threshold: 3,
                     success_threshold: 1,
                     cooldown_ms: 0,
-                },
+                }),
             }],
         },
     );
@@ -2450,27 +2450,27 @@ fn chaos_partial_outage_preserves_some_availability() {
             id: "dead-backend".to_string(),
             address: "127.0.0.1:1".to_string(),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 100,
                 failure_threshold: 1,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         },
         Backend {
             id: "healthy-backend".to_string(),
             address: healthy_backend.to_string(),
             weight: 1,
-            health_check: HealthCheck {
+            health_check: Some(HealthCheck {
                 path: "/health".to_string(),
                 interval: 1000,
                 timeout_ms: 1000,
                 failure_threshold: 1,
                 success_threshold: 1,
                 cooldown_ms: 0,
-            },
+            }),
         },
     ];
     let mut config = make_config_with_backends(0, backends, "round-robin", cert, key);

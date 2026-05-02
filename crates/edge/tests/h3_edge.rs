@@ -67,14 +67,14 @@ fn make_config(port: u32, cert: String, key: String, backend_address: String) ->
                 id: "backend1".to_string(),
                 address: normalize_backend_address(backend_address),
                 weight: 1,
-                health_check: HealthCheck {
+                health_check: Some(HealthCheck {
                     path: "/health".to_string(),
                     interval: 1000,
                     timeout_ms: 1000,
                     failure_threshold: 3,
                     success_threshold: 1,
                     cooldown_ms: 0,
-                },
+                }),
             }],
         },
     );
@@ -805,14 +805,14 @@ fn make_config_with_rate_limit(
                 id: "backend1".to_string(),
                 address: normalize_backend_address(backend_address),
                 weight: 1,
-                health_check: HealthCheck {
+                health_check: Some(HealthCheck {
                     path: "/health".to_string(),
                     interval: 1000,
                     timeout_ms: 1000,
                     failure_threshold: 3,
                     success_threshold: 1,
                     cooldown_ms: 0,
-                },
+                }),
             }],
         },
     );

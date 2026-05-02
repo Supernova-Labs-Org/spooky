@@ -16,12 +16,14 @@ use http::{Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::server::conn::http1;
+use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use log::{debug, error, info, warn};
 use quiche::Config;
 use quiche::h3::NameValue;
 use rand::RngCore;
+use rustls::ServerConfig as RustlsServerConfig;
 use serde_json::json;
 use socket2::{Domain, Protocol, Socket, Type};
 use spooky_bridge::h3_to_h2::{ForwardedContext, build_h2_request_for_endpoint};
@@ -35,6 +37,7 @@ use tokio::sync::{
     mpsc::error::{TryRecvError, TrySendError},
     oneshot,
 };
+use tokio_rustls::TlsAcceptor;
 use tracing::{Instrument, info_span};
 
 use spooky_config::{backend_endpoint::BackendEndpoint, config::Config as SpookyConfig};
@@ -107,6 +110,17 @@ fn is_hop_header(name: &str) -> bool {
         "connection" | "keep-alive" | "proxy-connection" | "transfer-encoding" | "upgrade"
     )
 }
+
+type BootstrapServiceFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<
+                    hyper::Response<http_body_util::Full<hyper::body::Bytes>>,
+                    hyper::Error,
+                >,
+            > + Send,
+    >,
+>;
 
 type ResolvedBackend = (
     String,
@@ -778,6 +792,7 @@ impl QUICListener {
         );
         Self::spawn_metrics_endpoint(config, Arc::clone(&shared_state.metrics))?;
         Self::spawn_control_api_endpoint(config, shared_state, worker_count)?;
+        Self::spawn_bootstrap_tls_listener(config, shared_state)?;
         Self::spawn_watchdog(
             config,
             Arc::clone(&shared_state.metrics),
@@ -1639,6 +1654,7 @@ impl QUICListener {
                 self.config.observability.tracing.enabled,
                 self.config.observability.routing.enabled,
                 self.config.observability.routing.include_reason,
+                self.config.listen.port,
             )
         {
             error!("HTTP/3 handling failed: {:?}", e);
@@ -1724,6 +1740,7 @@ impl QUICListener {
                     self.max_response_body_bytes,
                     self.unknown_length_response_prebuffer_bytes,
                     self.client_body_idle_timeout,
+                    self.config.listen.port,
                 ) {
                     error!("advance_streams_non_blocking in timeout path: {:?}", e);
                 }
@@ -1882,6 +1899,7 @@ impl QUICListener {
         tracing_enabled: bool,
         routing_transparency_enabled: bool,
         routing_transparency_include_reason: bool,
+        listen_port: u32,
     ) -> Result<(), quiche::h3::Error> {
         let mut body_buf = [0u8; MAX_DATAGRAM_SIZE_BYTES];
 
@@ -2819,6 +2837,7 @@ impl QUICListener {
             max_response_body_bytes,
             unknown_length_response_prebuffer_bytes,
             client_body_idle_timeout,
+            listen_port,
         )?;
 
         Ok(())
@@ -2857,6 +2876,7 @@ impl QUICListener {
         max_response_body_bytes: usize,
         unknown_length_response_prebuffer_bytes: usize,
         client_body_idle_timeout: Duration,
+        listen_port: u32,
     ) -> Result<(), quiche::h3::Error> {
         let stream_ids: Vec<u64> = streams.keys().copied().collect();
 
@@ -3057,6 +3077,10 @@ impl QUICListener {
                                 value.as_bytes().to_vec(),
                             ));
                         }
+                        owned_h3_headers.push((
+                            b"alt-svc".to_vec(),
+                            format!("h3=\":{}\"; ma=86400", listen_port).into_bytes(),
+                        ));
 
                         let defer_headers_until_body_validated = upstream_content_length.is_none();
                         let immediate_end = upstream_content_length == Some(0)
@@ -4269,6 +4293,432 @@ impl QUICListener {
                 }
             },
         );
+        Ok(())
+    }
+
+    fn build_bootstrap_tls_acceptor(config: &SpookyConfig) -> Result<TlsAcceptor, ProxyError> {
+        use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
+        use std::io::BufReader;
+
+        let cert_bytes = std::fs::read(&config.listen.tls.cert).map_err(|err| {
+            ProxyError::Tls(format!(
+                "failed to read TLS cert '{}': {}",
+                config.listen.tls.cert, err
+            ))
+        })?;
+        let key_bytes = std::fs::read(&config.listen.tls.key).map_err(|err| {
+            ProxyError::Tls(format!(
+                "failed to read TLS key '{}': {}",
+                config.listen.tls.key, err
+            ))
+        })?;
+
+        let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+            certs(&mut BufReader::new(cert_bytes.as_slice()))
+                .collect::<Result<_, _>>()
+                .map_err(|err| ProxyError::Tls(format!("failed to parse TLS cert PEM: {}", err)))?;
+
+        let key = {
+            let mut reader = BufReader::new(key_bytes.as_slice());
+            let pkcs8: Vec<rustls::pki_types::PrivateKeyDer<'static>> =
+                pkcs8_private_keys(&mut reader)
+                    .map(|r| r.map(rustls::pki_types::PrivateKeyDer::Pkcs8))
+                    .collect::<Result<_, _>>()
+                    .map_err(|err| {
+                        ProxyError::Tls(format!("failed to parse PKCS8 key PEM: {}", err))
+                    })?;
+            if let Some(key) = pkcs8.into_iter().next() {
+                key
+            } else {
+                let mut reader2 = BufReader::new(key_bytes.as_slice());
+                let rsa: Vec<rustls::pki_types::PrivateKeyDer<'static>> =
+                    rsa_private_keys(&mut reader2)
+                        .map(|r| r.map(rustls::pki_types::PrivateKeyDer::Pkcs1))
+                        .collect::<Result<_, _>>()
+                        .map_err(|err| {
+                            ProxyError::Tls(format!("failed to parse RSA key PEM: {}", err))
+                        })?;
+                rsa.into_iter().next().ok_or_else(|| {
+                    ProxyError::Tls("no supported private key found in TLS key file".to_string())
+                })?
+            }
+        };
+
+        let mut tls_config = RustlsServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|err| {
+                ProxyError::Tls(format!("failed to build rustls ServerConfig: {}", err))
+            })?;
+
+        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+        Ok(TlsAcceptor::from(Arc::new(tls_config)))
+    }
+
+    fn spawn_bootstrap_tls_listener(
+        config: &SpookyConfig,
+        shared_state: &SharedRuntimeState,
+    ) -> Result<(), ProxyError> {
+        let acceptor = match Self::build_bootstrap_tls_acceptor(config) {
+            Ok(a) => a,
+            Err(err) => {
+                warn!(
+                    "Bootstrap TLS listener disabled (could not build TLS config): {}",
+                    err
+                );
+                return Ok(());
+            }
+        };
+
+        let bind = format!("{}:{}", config.listen.address, config.listen.port);
+        let alt_svc_value = format!("h3=\":{}\"; ma=86400", config.listen.port);
+        let backend_timeout = Duration::from_millis(config.performance.backend_timeout_ms);
+
+        let h2_pool = Arc::clone(&shared_state.h2_pool);
+        let backend_endpoints = Arc::clone(&shared_state.backend_endpoints);
+        let upstream_pools = shared_state.upstream_pools.clone();
+        let routing_index = RouteIndex::from_upstreams(&config.upstream);
+
+        let handle = match runtime_handle() {
+            Some(h) => h,
+            None => {
+                warn!("Bootstrap TLS listener disabled (no Tokio runtime available)");
+                return Ok(());
+            }
+        };
+
+        let std_listener = match std::net::TcpListener::bind(&bind) {
+            Ok(l) => l,
+            Err(err) => {
+                warn!(
+                    "Bootstrap TLS listener could not bind TCP {}: {} \
+                    (browser HTTP/3 discovery will not work; Alt-Svc will only come from QUIC responses)",
+                    bind, err
+                );
+                return Ok(());
+            }
+        };
+        if let Err(err) = std_listener.set_nonblocking(true) {
+            warn!(
+                "Bootstrap TLS listener set_nonblocking failed ({}): {}",
+                bind, err
+            );
+            return Ok(());
+        }
+
+        let routing_index = Arc::new(routing_index);
+
+        spawn_supervised_async_task(&handle, "bootstrap-tls-listener", None, async move {
+            let listener = match tokio::net::TcpListener::from_std(std_listener) {
+                Ok(l) => l,
+                Err(err) => {
+                    warn!(
+                        "Bootstrap TLS listener registration failed ({}): {}",
+                        bind, err
+                    );
+                    return;
+                }
+            };
+            info!(
+                "Bootstrap TLS listener on https://{} (TCP+TLS) — advertising Alt-Svc: {}",
+                bind, alt_svc_value
+            );
+            loop {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(err) => {
+                        error!("Bootstrap TLS listener accept failed: {}", err);
+                        continue;
+                    }
+                };
+
+                let acceptor = acceptor.clone();
+                let alt_svc = alt_svc_value.clone();
+                let h2_pool = Arc::clone(&h2_pool);
+                let backend_endpoints = Arc::clone(&backend_endpoints);
+                let upstream_pools = upstream_pools.clone();
+                let routing_index = Arc::clone(&routing_index);
+
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        Err(err) => {
+                            debug!("Bootstrap TLS handshake failed from {}: {}", peer, err);
+                            return;
+                        }
+                    };
+
+                    let negotiated = tls_stream.get_ref().1.alpn_protocol().map(|p| p.to_vec());
+                    let use_h2 = negotiated.as_deref() == Some(b"h2");
+
+                    let io = TokioIo::new(tls_stream);
+                    let alt_svc_conn = alt_svc.clone();
+
+                    let svc = service_fn(move |req: Request<Incoming>| -> BootstrapServiceFuture {
+                        let alt = alt_svc_conn.clone();
+                        let h2_pool = Arc::clone(&h2_pool);
+                        let backend_endpoints = Arc::clone(&backend_endpoints);
+                        let upstream_pools = upstream_pools.clone();
+                        let routing_index = Arc::clone(&routing_index);
+
+                        Box::pin(async move {
+                            let _method = req.method().to_string();
+                            let path = req
+                                .uri()
+                                .path_and_query()
+                                .map(|pq| pq.as_str().to_owned())
+                                .unwrap_or_else(|| "/".to_string());
+                            let authority = req
+                                .uri()
+                                .authority()
+                                .map(|a| a.as_str().to_owned())
+                                .or_else(|| {
+                                    req.headers()
+                                        .get(http::header::HOST)
+                                        .and_then(|v| v.to_str().ok())
+                                        .map(str::to_owned)
+                                });
+
+                            // Route lookup
+                            let upstream_name = routing_index.lookup(&path, authority.as_deref());
+                            let upstream_name = match upstream_name {
+                                Some(name) => name.to_string(),
+                                None => {
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .header("alt-svc", &alt)
+                                        .body(Full::new(Bytes::from_static(b"no route\n")))
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
+                                }
+                            };
+
+                            // Pick backend
+                            let backend_addr = {
+                                let pool_lock = match upstream_pools.get(&upstream_name) {
+                                    Some(p) => p,
+                                    None => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::BAD_GATEWAY)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(b"no pool\n")))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
+                                    }
+                                };
+                                let pool = match pool_lock.read() {
+                                    Ok(p) => p,
+                                    Err(_) => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::BAD_GATEWAY)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(b"pool error\n")))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
+                                    }
+                                };
+                                match pool.pool.address(0).map(str::to_owned) {
+                                    Some(addr) => addr,
+                                    None => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::SERVICE_UNAVAILABLE)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(b"no backends\n")))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
+                                    }
+                                }
+                            };
+
+                            let endpoint = match backend_endpoints.get(&backend_addr) {
+                                Some(ep) => ep.clone(),
+                                None => {
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .header("alt-svc", &alt)
+                                        .body(Full::new(Bytes::from_static(b"no endpoint\n")))
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
+                                }
+                            };
+
+                            // Build upstream request
+                            let request_path = if path.is_empty() { "/" } else { &path };
+                            let upstream_uri =
+                                match http::Uri::try_from(endpoint.uri_for_path(request_path)) {
+                                    Ok(u) => u,
+                                    Err(_) => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::BAD_GATEWAY)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(b"bad uri\n")))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
+                                    }
+                                };
+
+                            let mut upstream_req = Request::builder()
+                                .method(req.method().clone())
+                                .uri(upstream_uri);
+
+                            for (name, value) in req.headers() {
+                                if name == http::header::HOST
+                                    || name == http::header::CONNECTION
+                                    || name == http::header::UPGRADE
+                                    || name == http::header::PROXY_AUTHORIZATION
+                                    || name.as_str() == "keep-alive"
+                                    || name.as_str() == "proxy-connection"
+                                    || name.as_str() == "te"
+                                    || name.as_str() == "trailers"
+                                    || name.as_str() == "transfer-encoding"
+                                {
+                                    continue;
+                                }
+                                upstream_req = upstream_req.header(name, value);
+                            }
+                            upstream_req = upstream_req.header(
+                                http::header::HOST,
+                                authority.as_deref().unwrap_or(endpoint.authority()),
+                            );
+                            upstream_req = upstream_req
+                                .header("forwarded", format!("for={};proto=https", peer.ip()));
+
+                            let body_bytes = match req.into_body().collect().await {
+                                Ok(collected) => collected.to_bytes(),
+                                Err(_) => Bytes::new(),
+                            };
+
+                            // Build a template request (no body) then clone per retry attempt
+                            let template = match upstream_req.body(()) {
+                                Ok(r) => r,
+                                Err(_) => {
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .header("alt-svc", &alt)
+                                        .body(Full::new(Bytes::from_static(
+                                            b"request build error\n",
+                                        )))
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
+                                }
+                            };
+                            let (parts, _) = template.into_parts();
+                            let parts = Arc::new(parts);
+
+                            // Forward to backend — retry on connection errors (pool not yet warm)
+                            const MAX_RETRIES: u32 = 3;
+                            let mut last_err = String::new();
+                            let mut upstream_resp_opt = None;
+                            for attempt in 0..=MAX_RETRIES {
+                                if attempt > 0 {
+                                    tokio::time::sleep(Duration::from_millis(150)).await;
+                                }
+                                let retry_body = http_body_util::Full::new(body_bytes.clone())
+                                    .map_err(|e: std::convert::Infallible| e)
+                                    .boxed();
+                                let retry_req = Request::from_parts((*parts).clone(), retry_body);
+                                match tokio::time::timeout(
+                                    backend_timeout,
+                                    h2_pool.send(&backend_addr, retry_req),
+                                )
+                                .await
+                                {
+                                    Ok(Ok(resp)) => {
+                                        upstream_resp_opt = Some(resp);
+                                        break;
+                                    }
+                                    Ok(Err(err)) => {
+                                        last_err = err.to_string();
+                                    }
+                                    Err(_) => {
+                                        return Ok(Response::builder()
+                                            .status(StatusCode::GATEWAY_TIMEOUT)
+                                            .header("alt-svc", &alt)
+                                            .body(Full::new(Bytes::from_static(
+                                                b"upstream timeout\n",
+                                            )))
+                                            .unwrap_or_else(|_| {
+                                                Response::new(Full::new(Bytes::from_static(
+                                                    b"error\n",
+                                                )))
+                                            }));
+                                    }
+                                }
+                            }
+                            let upstream_resp = match upstream_resp_opt {
+                                Some(r) => r,
+                                None => {
+                                    warn!(
+                                        "Bootstrap proxy upstream error after retries: {}",
+                                        last_err
+                                    );
+                                    return Ok(Response::builder()
+                                        .status(StatusCode::BAD_GATEWAY)
+                                        .header("alt-svc", &alt)
+                                        .body(Full::new(Bytes::from_static(b"upstream error\n")))
+                                        .unwrap_or_else(|_| {
+                                            Response::new(Full::new(Bytes::from_static(b"error\n")))
+                                        }));
+                                }
+                            };
+
+                            // Build downstream response with Alt-Svc injected
+                            let status = upstream_resp.status();
+                            let mut resp_builder = Response::builder().status(status);
+                            for (name, value) in upstream_resp.headers() {
+                                if name == http::header::CONNECTION
+                                    || name.as_str() == "keep-alive"
+                                    || name.as_str() == "transfer-encoding"
+                                    || name.as_str() == "alt-svc"
+                                {
+                                    continue;
+                                }
+                                resp_builder = resp_builder.header(name, value);
+                            }
+                            resp_builder = resp_builder.header("alt-svc", &alt);
+
+                            let resp_body = match upstream_resp.into_body().collect().await {
+                                Ok(collected) => collected.to_bytes(),
+                                Err(_) => Bytes::new(),
+                            };
+
+                            Ok(resp_builder
+                                .body(Full::new(resp_body))
+                                .unwrap_or_else(|_| Response::new(Full::new(Bytes::new()))))
+                        })
+                    });
+
+                    if use_h2 {
+                        let executor = hyper_util::rt::TokioExecutor::new();
+                        if let Err(err) = http2::Builder::new(executor)
+                            .serve_connection(io, svc)
+                            .await
+                        {
+                            debug!("Bootstrap h2 connection from {} closed: {}", peer, err);
+                        }
+                    } else if let Err(err) = http1::Builder::new().serve_connection(io, svc).await {
+                        debug!("Bootstrap h1 connection from {} closed: {}", peer, err);
+                    }
+                });
+            }
+        });
+
         Ok(())
     }
 

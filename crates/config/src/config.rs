@@ -202,7 +202,8 @@ pub struct Backend {
 
     #[serde(default = "get_default_weight")]
     pub weight: u32, // 100
-    pub health_check: HealthCheck,
+    #[serde(default)]
+    pub health_check: Option<HealthCheck>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

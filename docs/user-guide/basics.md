@@ -66,7 +66,7 @@ log:
 
 **upstream**: Named pools of backend servers with routing rules and load balancing configuration
 - Key: Arbitrary pool name for identification
-- `load_balancing`: Load balancing algorithm for this pool (`random`, `round-robin`, `consistent-hash`)
+- `load_balancing`: Load balancing algorithm for this pool (`random`, `round-robin`, `consistent-hash`, `least-connections`, `latency-aware`, `sticky-cid`)
 - `route`: Routing criteria to match requests
 - `backends`: List of backend servers
 
@@ -167,6 +167,8 @@ upstream:
 ```
 
 Matches requests to `api.example.com/v2/*`.
+
+**Note**: The `route.method` field exists in the config schema but is not yet implemented. Setting it has no effect — method-based routing is reserved for a future release.
 
 ## Backend Configuration
 

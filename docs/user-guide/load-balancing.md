@@ -4,7 +4,7 @@ Comprehensive guide to load balancing algorithms, health checking, and backend m
 
 ## Load Balancing Algorithms
 
-Spooky implements three load balancing algorithms, each optimized for different use cases. Each upstream pool configures its own algorithm independently via `load_balancing.type`.
+Spooky implements six load balancing algorithms, each optimized for different use cases. Each upstream pool configures its own algorithm independently via `load_balancing.type`.
 
 ### Round Robin
 
@@ -150,13 +150,136 @@ upstream:
 
 **Performance**: Very low overhead (random number generation)
 
+### Least Connections
+
+**Algorithm**: Routes each request to the healthy backend with the fewest active in-flight requests.
+
+**Configuration**:
+```yaml
+upstream:
+  api_pool:
+    load_balancing:
+      type: "least-connections"  # Accepts: least-connections, least_connections, lc
+    route:
+      path_prefix: "/api"
+    backends:
+      - id: "backend1"
+        address: "10.0.1.10:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+      - id: "backend2"
+        address: "10.0.1.11:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+```
+
+**Characteristics**:
+- Tracks active in-flight request count per backend
+- Ties broken deterministically by backend index order
+- Automatically skips unhealthy backends
+- No session affinity
+
+**Use Cases**:
+- Backends with variable request processing time
+- Workloads where some requests are significantly slower than others
+- Avoiding hot spots when backends have similar capacity
+
+**Performance**: Very low overhead (scan healthy backends for minimum active count)
+
+### Latency-Aware
+
+**Algorithm**: Selects healthy backends using a latency score combining EWMA backend latency and active request pressure. Unsampled backends are probed first to avoid cold-start bias.
+
+**Configuration**:
+```yaml
+upstream:
+  api_pool:
+    load_balancing:
+      type: "latency-aware"  # Accepts: latency-aware, latency_aware, la
+    route:
+      path_prefix: "/api"
+    backends:
+      - id: "backend1"
+        address: "10.0.1.10:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+      - id: "backend2"
+        address: "10.0.1.11:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+```
+
+**Characteristics**:
+- Maintains EWMA latency per backend, updated after each completed request
+- New backends are probed first (no prior latency sample) before score-based selection
+- Automatically skips unhealthy backends
+- No session affinity
+
+**Use Cases**:
+- Heterogeneous backends where some are consistently faster
+- Multi-region or mixed-hardware pools
+- Situations where you want faster backends to absorb proportionally more traffic automatically
+
+**Performance**: Low overhead (EWMA update per request, score comparison at pick time)
+
+### Sticky CID
+
+**Algorithm**: Consistent hashing keyed by QUIC connection ID (CID) for connection-level stickiness without application-layer session keys.
+
+**Configuration**:
+```yaml
+upstream:
+  api_pool:
+    load_balancing:
+      type: "sticky-cid"  # Accepts: sticky-cid, sticky_cid, cid-sticky, cid_sticky
+    route:
+      path_prefix: "/api"
+    backends:
+      - id: "backend1"
+        address: "10.0.1.10:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+      - id: "backend2"
+        address: "10.0.1.11:8080"
+        weight: 100
+        health_check:
+          path: "/health"
+          interval: 5000
+```
+
+**Characteristics**:
+- Same QUIC CID always routes to the same backend while backend health is stable
+- Falls back to another backend if the preferred one is unhealthy
+- Stickiness is per-connection, not per-session or per-user
+- Automatically skips unhealthy backends
+
+**Use Cases**:
+- Applications that benefit from connection affinity without application-level session tokens
+- Reducing backend cache churn on a per-connection basis
+- Stateful HTTP/3 streams where all streams within a QUIC connection should land on the same backend
+
+**Performance**: Low overhead (hash + BTreeMap lookup, same as consistent-hash)
+
 ## Algorithm Comparison
 
 | Algorithm | Complexity | Session Affinity | State | Distribution | Use Case |
 |-----------|-----------|------------------|-------|--------------|----------|
 | Round Robin | O(1) | No | Counter | Even | General purpose, predictable load |
-| Consistent Hash | O(log n) | Yes | Hash ring | Even (with weight) | Session affinity, cache locality |
+| Consistent Hash | O(log n) | Yes (request key) | Hash ring | Even (with weight) | Session affinity, cache locality |
 | Random | O(1) | No | None | Statistically even | Stateless, high throughput |
+| Least Connections | O(n) | No | Active count | Demand-driven | Variable request latency |
+| Latency-Aware | O(n) | No | EWMA latency | Latency-proportional | Heterogeneous backends |
+| Sticky CID | O(log n) | Yes (QUIC CID) | Hash ring | Even | Connection-level affinity |
 
 ## Backend Weighting
 
@@ -577,6 +700,9 @@ done
 - **Use Round Robin** for simple, even distribution with equal backends
 - **Use Consistent Hash** when session affinity or cache locality matters
 - **Use Random** for stateless, high-throughput scenarios
+- **Use Least Connections** when request durations vary significantly across backends
+- **Use Latency-Aware** when backends have different performance characteristics and you want faster ones to absorb more traffic automatically
+- **Use Sticky CID** for QUIC-connection affinity without application-layer session keys
 
 ### Weight Configuration
 

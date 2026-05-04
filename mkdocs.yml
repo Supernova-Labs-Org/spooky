@@ -48,7 +48,6 @@ nav:
       - Production: deployment/production.md
       - Troubleshooting: troubleshooting/common-issues.md
   - Development:
-      - Contributing: development/contributing.md
       - Benchmarks: benchmarks.md
       - Load Test Results: benchmarks/load.md
       - Changelog: changelog.md

@@ -11,7 +11,7 @@ Requirements: Rust 1.85+, cmake, pkg-config
 git clone https://github.com/Supernova-Labs-Org/spooky.git
 cd spooky
 cargo build
-    cargo test
+cargo test
 ```
 
 Before touching anything:
@@ -30,9 +30,10 @@ cargo test --workspace
     crates/edge/       QUIC/HTTP3 listener, TLS handshake
     crates/bridge/     HTTP/3 to HTTP/2 header and stream conversion
     crates/transport/  HTTP/2 client, connection pool
-    crates/lb/         load balancing algorithms (random, round-robin, consistent-hash)
+    crates/lb/         load balancing algorithms (random, round-robin, consistent-hash, least-connections, latency-aware, sticky-cid)
     crates/utils/      logging, TLS helpers
     crates/errors/     shared error types
+    crates/bench/      benchmarking harness
 ```
 
 ### Submitting Patches

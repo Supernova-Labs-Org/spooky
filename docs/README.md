@@ -29,7 +29,7 @@ Technical documentation for the Spooky HTTP/3 edge proxy and load balancer.
 - [Troubleshooting](troubleshooting/common-issues.md) - Common issues and solutions
 
 ### Development
-- [Contributing Guide](development/contributing.md) - Development setup and guidelines
+- [Contributing Guide](https://github.com/Supernova-Labs-Org/spooky/blob/master/CONTRIBUTING.md) - Development setup and guidelines
 
 ### Protocol Reference
 - [HTTP/3 Protocol](protocols/http3.md) - HTTP/3 overview and implementation
@@ -53,7 +53,6 @@ Technical documentation for the Spooky HTTP/3 edge proxy and load balancer.
 - `architecture/`: High-level design and component details
 - `deployment/`: Production deployment guidance
 - `troubleshooting/`: Common issues and fixes
-- `development/`: Development and contribution guidance
 - `tutorials/`: Quickstart walkthroughs
 - `protocols/`: HTTP/3 and QUIC protocol notes
 - `api/`: API and observability overview
@@ -97,7 +96,10 @@ upstream:
 **Load balancing algorithms**:
 - `random` - Random selection
 - `round-robin` - Sequential rotation
-- `consistent-hash` - Hash-based affinity
+- `consistent-hash` - Hash-based affinity (session stickiness, cache locality)
+- `least-connections` - Routes to backend with fewest active requests
+- `latency-aware` - Routes to fastest backends using EWMA latency scoring
+- `sticky-cid` - QUIC connection-ID affinity via consistent hashing
 
 ### Common Commands
 
@@ -150,7 +152,7 @@ To improve documentation:
 4. Include practical examples
 5. Update this index when adding new docs
 
-See [Contributing Guide](development/contributing.md) for more details.
+See [Contributing Guide](https://github.com/Supernova-Labs-Org/spooky/blob/master/CONTRIBUTING.md) for more details.
 
 ## External Resources
 

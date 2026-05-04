@@ -71,7 +71,7 @@ interface TLSConfig {
 ```typescript
 interface UpstreamConfig {
   route: RouteConfig;             // Routing rules (required)
-  load_balancing?: LoadBalancingConfig;  // Per-upstream LB (planned, not implemented)
+  load_balancing?: LoadBalancingConfig;  // Per-upstream LB algorithm
   backends: BackendConfig[];      // Backend servers (required, at least 1)
 }
 ```
@@ -113,8 +113,8 @@ interface HealthCheckConfig {
 
 ```typescript
 interface LoadBalancingConfig {
-  type: "random" | "round-robin" | "consistent-hash";
-  key?: string;  // Hash key source (planned: header:name, cookie:name, query:name, path)
+  type: "random" | "round-robin" | "consistent-hash" | "least-connections" | "latency-aware" | "sticky-cid";
+  key?: string;  // Reserved for future pluggable key extraction (currently ignored)
 }
 ```
 

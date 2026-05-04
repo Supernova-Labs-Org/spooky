@@ -192,7 +192,7 @@ Features explicitly not planned:
 
 ## Contributing
 
-Contributions are welcome. See [contributing guide](development/contributing.md) for development setup and guidelines.
+Contributions are welcome. See [contributing guide](https://github.com/Supernova-Labs-Org/spooky/blob/master/CONTRIBUTING.md) for development setup and guidelines.
 
 Priority areas for contributions:
 

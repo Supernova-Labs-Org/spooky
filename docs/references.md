@@ -148,4 +148,4 @@ To add a reference:
 3. Include a brief description
 4. Test all links
 
-See [contributing guide](development/contributing.md) for more details.
+See [contributing guide](https://github.com/Supernova-Labs-Org/spooky/blob/master/CONTRIBUTING.md) for more details.

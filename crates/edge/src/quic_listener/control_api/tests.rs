@@ -1405,6 +1405,57 @@ async fn control_api_gate_returns_canonical_unauthorized_payloads_per_route() {
 }
 
 #[tokio::test]
+async fn control_api_gate_rejects_bearer_only_request_when_mtls_required() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let mut startup = test_config(cert.clone(), key.clone());
+    startup.observability.control_api.enabled = true;
+    startup.observability.control_api.auth_token = Some("secret-token".to_string());
+    startup.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    startup.observability.control_api.tls.client_auth.ca_file = Some(cert.clone());
+    let state = control_api_state_with_runtime_bundle(&startup, &startup);
+    let runtime_path = state.current_paths().runtime_path;
+
+    let mut req = control_api_request(Method::GET, &runtime_path, Some("Bearer secret-token"));
+    attach_control_api_peer_addr(&mut req, "127.0.0.1:9443");
+
+    let response = QUICListener::gate_control_api_request_for(&mut req, &state)
+        .expect_err("bearer-only request must be rejected once mTLS is required");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = full_body_bytes(*response).await;
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("unauthorized payload");
+    assert_eq!(payload["reason"], "missing_authentication");
+}
+
+#[test]
+fn control_api_auth_policy_generation_changes_after_mtls_mode_reload() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let mut startup = test_config(cert.clone(), key.clone());
+    startup.observability.control_api.enabled = true;
+    startup.observability.control_api.auth_token = Some("secret-token".to_string());
+
+    let startup_bundle = runtime_bundle_from_config("startup.yaml", &startup);
+    let (state, runtime_handle) = runtime_bundle_control_api_state(startup_bundle);
+    let connect_time_generation = state.current_service_state().auth_policy_generation();
+
+    let mut reloaded = startup.clone();
+    reloaded.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    reloaded.observability.control_api.tls.client_auth.ca_file = Some(cert);
+    let mut reloaded_bundle = runtime_bundle_from_config("reloaded.yaml", &reloaded);
+    reloaded_bundle.generation = 1;
+    runtime_handle
+        .replace(reloaded_bundle)
+        .expect("replace runtime bundle");
+
+    let post_reload_generation = state.current_service_state().auth_policy_generation();
+    assert_ne!(
+        connect_time_generation, post_reload_generation,
+        "a connection that captured the pre-reload generation must observe drift after an mTLS policy change"
+    );
+}
+
+#[tokio::test]
 async fn control_api_gate_returns_forbidden_for_under_scoped_identity() {
     let dir = tempdir().expect("tempdir");
     let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");

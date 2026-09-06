@@ -166,10 +166,15 @@ impl QUICListener {
                         let _connection_guard = RuntimeConnectionSlotGuard::new(active_connections);
                         let io: TokioIo<Box<dyn MetricsIo + Send + Unpin>> =
                             if let Some(server_config) = tls_config {
-                                match TlsAcceptor::from(server_config).accept(stream).await {
-                                    Ok(stream) => TokioIo::new(Box::new(stream)),
-                                    Err(err) => {
+                                let accept = TlsAcceptor::from(server_config).accept(stream);
+                                match tokio::time::timeout(timeout, accept).await {
+                                    Ok(Ok(stream)) => TokioIo::new(Box::new(stream)),
+                                    Ok(Err(err)) => {
                                         debug!("Metrics endpoint mTLS handshake failed: {}", err);
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        debug!("Metrics endpoint mTLS handshake timed out");
                                         return;
                                     }
                                 }

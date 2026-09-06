@@ -1,5 +1,7 @@
 use std::sync::atomic::AtomicUsize;
 
+use http_body_util::Full;
+
 use super::{
     context::{ConnectionSlotGuard, ControlApiListenerBinding},
     security::ControlApiSecurityPolicy,
@@ -269,12 +271,20 @@ impl QUICListener {
             runtime_state.security.identity_source.as_ref(),
             runtime_state.primary_listener_label.clone(),
         );
+        let auth_policy_generation = runtime_state.auth_policy_generation();
         let io = TokioIo::new(tls_stream);
         let service = service_fn(move |mut req: Request<Incoming>| {
             let state = state.clone();
+            let auth_policy_generation = auth_policy_generation;
             let request_context =
                 Self::augment_control_api_request_context(request_context.clone(), &req);
             async move {
+                let current_state = state.current_service_state();
+                if !current_state.endpoint.enabled
+                    || current_state.auth_policy_generation() != auth_policy_generation
+                {
+                    return Ok::<_, hyper::Error>(Self::stale_control_api_connection_response());
+                }
                 req.extensions_mut().insert(request_context);
                 Ok::<_, hyper::Error>(Self::handle_control_api_request(req, &state).await)
             }
@@ -290,6 +300,16 @@ impl QUICListener {
                 debug!("Control API endpoint connection timed out");
             }
         }
+    }
+
+    fn stale_control_api_connection_response() -> Response<Full<Bytes>> {
+        Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header("connection", "close")
+            .body(Full::new(Bytes::from_static(
+                b"control API authentication policy changed\n",
+            )))
+            .unwrap_or_else(|_| Response::new(Full::new(Bytes::from_static(b"unauthorized\n"))))
     }
 
     async fn accept_control_api_tls(

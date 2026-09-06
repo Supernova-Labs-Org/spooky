@@ -25,6 +25,18 @@ pub(super) struct ControlApiServiceState {
 }
 
 impl ControlApiServiceState {
+    pub(super) fn auth_policy_generation(&self) -> (Option<u64>, Option<u64>) {
+        let runtime_generation = self
+            .generation
+            .as_ref()
+            .map(|generation| generation.generation());
+        let listener_tls_generation = self
+            .primary_listener_label
+            .as_deref()
+            .and_then(|label| self.listener_tls_store().generation(label));
+        (runtime_generation, listener_tls_generation)
+    }
+
     pub(super) fn runtime_bundle_handle(&self) -> Option<&Arc<RuntimeBundleHandle>> {
         self.runtime_bundle_handle.as_ref()
     }

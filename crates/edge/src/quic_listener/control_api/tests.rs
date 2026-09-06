@@ -4039,6 +4039,71 @@ fn validate_metrics_reload_compatibility_classifies_bind_conflict_as_preflight_f
 }
 
 #[test]
+fn validate_control_api_reload_compatibility_rejects_invalid_admin_ca_file() {
+    use crate::runtime::policy::TransitionRejectionKind;
+
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let current = test_config(cert.clone(), key.clone());
+
+    let mut next = current.clone();
+    next.observability.control_api.enabled = true;
+    next.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    next.observability.control_api.tls.client_auth.ca_file =
+        Some(dir.path().join("missing-admin-ca.pem").display().to_string());
+
+    let current_bundle = runtime_bundle_from_config("current.yaml", &current);
+    let next_bundle = runtime_bundle_from_config("next.yaml", &next);
+
+    let rejection =
+        QUICListener::validate_control_api_reload_compatibility(&current_bundle, &next_bundle)
+            .expect("invalid admin CA file must reject at preflight");
+    assert_eq!(
+        rejection.kind,
+        TransitionRejectionKind::ResourcePreparationFailed
+    );
+    assert_eq!(
+        rejection.field_path.as_deref(),
+        Some("control API TLS '127.0.0.1:9889'")
+    );
+    assert!(!rejection.requires_restart());
+    assert_structured_resource_preflight_message(&rejection);
+}
+
+#[test]
+fn validate_metrics_reload_compatibility_rejects_invalid_admin_ca_file() {
+    use crate::runtime::policy::TransitionRejectionKind;
+
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let current = test_config(cert.clone(), key.clone());
+
+    let mut next = current.clone();
+    next.observability.metrics.enabled = true;
+    next.observability.metrics.allow_non_loopback = true;
+    next.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    next.observability.control_api.tls.client_auth.ca_file =
+        Some(dir.path().join("missing-admin-ca.pem").display().to_string());
+
+    let current_bundle = runtime_bundle_from_config("current.yaml", &current);
+    let next_bundle = runtime_bundle_from_config("next.yaml", &next);
+
+    let rejection =
+        QUICListener::validate_metrics_reload_compatibility(&current_bundle, &next_bundle)
+            .expect("invalid admin CA file must reject metrics preflight");
+    assert_eq!(
+        rejection.kind,
+        TransitionRejectionKind::ResourcePreparationFailed
+    );
+    assert_eq!(
+        rejection.field_path.as_deref(),
+        Some("metrics TLS '127.0.0.1:9889'")
+    );
+    assert!(!rejection.requires_restart());
+    assert_structured_resource_preflight_message(&rejection);
+}
+
+#[test]
 fn validate_startup_owned_reload_compatibility_rejects_control_plane_thread_change() {
     let dir = tempdir().expect("tempdir");
     let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");

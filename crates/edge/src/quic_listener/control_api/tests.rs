@@ -1455,6 +1455,47 @@ fn control_api_auth_policy_generation_changes_after_mtls_mode_reload() {
     );
 }
 
+#[test]
+fn control_api_authorization_generation_detects_drift_during_delayed_body_collection() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let mut startup = test_config(cert.clone(), key.clone());
+    startup.observability.control_api.enabled = true;
+    startup.observability.control_api.auth_token = Some("operator-token".to_string());
+
+    let startup_bundle = runtime_bundle_from_config("startup.yaml", &startup);
+    let (state, runtime_handle) = runtime_bundle_control_api_state(startup_bundle);
+
+    // Captured immediately after the gate authenticates the request headers,
+    // before the JSON body (which may take arbitrarily long to arrive) is awaited.
+    let (runtime, listener_tls) = state.current_service_state().auth_policy_generation();
+    let authorization_generation = super::state::ControlApiAuthorizationGeneration {
+        runtime,
+        listener_tls,
+    };
+    assert!(
+        authorization_generation.is_current(state.current_service_state().auth_policy_generation())
+    );
+
+    // Simulates the token being revoked on another connection while this
+    // request's body is still being collected: the active generation changes.
+    let mut revoked = startup.clone();
+    revoked.observability.control_api.auth_token = Some("new-token-after-revocation".to_string());
+    let mut revoked_bundle = runtime_bundle_from_config("revoked.yaml", &revoked);
+    revoked_bundle.generation = 1;
+    runtime_handle
+        .replace(revoked_bundle)
+        .expect("replace runtime bundle");
+
+    // The body has now "arrived"; the handler re-checks the generation before
+    // committing the mutation and must observe that it is no longer current.
+    let current_at_mutation_time = state.current_service_state().auth_policy_generation();
+    assert!(
+        !authorization_generation.is_current(current_at_mutation_time),
+        "a delayed mutation must detect a security-policy change that happened during body collection"
+    );
+}
+
 #[tokio::test]
 async fn control_api_gate_returns_forbidden_for_under_scoped_identity() {
     let dir = tempdir().expect("tempdir");

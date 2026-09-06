@@ -39,10 +39,8 @@ impl QUICListener {
                 }
             };
         let current_auth_generation = state.current_service_state().auth_policy_generation();
-        let authorization_is_current = authorization_generation.is_some_and(|expected| {
-            expected.runtime == current_auth_generation.0
-                && expected.listener_tls == current_auth_generation.1
-        });
+        let authorization_is_current = authorization_generation
+            .is_some_and(|expected| expected.is_current(current_auth_generation));
         if !authorization_is_current {
             return Self::stale_control_api_connection_response();
         }

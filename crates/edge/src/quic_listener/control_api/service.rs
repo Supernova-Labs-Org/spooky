@@ -302,7 +302,7 @@ impl QUICListener {
         }
     }
 
-    fn stale_control_api_connection_response() -> Response<Full<Bytes>> {
+    pub(super) fn stale_control_api_connection_response() -> Response<Full<Bytes>> {
         Response::builder()
             .status(StatusCode::UNAUTHORIZED)
             .header("connection", "close")

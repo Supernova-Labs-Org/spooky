@@ -50,6 +50,12 @@ impl ControlApiPaths {
 
 pub(super) type ControlApiState = ControlApiServiceCtx;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ControlApiAuthorizationGeneration {
+    pub(super) runtime: Option<u64>,
+    pub(super) listener_tls: Option<u64>,
+}
+
 impl ControlApiServiceCtx {
     #[cfg(test)]
     pub(super) fn current_generation(

@@ -132,6 +132,10 @@ impl QUICListener {
         default_reason: &str,
     ) -> Result<ActivationResult, ControlApiActivationError> {
         let runtime_state = state.current_service_state();
+        let authorization_generation = req
+            .extensions()
+            .get::<super::super::state::ControlApiAuthorizationGeneration>()
+            .copied();
         let identity = req.extensions().get::<AdminIdentity>().cloned();
         let request_context = req.extensions().get::<ControlApiRequestContext>().cloned();
         let plan_request =
@@ -157,6 +161,16 @@ impl QUICListener {
                     );
                     ControlApiActivationError::Response(response)
                 })?;
+        let current_auth_generation = state.current_service_state().auth_policy_generation();
+        let authorization_is_current = authorization_generation.is_some_and(|expected| {
+            expected.runtime == current_auth_generation.0
+                && expected.listener_tls == current_auth_generation.1
+        });
+        if !authorization_is_current {
+            return Err(ControlApiActivationError::Response(Box::new(
+                Self::stale_control_api_connection_response(),
+            )));
+        }
         Self::perform_control_api_runtime_activation_from_plan_request(
             plan_request,
             state,

@@ -8,6 +8,10 @@ impl QUICListener {
         state: &crate::quic_listener::runtime_state::ControlApiServiceCtx,
     ) -> Response<Full<Bytes>> {
         let runtime_state = state.current_service_state();
+        let authorization_generation = req
+            .extensions()
+            .get::<super::super::state::ControlApiAuthorizationGeneration>()
+            .copied();
         let identity = req.extensions().get::<AdminIdentity>().cloned();
         let request_context = req.extensions().get::<ControlApiRequestContext>().cloned();
         let Some(runtime_bundle_handle) = runtime_state.runtime_bundle_handle().cloned() else {
@@ -34,6 +38,14 @@ impl QUICListener {
                     return *response;
                 }
             };
+        let current_auth_generation = state.current_service_state().auth_policy_generation();
+        let authorization_is_current = authorization_generation.is_some_and(|expected| {
+            expected.runtime == current_auth_generation.0
+                && expected.listener_tls == current_auth_generation.1
+        });
+        if !authorization_is_current {
+            return Self::stale_control_api_connection_response();
+        }
         let current_generation = runtime_bundle_handle.current_generation();
         Self::emit_control_api_audit_event(
             &runtime_state.security,

@@ -4049,8 +4049,12 @@ fn validate_control_api_reload_compatibility_rejects_invalid_admin_ca_file() {
     let mut next = current.clone();
     next.observability.control_api.enabled = true;
     next.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
-    next.observability.control_api.tls.client_auth.ca_file =
-        Some(dir.path().join("missing-admin-ca.pem").display().to_string());
+    next.observability.control_api.tls.client_auth.ca_file = Some(
+        dir.path()
+            .join("missing-admin-ca.pem")
+            .display()
+            .to_string(),
+    );
 
     let current_bundle = runtime_bundle_from_config("current.yaml", &current);
     let next_bundle = runtime_bundle_from_config("next.yaml", &next);
@@ -4082,8 +4086,12 @@ fn validate_metrics_reload_compatibility_rejects_invalid_admin_ca_file() {
     next.observability.metrics.enabled = true;
     next.observability.metrics.allow_non_loopback = true;
     next.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
-    next.observability.control_api.tls.client_auth.ca_file =
-        Some(dir.path().join("missing-admin-ca.pem").display().to_string());
+    next.observability.control_api.tls.client_auth.ca_file = Some(
+        dir.path()
+            .join("missing-admin-ca.pem")
+            .display()
+            .to_string(),
+    );
 
     let current_bundle = runtime_bundle_from_config("current.yaml", &current);
     let next_bundle = runtime_bundle_from_config("next.yaml", &next);

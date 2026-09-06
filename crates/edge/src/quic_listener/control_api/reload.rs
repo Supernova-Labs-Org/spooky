@@ -9,6 +9,7 @@ use self::{
     request_body::MAX_CONTROL_API_JSON_BODY_BYTES,
     rollback::rollback_result_status,
 };
+use super::security::ControlApiSecurityPolicy;
 use super::{
     admin_auth::ControlApiRoute,
     admin_identity::{AdminIdentity, ControlApiRequestContext},
@@ -398,6 +399,20 @@ impl QUICListener {
             )));
         }
 
+        let security = ControlApiSecurityPolicy::from_config(
+            next_control_api,
+            Arc::clone(&next.shared_state.shared_services().metrics),
+        );
+        if let Err(err) =
+            Self::build_control_api_server_tls_config(&listener_config, &security.client_auth)
+        {
+            return Some(TransitionRejection::resource_preflight_failed(
+                "control API TLS",
+                primary_listener_label,
+                err.to_string(),
+            ));
+        }
+
         let current_control_api = &current.runtime_config.observability.control_api;
         let bind_changed = !current_control_api.enabled
             || current_control_api.address != next_control_api.address
@@ -435,6 +450,28 @@ impl QUICListener {
                     "metrics endpoint",
                     bind,
                     err,
+                ));
+            }
+        }
+        if next_metrics.allow_non_loopback {
+            let Some(listener_config) = next.runtime_config.primary_listener_runtime_config()
+            else {
+                return Some(TransitionRejection::raw_resource_message(
+                    "runtime reload rejected: no effective listeners configured for metrics TLS",
+                ));
+            };
+            let security = ControlApiSecurityPolicy::from_config(
+                &next.runtime_config.observability.control_api,
+                Arc::clone(&next.shared_state.shared_services().metrics),
+            );
+            let label = Self::listener_label(&listener_config);
+            if let Err(err) =
+                Self::build_control_api_server_tls_config(&listener_config, &security.client_auth)
+            {
+                return Some(TransitionRejection::resource_preflight_failed(
+                    "metrics TLS",
+                    label,
+                    err.to_string(),
                 ));
             }
         }

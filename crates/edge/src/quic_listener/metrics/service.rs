@@ -72,6 +72,7 @@ impl QUICListener {
             Some(Arc::clone(&startup_state.metrics)),
             async move {
                 let mut listener_binding = initial_binding;
+                let mut tls_state = None;
 
                 loop {
                     let runtime_state = Self::current_metrics_endpoint_state(&service_ctx);
@@ -89,7 +90,7 @@ impl QUICListener {
                         continue;
                     }
 
-                    let tls_config = match service_ctx.current_tls_config() {
+                    let tls_config = match service_ctx.refresh_tls_state(&mut tls_state) {
                         Ok(config) => config,
                         Err(err) => {
                             error!("failed to refresh metrics endpoint TLS config: {}", err);

@@ -15,6 +15,12 @@ impl QUICListener {
             Ok(route) => route,
             Err(response) => return *response,
         };
+        let authorization_generation = state.current_service_state().auth_policy_generation();
+        req.extensions_mut()
+            .insert(super::state::ControlApiAuthorizationGeneration {
+                runtime: authorization_generation.0,
+                listener_tls: authorization_generation.1,
+            });
         let identity = req.extensions().get::<AdminIdentity>().cloned();
         let request_context = req.extensions().get::<ControlApiRequestContext>().cloned();
         let service_state = state.current_service_state();

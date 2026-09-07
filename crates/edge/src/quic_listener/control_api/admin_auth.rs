@@ -144,6 +144,16 @@ impl QUICListener {
         security: &ControlApiSecurityPolicy,
     ) -> AuthenticationOutcome {
         let request_ctx = req.extensions().get::<ControlApiRequestContext>().cloned();
+        if matches!(
+            security.client_auth.mode,
+            impulse_config::config::ControlApiClientAuthMode::Required
+        ) && request_ctx
+            .as_ref()
+            .and_then(|context| context.mtls_identity.as_ref())
+            .is_none()
+        {
+            return AuthenticationOutcome::Missing;
+        }
         let token_match = match req.headers().get(header::AUTHORIZATION) {
             Some(value) => {
                 let Ok(raw) = value.to_str() else {

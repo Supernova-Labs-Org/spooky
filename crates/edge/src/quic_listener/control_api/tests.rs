@@ -1405,6 +1405,98 @@ async fn control_api_gate_returns_canonical_unauthorized_payloads_per_route() {
 }
 
 #[tokio::test]
+async fn control_api_gate_rejects_bearer_only_request_when_mtls_required() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let mut startup = test_config(cert.clone(), key.clone());
+    startup.observability.control_api.enabled = true;
+    startup.observability.control_api.auth_token = Some("secret-token".to_string());
+    startup.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    startup.observability.control_api.tls.client_auth.ca_file = Some(cert.clone());
+    let state = control_api_state_with_runtime_bundle(&startup, &startup);
+    let runtime_path = state.current_paths().runtime_path;
+
+    let mut req = control_api_request(Method::GET, &runtime_path, Some("Bearer secret-token"));
+    attach_control_api_peer_addr(&mut req, "127.0.0.1:9443");
+
+    let response = QUICListener::gate_control_api_request_for(&mut req, &state)
+        .expect_err("bearer-only request must be rejected once mTLS is required");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = full_body_bytes(*response).await;
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("unauthorized payload");
+    assert_eq!(payload["reason"], "missing_authentication");
+}
+
+#[test]
+fn control_api_auth_policy_generation_changes_after_mtls_mode_reload() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let mut startup = test_config(cert.clone(), key.clone());
+    startup.observability.control_api.enabled = true;
+    startup.observability.control_api.auth_token = Some("secret-token".to_string());
+
+    let startup_bundle = runtime_bundle_from_config("startup.yaml", &startup);
+    let (state, runtime_handle) = runtime_bundle_control_api_state(startup_bundle);
+    let connect_time_generation = state.current_service_state().auth_policy_generation();
+
+    let mut reloaded = startup.clone();
+    reloaded.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    reloaded.observability.control_api.tls.client_auth.ca_file = Some(cert);
+    let mut reloaded_bundle = runtime_bundle_from_config("reloaded.yaml", &reloaded);
+    reloaded_bundle.generation = 1;
+    runtime_handle
+        .replace(reloaded_bundle)
+        .expect("replace runtime bundle");
+
+    let post_reload_generation = state.current_service_state().auth_policy_generation();
+    assert_ne!(
+        connect_time_generation, post_reload_generation,
+        "a connection that captured the pre-reload generation must observe drift after an mTLS policy change"
+    );
+}
+
+#[test]
+fn control_api_authorization_generation_detects_drift_during_delayed_body_collection() {
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let mut startup = test_config(cert.clone(), key.clone());
+    startup.observability.control_api.enabled = true;
+    startup.observability.control_api.auth_token = Some("operator-token".to_string());
+
+    let startup_bundle = runtime_bundle_from_config("startup.yaml", &startup);
+    let (state, runtime_handle) = runtime_bundle_control_api_state(startup_bundle);
+
+    // Captured immediately after the gate authenticates the request headers,
+    // before the JSON body (which may take arbitrarily long to arrive) is awaited.
+    let (runtime, listener_tls) = state.current_service_state().auth_policy_generation();
+    let authorization_generation = super::state::ControlApiAuthorizationGeneration {
+        runtime,
+        listener_tls,
+    };
+    assert!(
+        authorization_generation.is_current(state.current_service_state().auth_policy_generation())
+    );
+
+    // Simulates the token being revoked on another connection while this
+    // request's body is still being collected: the active generation changes.
+    let mut revoked = startup.clone();
+    revoked.observability.control_api.auth_token = Some("new-token-after-revocation".to_string());
+    let mut revoked_bundle = runtime_bundle_from_config("revoked.yaml", &revoked);
+    revoked_bundle.generation = 1;
+    runtime_handle
+        .replace(revoked_bundle)
+        .expect("replace runtime bundle");
+
+    // The body has now "arrived"; the handler re-checks the generation before
+    // committing the mutation and must observe that it is no longer current.
+    let current_at_mutation_time = state.current_service_state().auth_policy_generation();
+    assert!(
+        !authorization_generation.is_current(current_at_mutation_time),
+        "a delayed mutation must detect a security-policy change that happened during body collection"
+    );
+}
+
+#[tokio::test]
 async fn control_api_gate_returns_forbidden_for_under_scoped_identity() {
     let dir = tempdir().expect("tempdir");
     let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
@@ -4033,6 +4125,79 @@ fn validate_metrics_reload_compatibility_classifies_bind_conflict_as_preflight_f
     assert_eq!(
         rejection.field_path.as_deref(),
         Some(expected_field.as_str())
+    );
+    assert!(!rejection.requires_restart());
+    assert_structured_resource_preflight_message(&rejection);
+}
+
+#[test]
+fn validate_control_api_reload_compatibility_rejects_invalid_admin_ca_file() {
+    use crate::runtime::policy::TransitionRejectionKind;
+
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let current = test_config(cert.clone(), key.clone());
+
+    let mut next = current.clone();
+    next.observability.control_api.enabled = true;
+    next.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    next.observability.control_api.tls.client_auth.ca_file = Some(
+        dir.path()
+            .join("missing-admin-ca.pem")
+            .display()
+            .to_string(),
+    );
+
+    let current_bundle = runtime_bundle_from_config("current.yaml", &current);
+    let next_bundle = runtime_bundle_from_config("next.yaml", &next);
+
+    let rejection =
+        QUICListener::validate_control_api_reload_compatibility(&current_bundle, &next_bundle)
+            .expect("invalid admin CA file must reject at preflight");
+    assert_eq!(
+        rejection.kind,
+        TransitionRejectionKind::ResourcePreparationFailed
+    );
+    assert_eq!(
+        rejection.field_path.as_deref(),
+        Some("control API TLS '127.0.0.1:9889'")
+    );
+    assert!(!rejection.requires_restart());
+    assert_structured_resource_preflight_message(&rejection);
+}
+
+#[test]
+fn validate_metrics_reload_compatibility_rejects_invalid_admin_ca_file() {
+    use crate::runtime::policy::TransitionRejectionKind;
+
+    let dir = tempdir().expect("tempdir");
+    let (cert, key) = write_test_cert_for_name(dir.path(), "server", "api.example.com");
+    let current = test_config(cert.clone(), key.clone());
+
+    let mut next = current.clone();
+    next.observability.metrics.enabled = true;
+    next.observability.metrics.allow_non_loopback = true;
+    next.observability.control_api.tls.client_auth.mode = ControlApiClientAuthMode::Required;
+    next.observability.control_api.tls.client_auth.ca_file = Some(
+        dir.path()
+            .join("missing-admin-ca.pem")
+            .display()
+            .to_string(),
+    );
+
+    let current_bundle = runtime_bundle_from_config("current.yaml", &current);
+    let next_bundle = runtime_bundle_from_config("next.yaml", &next);
+
+    let rejection =
+        QUICListener::validate_metrics_reload_compatibility(&current_bundle, &next_bundle)
+            .expect("invalid admin CA file must reject metrics preflight");
+    assert_eq!(
+        rejection.kind,
+        TransitionRejectionKind::ResourcePreparationFailed
+    );
+    assert_eq!(
+        rejection.field_path.as_deref(),
+        Some("metrics TLS '127.0.0.1:9889'")
     );
     assert!(!rejection.requires_restart());
     assert_structured_resource_preflight_message(&rejection);

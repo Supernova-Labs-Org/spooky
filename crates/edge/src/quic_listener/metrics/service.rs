@@ -72,6 +72,7 @@ impl QUICListener {
             Some(Arc::clone(&startup_state.metrics)),
             async move {
                 let mut listener_binding = initial_binding;
+                let mut tls_state = None;
 
                 loop {
                     let runtime_state = Self::current_metrics_endpoint_state(&service_ctx);
@@ -89,7 +90,7 @@ impl QUICListener {
                         continue;
                     }
 
-                    let tls_config = match service_ctx.current_tls_config() {
+                    let tls_config = match service_ctx.refresh_tls_state(&mut tls_state) {
                         Ok(config) => config,
                         Err(err) => {
                             error!("failed to refresh metrics endpoint TLS config: {}", err);
@@ -166,10 +167,15 @@ impl QUICListener {
                         let _connection_guard = RuntimeConnectionSlotGuard::new(active_connections);
                         let io: TokioIo<Box<dyn MetricsIo + Send + Unpin>> =
                             if let Some(server_config) = tls_config {
-                                match TlsAcceptor::from(server_config).accept(stream).await {
-                                    Ok(stream) => TokioIo::new(Box::new(stream)),
-                                    Err(err) => {
+                                let accept = TlsAcceptor::from(server_config).accept(stream);
+                                match tokio::time::timeout(timeout, accept).await {
+                                    Ok(Ok(stream)) => TokioIo::new(Box::new(stream)),
+                                    Ok(Err(err)) => {
                                         debug!("Metrics endpoint mTLS handshake failed: {}", err);
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        debug!("Metrics endpoint mTLS handshake timed out");
                                         return;
                                     }
                                 }

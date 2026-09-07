@@ -50,6 +50,18 @@ impl ControlApiPaths {
 
 pub(super) type ControlApiState = ControlApiServiceCtx;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ControlApiAuthorizationGeneration {
+    pub(super) runtime: Option<u64>,
+    pub(super) listener_tls: Option<u64>,
+}
+
+impl ControlApiAuthorizationGeneration {
+    pub(super) fn is_current(&self, current: (Option<u64>, Option<u64>)) -> bool {
+        self.runtime == current.0 && self.listener_tls == current.1
+    }
+}
+
 impl ControlApiServiceCtx {
     #[cfg(test)]
     pub(super) fn current_generation(

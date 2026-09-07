@@ -2,262 +2,262 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/changelog/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/public-api-surface-inventory/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/references/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/release-maturity/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/roadmap/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/api/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/backend-lifecycle/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/bootstrap-vs-quic/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/components/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/edge-runtime/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/observability-contract/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/quota-policy-contract/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/request-lifecycle/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/runtime-generation/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/architecture/transport/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/concepts/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/concepts/security-model/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/configuration/defaults/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/configuration/examples/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/configuration/reference/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/configuration/tls/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/deployment/migration/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/deployment/production/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/deployment/validation/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/development/adding-features/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/development/benchmarking/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/development/codebase-map/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/development/invariants/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/development/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/development/testing-strategy/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/getting-started/docker/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/getting-started/installation/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/getting-started/minimum-production/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/getting-started/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/howto/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/howto/01-certificates/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/howto/02-configuration/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/howto/03-run/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/control-plane/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/deployment-patterns/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/distributed-quota/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/failure-modes/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/host-tuning/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/metrics-and-alerts/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/observability-bundle/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/production-readiness/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/reload-and-drain/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/runbook/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/secret-and-cert-rotation/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/operations/sizing-and-capacity/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/protocols/http3/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/protocols/quic/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/reference/control-api-reference/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/reference/feature-matrix/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/reference/limitations/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/reference/metrics-reference/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/reference/overview/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/reference/terminology/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/troubleshooting/common-issues/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/tutorials/quickstart/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/user-guide/basics/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
     <url>
          <loc>https://supernova-labs-org.github.io/impulse/user-guide/load-balancing/</loc>
-         <lastmod>2026-09-06</lastmod>
+         <lastmod>2026-09-07</lastmod>
     </url>
 </urlset>

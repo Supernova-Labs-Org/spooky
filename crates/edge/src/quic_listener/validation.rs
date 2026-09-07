@@ -1,5 +1,5 @@
 use super::*;
-use crate::routing::util::request_path_is_ambiguous;
+use crate::routing::util::{canonical_request_target, request_path_is_ambiguous};
 
 #[derive(Debug)]
 pub(super) struct RequestValidationResult {
@@ -455,6 +455,7 @@ fn validate_request_parts(
             false,
         ));
     }
+    let path = canonical_request_target(&path);
 
     if is_connect {
         if websocket_tunnel {
